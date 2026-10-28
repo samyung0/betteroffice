@@ -587,7 +587,13 @@
     "deleted": "נמחק",
     "acceptAll": "אישור הכול",
     "rejectAll": "דחיית הכול",
-    "inFieldsOnly": "השינויים האלה נמצאים בתוך שדות, כמו תוכן עניינים."
+    "inFieldsOnly": "השינויים האלה נמצאים בתוך שדות, כמו תוכן עניינים.",
+    "agent": "סוכן",
+    "previousChange": "השינוי הקודם",
+    "nextChange": "השינוי הבא",
+    "changeBy": "שינוי של {author}",
+    "changeCount": "{count, plural, one {שינוי אחד} other {# שינויים}}",
+    "acceptAllChanges": "אישור כל השינויים"
   },
   "contextMenu": {
     "ariaLabel": "תפריט פעולות AI",
@@ -636,6 +642,7 @@
   },
   "errors": {
     "loadingDocument": "טוען מסמך...",
+    "stillOpening": null,
     "noDocumentLoaded": "לא נטען מסמך",
     "failedToLoad": "טעינת המסמך נכשלה",
     "unableToParse": "לא ניתן לעבד את המסמך",
@@ -664,6 +671,7 @@
     "borderColor": "צבע מסגרת",
     "borderWidth": "עובי מסגרת",
     "unknownAction": "פעולה לא ידועה",
+    "viewGridlines": "הצג קווי רשת",
     "borders": {
       "all": "כל המסגרות",
       "outside": "מסגרות חיצוניות",

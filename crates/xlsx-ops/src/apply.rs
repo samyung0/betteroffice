@@ -5,14 +5,18 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
-use xlsx_model::{Cell, CellRange, CellRef, ColId, DefinedName, RowId, Sheet, SheetId, Workbook};
+use xlsx_model::workbook::{DEFINED_NAME_ENTRY_BYTES, MAX_DEFINED_NAME_BYTES, defined_names_bytes};
+use xlsx_model::{
+    Cell, CellRange, CellRef, ColId, ConditionalFormatRule, ConditionalFormatting, DefinedName,
+    DifferentialFormat, RowId, Sheet, SheetId, Workbook,
+};
 
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_charts, remap_defined_names, remap_formulas, remap_hyperlink_locations,
-    remap_hyperlink_range, rename_chart_refs, rename_defined_names, rename_hyperlink_location,
-    rename_sheet_references, strand_chart_refs,
+    remap_auto_filter, remap_charts, remap_defined_names, remap_formulas,
+    remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
+    rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -32,6 +36,11 @@ pub enum OpError {
     ChartFrameShifted { frame: String },
     NumFmtTableFull,
     InvalidStyle(String),
+    InvalidConditionalFormat(String),
+    InvalidAutoFilter(String),
+    ConditionalFormatNotFound(String),
+    InvalidDefinedName(String),
+    TooManyDefinedNames,
 }
 
 impl fmt::Display for OpError {
@@ -39,6 +48,7 @@ impl fmt::Display for OpError {
         match self {
             OpError::SheetNotFound(id) => write!(f, "sheet {} not found", id.0),
             OpError::NumFmtTableFull => write!(f, "number format table is full"),
+            OpError::TooManyDefinedNames => write!(f, "defined name table exceeded cap"),
             OpError::SheetIndexOutOfRange(i) => write!(f, "sheet index {i} out of range"),
             OpError::FormulaNotRewritable { sheet, cell } => write!(
                 f,
@@ -62,7 +72,15 @@ impl fmt::Display for OpError {
                 f,
                 "chart frame {frame} does not hold the chart part and anchor this op was recorded against; its drawing has changed"
             ),
-            OpError::InvalidStyle(message) => f.write_str(message),
+            OpError::InvalidStyle(message) | OpError::InvalidDefinedName(message) => {
+                f.write_str(message)
+            }
+            OpError::InvalidAutoFilter(message) | OpError::InvalidConditionalFormat(message) => {
+                f.write_str(message)
+            }
+            OpError::ConditionalFormatNotFound(id) => {
+                write!(f, "conditional format {id} not found")
+            }
         }
     }
 }
@@ -84,6 +102,7 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
 /// apply one op directly with no rollback clone; only for models the caller
 /// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    crate::conditional_formats::ensure_conditional_formats_allow_edit(wb, op)?;
     match op {
         Op::SetCell { sheet, at, cell } => {
             wb.styles.preserve_style_identity();
@@ -271,6 +290,236 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             Ok(InvertedOp(vec![Op::SetHyperlinks {
                 sheet: *sheet,
                 hyperlinks: old,
+            }]))
+        }
+        Op::SetHyperlink { sheet, hyperlink } => {
+            let mut hyperlink = hyperlink.clone();
+            hyperlink.range = CellRange {
+                start: CellRef::new(hyperlink.range.start.row, hyperlink.range.start.col),
+                end: CellRef::new(hyperlink.range.end.row, hyperlink.range.end.col),
+            };
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            let replaced = links
+                .iter()
+                .filter(|existing| existing.range.overlaps(&hyperlink.range))
+                .collect::<Vec<_>>();
+            if replaced.as_slice() == [&hyperlink] {
+                return Ok(InvertedOp(vec![]));
+            }
+            let exact = replaced.len() == 1 && replaced[0].range == hyperlink.range;
+            let old = links.clone();
+            if exact {
+                let index = links
+                    .iter()
+                    .position(|link| link.range == hyperlink.range)
+                    .unwrap();
+                links[index] = hyperlink;
+            } else {
+                links.retain(|existing| !existing.range.overlaps(&hyperlink.range));
+                links.push(hyperlink);
+            }
+            Ok(InvertedOp(vec![Op::SetHyperlinks {
+                sheet: *sheet,
+                hyperlinks: old,
+            }]))
+        }
+        Op::RemoveHyperlink { sheet, range } => {
+            let range = CellRange {
+                start: CellRef::new(range.start.row, range.start.col),
+                end: CellRef::new(range.end.row, range.end.col),
+            };
+            let links = &mut sheet_mut(wb, *sheet)?.hyperlinks;
+            if !links.iter().any(|link| link.range == range) {
+                return Ok(InvertedOp(vec![]));
+            }
+            let old = links.clone();
+            links.retain(|link| link.range != range);
+            Ok(InvertedOp(vec![Op::SetHyperlinks {
+                sheet: *sheet,
+                hyperlinks: old,
+            }]))
+        }
+        Op::AddConditionalFormat {
+            sheet,
+            range,
+            kind,
+            operator,
+            formulas,
+            format,
+        } => {
+            let formulas =
+                validate_conditional_format(kind, operator.as_deref(), formulas, format)?;
+            let s = sheet_mut(wb, *sheet)?;
+            if range.end.row >= MAX_ROWS || range.end.col >= MAX_COLS {
+                return Err(OpError::InvalidConditionalFormat(
+                    "conditional format range is outside the sheet grid".into(),
+                ));
+            }
+            let old = s.conditional_formats.clone();
+            let priority = old
+                .iter()
+                .flat_map(|group| &group.rules)
+                .map(|rule| rule.priority)
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    OpError::InvalidConditionalFormat("conditional format priority overflow".into())
+                })?;
+            let rule = ConditionalFormatRule {
+                id: next_conditional_format_id(&old),
+                rule_type: kind.clone(),
+                operator: operator.clone(),
+                formulas,
+                priority,
+                dxf_id: None,
+                format: format.clone(),
+                raw_xml: None,
+            };
+            let sqref = range.to_a1();
+            match s
+                .conditional_formats
+                .iter_mut()
+                .find(|group| group.sqref == sqref)
+            {
+                Some(group) => group.rules.push(rule),
+                None => s.conditional_formats.push(ConditionalFormatting {
+                    sqref,
+                    rules: vec![rule],
+                }),
+            }
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
+            }]))
+        }
+        Op::RemoveConditionalFormat { sheet, id } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let found = s
+                .conditional_formats
+                .iter()
+                .flat_map(|group| &group.rules)
+                .find(|rule| &rule.id == id);
+            match found {
+                None => return Err(OpError::ConditionalFormatNotFound(id.clone())),
+                Some(rule) if !rule.editable() => {
+                    return Err(OpError::InvalidConditionalFormat(format!(
+                        "conditional format {id} of type {} is not editable",
+                        rule.rule_type
+                    )));
+                }
+                _ => {}
+            }
+            let old = s.conditional_formats.clone();
+            for group in &mut s.conditional_formats {
+                group.rules.retain(|rule| &rule.id != id);
+            }
+            s.conditional_formats
+                .retain(|group| !group.rules.is_empty());
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
+            }]))
+        }
+        Op::SetAutoFilter { sheet, range } => {
+            let current = wb.sheet(*sheet).ok_or(OpError::SheetNotFound(*sheet))?;
+            let previous = current.auto_filter.clone();
+            if previous
+                .as_ref()
+                .is_some_and(|filter| filter.source_count > 1)
+            {
+                return Err(OpError::InvalidAutoFilter("This sheet has multiple autoFilter elements; repair the source before setting its filter.".into()));
+            }
+            if previous.is_none() && range.is_none() {
+                return Ok(InvertedOp(Vec::new()));
+            }
+            if let Some(range) = range {
+                if range.start.row > range.end.row
+                    || range.start.col > range.end.col
+                    || range.end.row >= MAX_ROWS
+                    || range.end.col >= MAX_COLS
+                {
+                    return Err(OpError::InvalidAutoFilter(
+                        "Use a valid worksheet range for the auto filter.".into(),
+                    ));
+                }
+                if let Some(filter) = &previous
+                    && ((range.start.col != filter.range.start.col
+                        && (!filter.filter_columns.is_empty() || filter.has_sort_state))
+                        || filter
+                            .filter_columns
+                            .iter()
+                            .any(|col| *col > range.end.col - range.start.col))
+                {
+                    return Err(OpError::InvalidAutoFilter("Keep the filter's first column and include all filtered columns, or remove the filter before creating a new range.".into()));
+                }
+                if wb
+                    .tables
+                    .iter()
+                    .any(|table| table.sheet == *sheet && range.overlaps(&table.range))
+                {
+                    return Err(OpError::InvalidAutoFilter("The auto filter range overlaps a table. Choose a range outside tables; table filters belong to the table part.".into()));
+                }
+            }
+            let name_op = match range {
+                Some(range) => {
+                    let absolute = |at: CellRef| {
+                        let mut at = at;
+                        at.abs_row = true;
+                        at.abs_col = true;
+                        at.to_a1()
+                    };
+                    Op::SetDefinedName {
+                        name: "_xlnm._FilterDatabase".into(),
+                        refers_to: format!(
+                            "'{}'!{}:{}",
+                            current.name.replace('\'', "''"),
+                            absolute(range.start),
+                            absolute(range.end)
+                        ),
+                        scope: Some(*sheet),
+                        hidden: Some(true),
+                    }
+                }
+                None => Op::DeleteDefinedName {
+                    name: "_xlnm._FilterDatabase".into(),
+                    scope: Some(*sheet),
+                },
+            };
+            let names_inverse = apply_in_place(wb, &name_op)?;
+            let filter = range.map(|range| {
+                let mut filter = previous.clone().unwrap_or(xlsx_model::AutoFilter {
+                    range,
+                    raw_xml: None,
+                    source_count: 1,
+                    filter_columns: Vec::new(),
+                    has_sort_state: false,
+                });
+                filter.range = range;
+                filter
+            });
+            sheet_mut(wb, *sheet)?.auto_filter = filter;
+            let mut inverse = vec![Op::RestoreAutoFilter {
+                sheet: *sheet,
+                filter: previous,
+            }];
+            inverse.extend(names_inverse.0);
+            Ok(InvertedOp(inverse))
+        }
+        Op::RestoreAutoFilter { sheet, filter } => {
+            let previous =
+                std::mem::replace(&mut sheet_mut(wb, *sheet)?.auto_filter, filter.clone());
+            Ok(InvertedOp(vec![Op::RestoreAutoFilter {
+                sheet: *sheet,
+                filter: previous,
+            }]))
+        }
+        Op::SetConditionalFormats { sheet, formats } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.conditional_formats, formats.clone());
+            Ok(InvertedOp(vec![Op::SetConditionalFormats {
+                sheet: *sheet,
+                formats: old,
             }]))
         }
         Op::RestoreColStyles { sheet, styles } => {
@@ -462,9 +711,10 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 .ok_or(OpError::SheetNotFound(*sheet))?
                 .name
                 .clone();
+            let renamed_names = rename_defined_names(wb, &old, name)?;
             let formulas = rename_sheet_references(wb, &old, name)?;
             let hyperlinks = rename_hyperlink_locations(wb, &old, name);
-            let defined_names = rename_defined_names(wb, &old, name);
+            let defined_names = renamed_names.map(|names| replace_defined_names(wb, names));
             let charts = rename_chart_refs(wb, &old, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             let mut inverse = vec![Op::RestoreSheet {
@@ -498,7 +748,8 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                     .unwrap_or_default();
                 old_formulas.push((*formula_sheet, *cell, state));
             }
-            let defined_names = rename_defined_names(wb, &old_name, name);
+            // names are left as they are: the rename's inverse restores its
+            // saved table, and rewriting it here could pass the byte bound
             let charts = rename_chart_refs(wb, &old_name, name);
             sheet_mut(wb, *sheet)?.name = name.clone();
             for (formula_sheet, cell, state) in formulas {
@@ -509,20 +760,170 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 name: old_name,
                 formulas: old_formulas,
             }];
-            inverse.extend(defined_names);
             inverse.extend(charts);
             Ok(InvertedOp(inverse))
         }
-        Op::SetDefinedNames { defined_names } => {
-            let previous = std::mem::replace(&mut wb.defined_names, defined_names.clone());
+        Op::SetDefinedName {
+            name,
+            refers_to,
+            scope,
+            hidden,
+        } => {
+            let existing = defined_name_index(wb, name, *scope)?;
+            let grown = match existing {
+                Some(index) => refers_to
+                    .len()
+                    .saturating_sub(wb.defined_names[index].formula.len()),
+                None => DEFINED_NAME_ENTRY_BYTES
+                    .saturating_add(name.len())
+                    .saturating_add(refers_to.len()),
+            };
+            if grown > 0
+                && defined_names_bytes(&wb.defined_names).saturating_add(grown)
+                    > MAX_DEFINED_NAME_BYTES
+            {
+                return Err(OpError::TooManyDefinedNames);
+            }
+            if existing.is_none_or(|index| {
+                let defined = &wb.defined_names[index];
+                defined.formula != *refers_to
+                    || hidden.is_some_and(|hidden| hidden != defined.hidden)
+            }) {
+                validate_defined_name(wb, name, *scope, existing.is_none())?;
+            }
+            if existing.is_none_or(|index| wb.defined_names[index].formula != *refers_to) {
+                validate_defined_name_formula(refers_to)?;
+            }
+            let previous = wb.defined_names.clone();
+            if let Some(index) = existing {
+                let defined = &mut wb.defined_names[index];
+                defined.formula = refers_to.clone();
+                if let Some(hidden) = hidden {
+                    defined.hidden = *hidden;
+                }
+            } else {
+                wb.defined_names.push(DefinedName {
+                    name: name.clone(),
+                    formula: refers_to.clone(),
+                    local_sheet: *scope,
+                    hidden: hidden.unwrap_or(false),
+                });
+            }
             Ok(InvertedOp(vec![Op::SetDefinedNames {
                 defined_names: previous,
             }]))
+        }
+        Op::DeleteDefinedName { name, scope } => {
+            let existing = defined_name_index(wb, name, *scope)?;
+            let previous = wb.defined_names.clone();
+            if let Some(index) = existing {
+                wb.defined_names.remove(index);
+            }
+            Ok(InvertedOp(vec![Op::SetDefinedNames {
+                defined_names: previous,
+            }]))
+        }
+        Op::SetDefinedNames { defined_names } => {
+            if defined_names_bytes(defined_names) > MAX_DEFINED_NAME_BYTES {
+                return Err(OpError::TooManyDefinedNames);
+            }
+            Ok(InvertedOp(vec![replace_defined_names(
+                wb,
+                defined_names.clone(),
+            )]))
         }
         Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
         Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
         Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
         Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
+    }
+}
+
+fn defined_name_index(
+    wb: &Workbook,
+    name: &str,
+    scope: Option<SheetId>,
+) -> Result<Option<usize>, OpError> {
+    if let Some(sheet) = scope {
+        wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+    }
+    let mut matches = wb.defined_names.iter().enumerate().filter(|(_, defined)| {
+        defined.local_sheet == scope && defined.name.eq_ignore_ascii_case(name)
+    });
+    let index = matches.next().map(|(index, _)| index);
+    if matches.next().is_some() {
+        return Err(OpError::InvalidDefinedName(
+            "ambiguous defined name in this scope".into(),
+        ));
+    }
+    Ok(index)
+}
+
+fn validate_defined_name(
+    wb: &Workbook,
+    name: &str,
+    scope: Option<SheetId>,
+    creating: bool,
+) -> Result<(), OpError> {
+    let invalid = || OpError::InvalidDefinedName("invalid or reserved defined name".into());
+    let mut chars = name.chars();
+    if name.encode_utf16().count() > 255
+        || !chars
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\\')
+        || !chars.all(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_' || c == '.')
+    {
+        return Err(invalid());
+    }
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = upper
+        .strip_prefix('R')
+        .and_then(|rest| rest.split_once('C'))
+        .is_some_and(|(row, col)| {
+            row.bytes().all(|b| b.is_ascii_digit()) && col.bytes().all(|b| b.is_ascii_digit())
+        });
+    if upper == "R" || upper == "C" || CellRef::parse_a1(&upper).is_ok() || r1c1 {
+        return Err(invalid());
+    }
+    if creating
+        && upper.starts_with("_XLNM.")
+        && !(scope.is_some()
+            && matches!(
+                upper.as_str(),
+                "_XLNM.PRINT_AREA" | "_XLNM.PRINT_TITLES" | "_XLNM._FILTERDATABASE"
+            ))
+    {
+        return Err(invalid());
+    }
+    if wb
+        .tables
+        .iter()
+        .any(|table| table.name.eq_ignore_ascii_case(name))
+    {
+        return Err(OpError::InvalidDefinedName(
+            "defined name conflicts with a table name".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_defined_name_formula(source: &str) -> Result<(), OpError> {
+    if source.is_empty() || source.starts_with('=')
+        || source.len() > xlsx_calc::lexer::MAX_FORMULA_BYTES
+        || !source.chars().all(|c| matches!(c, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'))
+    {
+        return Err(OpError::InvalidDefinedName("invalid defined name formula".into()));
+    }
+    xlsx_calc::parse_formula(source)
+        .map(|_| ())
+        .map_err(|error| {
+            OpError::InvalidDefinedName(format!("invalid defined name formula: {error}"))
+        })
+}
+
+fn replace_defined_names(wb: &mut Workbook, defined_names: Vec<DefinedName>) -> Op {
+    Op::SetDefinedNames {
+        defined_names: std::mem::replace(&mut wb.defined_names, defined_names),
     }
 }
 
@@ -863,6 +1264,7 @@ fn insert_rows(
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
+    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
     if !old_row_styles.is_empty() {
@@ -882,6 +1284,7 @@ fn insert_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -915,6 +1318,7 @@ fn delete_rows(
         .collect::<BTreeMap<_, _>>();
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
+    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = Vec::new();
     if !old_row_styles.is_empty() {
@@ -954,6 +1358,7 @@ fn delete_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -981,6 +1386,7 @@ fn insert_cols(
     shift_col_styles_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
+    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
     if !old_col_styles.is_empty() {
@@ -1000,6 +1406,7 @@ fn insert_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1030,6 +1437,7 @@ fn delete_cols(
     shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
+    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
     if !old_col_styles.is_empty() {
@@ -1060,6 +1468,7 @@ fn delete_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
+    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1291,6 +1700,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
             pane: Some(pane),
         });
     }
+    if removed.auto_filter.is_some() {
+        inv.push(Op::RestoreAutoFilter {
+            sheet,
+            filter: removed.auto_filter,
+        });
+    }
     if !removed.hyperlinks.is_empty() {
         inv.push(Op::SetHyperlinks {
             sheet,
@@ -1363,6 +1778,84 @@ fn drop_defined_name_scopes(wb: &mut Workbook, index: usize) -> Option<Vec<Defin
     (previous != wb.defined_names).then_some(previous)
 }
 
+const CELL_IS_OPERATORS: &[&str] = &[
+    "equal",
+    "notEqual",
+    "greaterThan",
+    "lessThan",
+    "greaterThanOrEqual",
+    "lessThanOrEqual",
+    "between",
+    "notBetween",
+];
+
+fn validate_conditional_format(
+    kind: &str,
+    operator: Option<&str>,
+    formulas: &[String],
+    format: &DifferentialFormat,
+) -> Result<Vec<String>, OpError> {
+    let invalid = |message: &str| OpError::InvalidConditionalFormat(message.into());
+    let expected = match kind {
+        "expression" => {
+            if operator.is_some() {
+                return Err(invalid("expression rules take no operator"));
+            }
+            1
+        }
+        "cellIs" => match operator {
+            Some(operator) if CELL_IS_OPERATORS.contains(&operator) => {
+                if matches!(operator, "between" | "notBetween") {
+                    2
+                } else {
+                    1
+                }
+            }
+            Some(_) => return Err(invalid("unsupported cellIs operator")),
+            None => return Err(invalid("cellIs rules require an operator")),
+        },
+        _ => return Err(invalid("only cellIs and expression rules can be authored")),
+    };
+    if formulas.len() != expected {
+        return Err(invalid("wrong number of formulas for this rule"));
+    }
+    let mut cleaned = Vec::with_capacity(formulas.len());
+    for formula in formulas {
+        let valid_xml = formula.chars().all(|ch| {
+            matches!(ch, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+        });
+        if !valid_xml {
+            return Err(invalid("formulas contain XML 1.0 forbidden characters"));
+        }
+        let formula = formula.strip_prefix('=').unwrap_or(formula).trim();
+        if formula.is_empty() || formula.len() > 8192 {
+            return Err(invalid("formulas must be 1 to 8192 characters"));
+        }
+        cleaned.push(formula.to_owned());
+    }
+    for color in [&format.font_color, &format.fill].into_iter().flatten() {
+        let hex = color.strip_prefix('#').unwrap_or("");
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid("colors must be in #RRGGBB format"));
+        }
+    }
+    Ok(cleaned)
+}
+
+fn next_conditional_format_id(groups: &[ConditionalFormatting]) -> String {
+    let mut next = 0u64;
+    for rule in groups.iter().flat_map(|group| &group.rules) {
+        if let Some(n) = rule
+            .id
+            .strip_prefix("cf")
+            .and_then(|rest| rest.parse::<u64>().ok())
+        {
+            next = next.max(n);
+        }
+    }
+    format!("cf{}", next + 1)
+}
+
 fn sheet_mut(wb: &mut Workbook, sheet: SheetId) -> Result<&mut Sheet, OpError> {
     wb.sheet_mut(sheet).ok_or(OpError::SheetNotFound(sheet))
 }
@@ -1387,6 +1880,100 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
         wb
+    }
+
+    fn add_cf(formula: &str) -> Op {
+        Op::AddConditionalFormat {
+            sheet: SheetId(0),
+            range: CellRange::parse_a1("A1:A5").unwrap(),
+            kind: "expression".into(),
+            operator: None,
+            formulas: vec![formula.into()],
+            format: DifferentialFormat::default(),
+        }
+    }
+
+    #[test]
+    fn authored_conditional_formats_refuse_grid_edits_atomically() {
+        for op in [
+            Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        ] {
+            let mut wb = wb_one_sheet();
+            let before = wb.clone();
+            assert!(matches!(
+                apply_ops(&mut wb, &[add_cf("A1>0"), op.clone()]),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
+            assert_eq!(wb, before);
+            apply(&mut wb, &add_cf("A1>0")).unwrap();
+            let before = wb.clone();
+            assert!(matches!(
+                apply(&mut wb, &op),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
+            assert_eq!(wb, before);
+        }
+    }
+
+    #[test]
+    fn authored_conditional_formats_allow_grid_edits_on_other_sheets() {
+        let mut wb = wb_one_sheet();
+        wb.sheets.push(Sheet::new("Other"));
+        apply(&mut wb, &add_cf("A1>0")).unwrap();
+        let formats = wb.sheets[0].conditional_formats.clone();
+        apply(
+            &mut wb,
+            &Op::InsertRows {
+                sheet: SheetId(1),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].conditional_formats, formats);
+    }
+
+    #[test]
+    fn conditional_format_formulas_refuse_xml_forbidden_characters_atomically() {
+        for ch in (0..=0x1f)
+            .filter(|ch| !matches!(ch, 9 | 10 | 13))
+            .chain([0xfffe, 0xffff])
+        {
+            let mut wb = wb_one_sheet();
+            let before = wb.clone();
+            let formula = format!("{}A1>0", char::from_u32(ch).unwrap());
+            assert!(matches!(
+                apply(&mut wb, &add_cf(&formula)),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
+            assert_eq!(wb, before);
+            assert!(matches!(
+                apply_ops(&mut wb, &[add_cf("A1>0"), add_cf(&formula)]),
+                Err(OpError::InvalidConditionalFormat(_))
+            ));
+            assert_eq!(wb, before);
+        }
+        let mut wb = wb_one_sheet();
+        apply(&mut wb, &add_cf("\t=\"é😀\"<>\"\"\n")).unwrap();
     }
 
     #[test]
@@ -1745,6 +2332,33 @@ mod tests {
             CellValue::Text { value: "x".into() }
         );
         assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A3:B3");
+    }
+
+    #[test]
+    fn remove_hyperlink_removes_all_duplicates_and_undo_restores_their_order() {
+        let mut wb = wb_one_sheet();
+        let link = |address: &str| Hyperlink {
+            range: CellRange::parse_a1(address).unwrap(),
+            external_target: None,
+            location: Some("Data!D1".into()),
+            tooltip: None,
+            display: None,
+        };
+        wb.sheets[0].hyperlinks = vec![link("A1"), link("D4"), link("A1")];
+        let before = wb.clone();
+        let inverse = apply_in_place(
+            &mut wb,
+            &Op::RemoveHyperlink {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("$A$1").unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(wb.sheets[0].hyperlinks, vec![link("D4")]);
+        for op in inverse.0 {
+            apply_in_place(&mut wb, &op).unwrap();
+        }
+        assert_eq!(wb, before);
     }
 
     #[test]
@@ -2421,6 +3035,7 @@ mod tests {
         };
         let mut wb = wb_one_sheet();
         wb.sheets[0].charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".into(),
             drawing: "xl/drawings/drawing1.xml".into(),
             anchor_index: 0,

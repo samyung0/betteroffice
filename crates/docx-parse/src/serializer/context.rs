@@ -1,6 +1,6 @@
 //! Deterministic recursive serializer state.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::paragraph::HexIdAllocator;
 use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
@@ -21,6 +21,7 @@ pub struct SerializerContext {
     /// Comments whose reference mark is written, so none is generated for them.
     references: HashSet<u64>,
     warnings: Vec<String>,
+    paragraph_replace_counts: BTreeMap<String, u32>,
     paragraph_ids: BTreeSet<u32>,
     splice: Option<SpliceRecorder>,
 }
@@ -43,6 +44,10 @@ pub(crate) struct RecordedParagraphs {
     /// Every recorded paragraph in writing order: its `sourceOrdinal`, or `None` for the next
     /// of `inserted`.
     pub(crate) order: Vec<Option<u32>>,
+    /// Whether one source paragraph was written twice differently, or one with a
+    /// `sourceOrdinal` the part does not address was written; only the first is recorded.
+    pub(crate) conflict: bool,
+    pub(crate) token_prefix: Option<String>,
     /// The empty paragraph written for each table cell without content, as the number of
     /// `order` entries written before it.
     pub(crate) placeholders: Vec<usize>,
@@ -59,6 +64,7 @@ impl SerializerContext {
             comments: None,
             references: HashSet::new(),
             warnings: Vec::new(),
+            paragraph_replace_counts: BTreeMap::new(),
             paragraph_ids: BTreeSet::new(),
             splice: None,
         })
@@ -102,8 +108,22 @@ impl SerializerContext {
         self.warnings.push(warning.into());
     }
 
+    pub(crate) fn count_paragraph_replace(&mut self, reason: &str) {
+        *self
+            .paragraph_replace_counts
+            .entry(reason.to_owned())
+            .or_default() += 1;
+    }
+
     /// Drains the diagnostics recorded so far.
     pub fn take_warnings(&mut self) -> Vec<String> {
+        if !self.paragraph_replace_counts.is_empty() {
+            let counts = std::mem::take(&mut self.paragraph_replace_counts);
+            self.warn(format!(
+                "DOCX_MINIMAL_PATCH replace counts {}",
+                serde_json::to_string(&counts).expect("string keys and integer counts")
+            ));
+        }
         std::mem::take(&mut self.warnings)
     }
 
@@ -135,48 +155,58 @@ impl SerializerContext {
     }
 
     /// Records the XML written for the model paragraphs whose `sourceOrdinal` is in `expected`
-    /// until [`Self::end_splice`].
-    pub(crate) fn begin_splice(&mut self, expected: impl IntoIterator<Item = u32>) {
+    /// until [`Self::end_splice`], with tokens when `token_prefix` is supplied.
+    pub(crate) fn begin_splice(
+        &mut self,
+        expected: impl IntoIterator<Item = u32>,
+        token_prefix: Option<String>,
+    ) {
         self.splice = Some(SpliceRecorder {
             expected: expected.into_iter().collect(),
+            recorded: RecordedParagraphs {
+                token_prefix,
+                ..RecordedParagraphs::default()
+            },
             ..SpliceRecorder::default()
         });
     }
 
-    /// The recorded paragraphs; `None` when one source paragraph was written twice differently,
-    /// or one with a `sourceOrdinal` the part does not address was written.
+    /// The recorded paragraphs.
     pub(crate) fn end_splice(&mut self) -> Option<RecordedParagraphs> {
-        self.splice
-            .take()
-            .filter(|recorder| !recorder.conflict)
-            .map(|recorder| recorder.recorded)
+        self.splice.take().map(|recorder| RecordedParagraphs {
+            conflict: recorder.conflict,
+            ..recorder.recorded
+        })
     }
 
     /// Records a paragraph written outside any other paragraph: by its `sourceOrdinal`, which
-    /// must be one the part addresses, or as a paragraph the source lacks.
-    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) {
+    /// must be one the part addresses, or as a paragraph the source lacks. The token to write
+    /// before it, if any.
+    pub(crate) fn record_paragraph(&mut self, ordinal: Option<u32>, xml: &str) -> Option<String> {
         if !self.rendered_page_breaks.is_empty() {
-            return;
+            return None;
         }
-        let Some(recorder) = self.splice.as_mut() else {
-            return;
-        };
+        let recorder = self.splice.as_mut()?;
         let recorded = &mut recorder.recorded;
         match ordinal {
             None => recorded.inserted.push(xml.to_owned()),
             Some(ordinal) if recorder.expected.contains(&ordinal) => {
                 if let Some(previous) = recorded.written.get(&ordinal) {
                     recorder.conflict |= previous != xml;
-                    return;
+                    return None;
                 }
                 recorded.written.insert(ordinal, xml.to_owned());
             }
             Some(_) => {
                 recorder.conflict = true;
-                return;
+                return None;
             }
         }
         recorded.order.push(ordinal);
+        recorded
+            .token_prefix
+            .as_deref()
+            .map(|prefix| super::permissions::token(prefix, recorded.order.len() - 1))
     }
 
     /// Records the empty paragraph written outside any other paragraph for a table cell

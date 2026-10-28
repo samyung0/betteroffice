@@ -587,7 +587,13 @@
     "deleted": "Excluído",
     "acceptAll": "Aceitar tudo",
     "rejectAll": "Rejeitar tudo",
-    "inFieldsOnly": "Estas alterações estão dentro de campos, como um sumário."
+    "inFieldsOnly": "Estas alterações estão dentro de campos, como um sumário.",
+    "agent": "agente",
+    "previousChange": "Alteração anterior",
+    "nextChange": "Próxima alteração",
+    "changeBy": "Alteração de {author}",
+    "changeCount": "{count, plural, one {# alteração} other {# alterações}}",
+    "acceptAllChanges": "Aceitar todas as alterações"
   },
   "contextMenu": {
     "ariaLabel": "Menu de ações de IA",
@@ -636,6 +642,7 @@
   },
   "errors": {
     "loadingDocument": "Carregando documento...",
+    "stillOpening": null,
     "noDocumentLoaded": "Nenhum documento carregado",
     "failedToLoad": "Falha ao carregar documento",
     "unableToParse": "Não foi possível analisar o documento",
@@ -664,6 +671,7 @@
     "borderColor": "Cor da borda",
     "borderWidth": "Largura da borda",
     "unknownAction": "Ação desconhecida",
+    "viewGridlines": "Exibir linhas de grade",
     "borders": {
       "all": "Todas as bordas",
       "outside": "Bordas externas",

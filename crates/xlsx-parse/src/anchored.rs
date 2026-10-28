@@ -96,7 +96,7 @@ fn move_refs(
         match (axes.rows.current(cell.row), axes.cols.current(cell.col)) {
             (Some(row), Some(col)) if (row, col) == (cell.row, cell.col) => {}
             (Some(row), Some(col)) => {
-                let tag = source.text(element.start_tag());
+                let tag = source.span_text(element.start_tag());
                 if let Some(tag) = with_attribute(tag, "ref", &CellRef::new(row, col).to_a1()) {
                     edits.push((element.start_tag(), Replacement::Markup(tag)));
                 }
@@ -200,7 +200,7 @@ pub(crate) fn move_protected_ranges(
         }
         kept += 1;
         if moved != sqref
-            && let Some(tag) = with_attribute(source.text(range.start_tag()), "sqref", &moved)
+            && let Some(tag) = with_attribute(source.span_text(range.start_tag()), "sqref", &moved)
         {
             edits.push((range.start_tag(), Replacement::Markup(tag)));
         }

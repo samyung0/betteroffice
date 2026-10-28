@@ -133,11 +133,32 @@
     "appLabel": "演示文稿幻灯片编辑器",
     "opening": "正在打开演示文稿…",
     "noSlides": "没有幻灯片",
-    "openPrompt": "打开 PPTX 文件"
+    "openPrompt": "打开 PPTX 文件",
+    "textInput": null,
+    "selectionAnnouncement": null,
+    "openError": null,
+    "openErrorDescription": null,
+    "stoppedError": null,
+    "stoppedErrorDescription": null,
+    "loadError": null,
+    "loadErrorDescription": null,
+    "reloadPage": null,
+    "showDetails": null
   },
   "objects": {
     "defaultTextBoxName": "文本框",
-    "defaultPictureName": "图片"
+    "defaultPictureName": "图片",
+    "insertPicture": null,
+    "resize": {
+      "nw": null,
+      "n": null,
+      "ne": null,
+      "e": null,
+      "se": null,
+      "s": null,
+      "sw": null,
+      "w": null
+    }
   },
   "presentation": {
     "label": "幻灯片放映",
@@ -209,5 +230,8 @@
     "previousPosition": "之前",
     "proposedPosition": "提议",
     "loadingDiff": "正在加载更改…"
+  },
+  "presence": {
+    "label": null
   }
 }

@@ -133,11 +133,32 @@
     "appLabel": null,
     "opening": null,
     "noSlides": null,
-    "openPrompt": null
+    "openPrompt": null,
+    "textInput": null,
+    "selectionAnnouncement": null,
+    "openError": null,
+    "openErrorDescription": null,
+    "stoppedError": null,
+    "stoppedErrorDescription": null,
+    "loadError": null,
+    "loadErrorDescription": null,
+    "reloadPage": null,
+    "showDetails": null
   },
   "objects": {
     "defaultTextBoxName": null,
-    "defaultPictureName": null
+    "defaultPictureName": null,
+    "insertPicture": null,
+    "resize": {
+      "nw": null,
+      "n": null,
+      "ne": null,
+      "e": null,
+      "se": null,
+      "s": null,
+      "sw": null,
+      "w": null
+    }
   },
   "presentation": {
     "label": "स्लाइड प्रस्तुति",
@@ -209,5 +230,8 @@
     "previousPosition": "पिछला",
     "proposedPosition": "प्रस्तावित",
     "loadingDiff": "बदलाव लोड हो रहे हैं…"
+  },
+  "presence": {
+    "label": null
   }
 }

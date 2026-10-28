@@ -593,7 +593,13 @@
     "deleted": "删除",
     "acceptAll": "全部接受",
     "rejectAll": "全部拒绝",
-    "inFieldsOnly": "这些修订位于域中，例如目录。"
+    "inFieldsOnly": "这些修订位于域中，例如目录。",
+    "agent": "智能体",
+    "previousChange": "上一处修订",
+    "nextChange": "下一处修订",
+    "changeBy": "{author} 的修订",
+    "changeCount": "{count, plural, other {# 处修订}}",
+    "acceptAllChanges": "接受所有修订"
   },
   "contextMenu": {
     "ariaLabel": "AI 操作菜单",
@@ -642,6 +648,7 @@
   },
   "errors": {
     "loadingDocument": "正在加载文档...",
+    "stillOpening": null,
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
     "unableToParse": "无法解析文档",
@@ -702,7 +709,8 @@
       "gridTable4Accent5": "网格表 4 强调色 5",
       "gridTable4Accent6": "网格表 4 强调色 6"
     },
-    "selectTable": "选择整个表格"
+    "selectTable": "选择整个表格",
+    "viewGridlines": "查看网格线"
   },
   "tableAdvanced": {
     "verticalAlignment": "垂直对齐",

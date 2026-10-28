@@ -1037,6 +1037,11 @@ fn translate_op(op: PlotOp, chart_clip: Rect, end_aligned: bool) -> Result<Optio
                 number_format: None,
                 ghost: false,
                 chart: true,
+                rotation_deg: None,
+                rotation_box: None,
+                rotation_valign: None,
+                stacked: false,
+                wrap: None,
             }))
         }
         PlotOp::Line {
@@ -1320,6 +1325,7 @@ mod tests {
         };
         for index in 0..2 {
             sheet.charts.push(SheetChart {
+                raw_xml: None,
                 part: format!("xl/charts/chart{}.xml", index + 1),
                 drawing: "xl/drawings/drawing1.xml".into(),
                 anchor_index: index,
@@ -1424,6 +1430,7 @@ mod tests {
     fn a_placeholder_cannot_outrun_the_op_budget() {
         let mut sheet = Sheet::new("Sheet1");
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".into(),
             drawing: "xl/drawings/drawing1.xml".into(),
             anchor_index: 0,
@@ -1475,6 +1482,7 @@ mod tests {
     fn charted_sheet(anchor: ChartAnchor) -> Sheet {
         let mut sheet = Sheet::new("Sheet1");
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: "xl/charts/chart1.xml".into(),
             drawing: "xl/drawings/drawing1.xml".into(),
             anchor_index: 0,
@@ -2735,6 +2743,7 @@ mod tests {
             extent,
         });
         sheet.charts.push(SheetChart {
+            raw_xml: None,
             part: sheet.charts[0].part.clone(),
             drawing: sheet.charts[0].drawing.clone(),
             anchor_index: 1,

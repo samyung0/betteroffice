@@ -221,6 +221,8 @@ export interface OpaqueDrawingContent {
   /** A phonetic guide's base text, shown in its place. */
   text?: string;
   preview?: Image;
+  previews?: Image[];
+  textBox?: Shape;
 }
 
 /**

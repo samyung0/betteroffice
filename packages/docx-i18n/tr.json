@@ -587,7 +587,13 @@
     "deleted": "Silindi",
     "acceptAll": "Tümünü kabul et",
     "rejectAll": "Tümünü reddet",
-    "inFieldsOnly": "Bu değişiklikler içindekiler tablosu gibi alanların içinde."
+    "inFieldsOnly": "Bu değişiklikler içindekiler tablosu gibi alanların içinde.",
+    "agent": "ajan",
+    "previousChange": "Önceki değişiklik",
+    "nextChange": "Sonraki değişiklik",
+    "changeBy": "{author} tarafından değişiklik",
+    "changeCount": "{count, plural, one {# değişiklik} other {# değişiklik}}",
+    "acceptAllChanges": "Tüm değişiklikleri kabul et"
   },
   "contextMenu": {
     "ariaLabel": "Yapay zekâ işlemleri menüsü",
@@ -639,6 +645,7 @@
   },
   "errors": {
     "loadingDocument": "Belge yükleniyor...",
+    "stillOpening": null,
     "noDocumentLoaded": "Yüklü belge yok",
     "failedToLoad": "Belge yüklenemedi",
     "unableToParse": "Belge ayrıştırılamadı",
@@ -667,6 +674,7 @@
     "borderColor": "Kenarlık rengi",
     "borderWidth": "Kenarlık kalınlığı",
     "unknownAction": "Bilinmeyen işlem",
+    "viewGridlines": "Kılavuz çizgilerini göster",
     "borders": {
       "all": "Tüm kenarlıklar",
       "outside": "Dış kenarlıklar",

@@ -234,12 +234,25 @@ impl StoryParser<'_, '_> {
                 break;
             }
             read += 1;
+            ooxml_opc::progress::tick();
             if let Some(cut) = &mut legacy_cut {
                 cut.read_child(&child.name);
             }
             let paragraphs_before = self.budget.paragraph_count();
             if !typed_block(child) {
-                if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
+                let raw = if is_body_bookmark(parent, child) {
+                    Some(crate::inline::RawInlineXml {
+                        node_type: crate::inline::RawInlineXmlType::RawXml,
+                        xml: child
+                            .bookmark_xml
+                            .clone()
+                            .unwrap_or_else(|| child.to_raw_inline_xml()),
+                        source_ordinal: None,
+                    })
+                } else {
+                    crate::inline::raw_foreign_node(child, self.budget)
+                };
+                if let Some(raw) = raw {
                     content.push(BlockContent::RawXml(Arc::new(raw)));
                     weight = weight.saturating_add(
                         self.budget
@@ -413,6 +426,16 @@ impl StoryParser<'_, '_> {
         let formatting = parse_document_table_row_properties(properties);
         let mut row = TableRow {
             node_type: "tableRow".to_owned(),
+            extra_attributes: (!element.attributes.is_empty()).then(|| {
+                element
+                    .attributes
+                    .iter()
+                    .map(|(name, value)| crate::paragraph::RawAttribute {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect()
+            }),
             property_changes: parse_table_row_property_changes(properties, formatting.as_ref()),
             structural_change: parse_table_row_structural_change(properties),
             formatting,
@@ -473,6 +496,7 @@ impl StoryParser<'_, '_> {
                     "drawing" => {
                         self.enrich_text_box_drawing(paragraph, child, run_index, depth, None)?
                     }
+                    "pict" => self.enrich_vml_text_box(paragraph, child, depth)?,
                     "AlternateContent" => {
                         let branch = child
                             .child_elements()
@@ -486,17 +510,21 @@ impl StoryParser<'_, '_> {
                             let drawings = branch
                                 .child_elements()
                                 .filter(|child| child.local_name() == "drawing")
-                                .collect::<Vec<_>>();
+                                .count();
                             // One text box replays the wrapper, VML fallback included.
-                            let source = (drawings.len() == 1).then(|| child.to_raw_inline_xml());
-                            for drawing in drawings {
-                                self.enrich_text_box_drawing(
-                                    paragraph,
-                                    drawing,
-                                    run_index,
-                                    depth,
-                                    source.clone(),
-                                )?;
+                            let source = (drawings == 1).then(|| child.to_raw_inline_xml());
+                            for node in branch.child_elements() {
+                                match node.local_name() {
+                                    "drawing" => self.enrich_text_box_drawing(
+                                        paragraph,
+                                        node,
+                                        run_index,
+                                        depth,
+                                        source.clone(),
+                                    )?,
+                                    "pict" => self.enrich_vml_text_box(paragraph, node, depth)?,
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -519,12 +547,13 @@ impl StoryParser<'_, '_> {
         let Some(text_box) = parse_text_box(drawing) else {
             return Ok(());
         };
-        let mut blocks = Vec::new();
-        if let Some(shape) = find_descendant_by_name(drawing, "wps:wsp", 0)
+        let content = if let Some(shape) = find_descendant_by_name(drawing, "wps:wsp", 0)
             && let Some(container) = get_text_box_content_element(shape)
         {
-            blocks = self.parse_blocks(container, depth.saturating_add(1), false)?;
-        }
+            self.parse_text_box_content(container, depth)?
+        } else {
+            Vec::new()
+        };
         let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
             let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
             shape.id = text_box.id;
@@ -553,11 +582,7 @@ impl StoryParser<'_, '_> {
                 right: margins.right,
                 bottom: margins.bottom,
             }),
-            content: blocks
-                .into_iter()
-                .map(serde_json::to_value)
-                .collect::<Result<_, _>>()
-                .map_err(|error| ParseError::Canonical(error.to_string()))?,
+            content,
         });
         shape.text_body_properties = shape.text_body_properties.or(body);
         let mut target = run_index;
@@ -577,6 +602,106 @@ impl StoryParser<'_, '_> {
                 source_xml,
             });
         }
+        Ok(())
+    }
+
+    pub(crate) fn parse_text_box_content(
+        &mut self,
+        container: &XmlElement,
+        depth: usize,
+    ) -> Result<Vec<serde_json::Value>, ParseError> {
+        self.parse_blocks(container, depth.saturating_add(1), false)?
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<_, _>>()
+            .map_err(|error| ParseError::Canonical(error.to_string()))
+    }
+
+    fn enrich_vml_text_box(
+        &mut self,
+        paragraph: &mut Paragraph,
+        pict: &XmlElement,
+        depth: usize,
+    ) -> Result<(), ParseError> {
+        let Some(mut text_box) = crate::vml::parse_vml_text_box(pict) else {
+            return Ok(());
+        };
+        let Some(container) = crate::vml::vml_text_box_content_element(pict) else {
+            return Ok(());
+        };
+        let pict_xml = pict.to_raw_inline_xml();
+        let slot = paragraph
+            .content
+            .iter_mut()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| run.content.iter_mut())
+            .find_map(|content| match content {
+                RunContent::OpaqueDrawing {
+                    kind,
+                    xml,
+                    text_box: slot @ None,
+                    ..
+                } if (kind == "pict" && *xml == pict_xml)
+                    || (kind == "alternateContent" && xml.contains(&pict_xml)) =>
+                {
+                    Some(slot)
+                }
+                _ => None,
+            });
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        // The box is display-only: its paragraphs take no ids or budget
+        // from the document the save writes.
+        let ids = self.ids.clone();
+        let budget = self.budget.clone();
+        let content = self.parse_text_box_content(container, depth);
+        *self.ids = ids;
+        *self.budget = budget;
+        let Ok(content) = content else {
+            return Ok(());
+        };
+        let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
+        shape.text_box = Some(true);
+        shape.id = text_box.id;
+        shape.name = text_box.name;
+        shape.hidden = text_box
+            .position
+            .as_ref()
+            .and_then(|position| position.hidden);
+        shape.position = text_box.position;
+        shape.wrap = text_box.wrap;
+        shape.fill = text_box.fill;
+        shape.outline = text_box.outline;
+        let rotation = text_box
+            .body_properties
+            .as_mut()
+            .and_then(|body| body.rotation.take());
+        shape.transform = rotation.map(|rotation| crate::drawingml::Transform2D {
+            rotation: Some(rotation),
+            flip_h: None,
+            flip_v: None,
+        });
+        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
+        shape.text_body = Some(ShapeTextBody {
+            vertical: None,
+            rotation: None,
+            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+            anchor_center: None,
+            auto_fit: None,
+            margins: text_box.margins.map(|margins| RelativeRect {
+                left: margins.left,
+                top: margins.top,
+                right: margins.right,
+                bottom: margins.bottom,
+            }),
+            content,
+        });
+        shape.text_body_properties = body;
+        *slot = Some(Box::new(shape));
         Ok(())
     }
 }
@@ -662,6 +787,10 @@ pub(crate) fn typed_block_name(name: &str) -> bool {
     )
 }
 
+fn is_body_bookmark(parent: &XmlElement, element: &XmlElement) -> bool {
+    parent.name == "w:body" && matches!(element.name.as_str(), "w:bookmarkStart" | "w:bookmarkEnd")
+}
+
 /// Whether the story dispatcher reads `element` as a block: a typed one, or foreign markup it
 /// keeps as a raw block.
 fn is_story_block(element: &XmlElement) -> bool {
@@ -677,7 +806,7 @@ fn is_story_block_name(name: &str) -> bool {
 pub fn story_block_elements(parent: &XmlElement) -> Vec<(Vec<u32>, &XmlElement)> {
     let mut blocks = Vec::new();
     visit_transparent_children(parent, false, &mut Vec::new(), &mut |path, child| {
-        if is_story_block(child) {
+        if is_story_block(child) || is_body_bookmark(parent, child) {
             blocks.push((path.to_vec(), child));
         }
     });
@@ -1107,14 +1236,17 @@ mod tests {
     use indexmap::IndexMap;
 
     fn parse(xml: &str) -> Vec<BlockContent> {
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
+        parse_with(xml, &ParseLimits::default()).0
+    }
+
+    fn parse_with(xml: &str, limits: &ParseLimits) -> (Vec<BlockContent>, Vec<String>) {
+        let mut budget = ParseBudget::new(limits);
         let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
         let media = IndexMap::new();
         let charts = IndexMap::new();
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
-        StoryParser {
+        let blocks = StoryParser {
             relationships: None,
             theme: None,
             styles: None,
@@ -1128,7 +1260,95 @@ mod tests {
             part: "word/document.xml",
         }
         .parse_blocks(document.root().unwrap(), 0, false)
-        .unwrap()
+        .unwrap();
+        (blocks, smart_art.warnings)
+    }
+
+    fn text_box_chain_story(levels: usize, leaf: &str) -> String {
+        let mut story = format!("<w:p><w:r><w:t>{leaf}</w:t></w:r></w:p>");
+        for _ in 0..levels {
+            story = format!(
+                r#"<w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent>{story}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            );
+        }
+        story
+    }
+
+    fn text_box_body(story: &str) -> String {
+        format!(
+            r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg">{story}</w:body>"#
+        )
+    }
+
+    fn nested_text_box_chain(levels: usize, leaf: &str) -> String {
+        text_box_body(&text_box_chain_story(levels, leaf))
+    }
+
+    fn contains(blocks: &[BlockContent], text: &str) -> bool {
+        serde_json::to_string(blocks).unwrap().contains(text)
+    }
+
+    #[test]
+    fn group_text_boxes_nested_past_four_levels_open_without_their_text() {
+        let limits = ParseLimits::default();
+        let (blocks, warnings) = parse_with(&nested_text_box_chain(4, "deepest"), &limits);
+        assert!(contains(&blocks, "deepest"));
+        assert!(warnings.is_empty());
+        for levels in [5, 20] {
+            let (blocks, warnings) = parse_with(&nested_text_box_chain(levels, "deepest"), &limits);
+            assert_eq!(blocks.len(), 1);
+            assert!(!contains(&blocks, "deepest"));
+            assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_NESTING_WARNING]);
+        }
+    }
+
+    #[test]
+    fn group_text_boxes_nested_past_the_scene_depth_open_with_a_warning() {
+        let group = |levels: usize| {
+            format!(
+                r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg"><w:p><w:r><w:drawing><wp:inline><wp:extent cx="100" cy="50"/><a:graphic><a:graphicData><wpg:wgp>{}<wps:wsp><wps:cNvPr id="2"/><wps:txbx><w:txbxContent><w:p><w:r><w:t>deep</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>{}</wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body>"#,
+                "<wpg:grpSp>".repeat(levels),
+                "</wpg:grpSp>".repeat(levels)
+            )
+        };
+        let limits = ParseLimits::default();
+        let (blocks, warnings) = parse_with(&group(crate::shape::MAX_SCENE_DEPTH - 1), &limits);
+        assert!(contains(&blocks, "deep"));
+        assert!(warnings.is_empty());
+        for levels in [
+            crate::shape::MAX_SCENE_DEPTH,
+            crate::shape::MAX_SCENE_DEPTH + 40,
+        ] {
+            let (blocks, warnings) = parse_with(&group(levels), &limits);
+            assert_eq!(blocks.len(), 1);
+            assert!(!contains(&blocks, "deep"));
+            assert_eq!(warnings, [crate::shape::GROUP_SCENE_LIMIT_WARNING]);
+        }
+    }
+
+    #[test]
+    fn nested_group_text_box_stories_share_one_budget_and_open_past_it() {
+        let limits = ParseLimits {
+            max_xml_bytes: 1024 * 1024,
+            ..ParseLimits::default()
+        };
+        let large = "x".repeat(700 * 1024);
+        let (blocks, warnings) = parse_with(&nested_text_box_chain(1, &large), &limits);
+        assert!(contains(&blocks, &large));
+        assert!(warnings.is_empty());
+        let leaf = "y".repeat(200 * 1024);
+        let chain = text_box_chain_story(3, &leaf);
+        let (single, warnings) = parse_with(&text_box_body(&chain), &limits);
+        assert!(warnings.is_empty());
+        let single = serde_json::to_string(&single)
+            .unwrap()
+            .matches(&leaf)
+            .count();
+        let (both, warnings) = parse_with(&text_box_body(&chain.repeat(2)), &limits);
+        assert_eq!(both.len(), 2);
+        assert_eq!(warnings, [crate::shape::GROUP_TEXT_BOX_BUDGET_WARNING]);
+        let both = serde_json::to_string(&both).unwrap().matches(&leaf).count();
+        assert!(single > 0 && both < 2 * single);
     }
 
     #[test]
@@ -1282,6 +1502,73 @@ mod tests {
         assert_eq!(
             content[1]["rows"][0]["cells"][0]["content"][0]["type"],
             "paragraph"
+        );
+    }
+
+    #[test]
+    fn grouped_text_boxes_keep_recursive_block_stories_and_body_properties() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps" xmlns:wpg="wpg"><w:p><w:r><w:drawing>
+              <wp:inline><wp:extent cx="3810000" cy="1905000"/><wp:docPr id="1"/><a:graphic><a:graphicData><wpg:wgp>
+                <wpg:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="3810000" cy="1905000"/><a:chOff x="95250" y="47625"/><a:chExt cx="1905000" cy="952500"/></a:xfrm></wpg:grpSpPr>
+                <wps:wsp><wps:cNvPr id="2"/><wps:spPr><a:xfrm><a:off x="190500" y="95250"/><a:ext cx="762000" cy="381000"/></a:xfrm></wps:spPr>
+                  <wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Alpha</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                  <wps:bodyPr lIns="9525" tIns="19050" anchor="ctr"/>
+                </wps:wsp>
+                <wpg:grpSp><wpg:grpSpPr><a:xfrm><a:off x="1047750" y="428625"/><a:ext cx="762000" cy="381000"/><a:chOff x="0" y="0"/><a:chExt cx="381000" cy="190500"/></a:xfrm></wpg:grpSpPr>
+                  <wps:wsp><wps:cNvPr id="3"/><wps:spPr><a:xfrm><a:off x="47625" y="23812"/><a:ext cx="285750" cy="142875"/></a:xfrm></wps:spPr>
+                    <wps:txbx><w:txbxContent><w:sdt><w:sdtPr><w:alias w:val="label"/></w:sdtPr><w:sdtContent>
+                      <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Beta</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+                    </w:sdtContent></w:sdt></w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0"/>
+                  </wps:wsp>
+                </wpg:grpSp>
+              </wpg:wgp></a:graphicData></a:graphic></wp:inline>
+            </w:drawing></w:r></w:p></w:body>"#,
+        );
+        let BlockContent::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+            panic!("run")
+        };
+        assert_eq!(run.content.len(), 1);
+        let RunContent::Shape { shape } = &run.content[0] else {
+            panic!("group")
+        };
+        let children = shape.children.as_ref().unwrap();
+        assert_eq!(children.len(), 2);
+        let alpha = &children[0];
+        let body = alpha.text_body.as_ref().unwrap();
+        assert_eq!(body.content[0]["content"][0]["content"][0]["text"], "Alpha");
+        assert_eq!(body.content[0]["content"][0]["formatting"]["bold"], true);
+        assert_eq!(body.anchor.as_deref(), Some("middle"));
+        assert_eq!(body.margins.as_ref().unwrap().left, Some(9525.0));
+        assert_eq!(alpha.offset.as_ref().unwrap().x, 190500.0);
+        assert_eq!(alpha.offset.as_ref().unwrap().y, 95250.0);
+        assert_eq!(alpha.size.width, 1524000.0);
+        let nested = &children[1];
+        let beta = &nested.children.as_ref().unwrap()[0];
+        let content = &beta.text_body.as_ref().unwrap().content;
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "blockSdt");
+        assert_eq!(content[0]["properties"]["alias"], "label");
+        assert_eq!(content[0]["content"][0]["type"], "table");
+        assert_eq!(
+            content[0]["content"][0]["rows"][0]["cells"][0]["content"][0]["content"][0]["content"]
+                [0]["text"],
+            "Beta"
+        );
+        assert_eq!(nested.offset.as_ref().unwrap().x, 1905000.0);
+        assert_eq!(beta.offset.as_ref().unwrap().x, 2095500.0);
+        assert_eq!(beta.size.width, 1143000.0);
+        let scene = shape.scene.as_ref().unwrap().root.as_ref().unwrap();
+        assert_eq!(
+            scene.children.as_ref().unwrap()[0]
+                .shape
+                .as_ref()
+                .unwrap()
+                .text_body,
+            alpha.text_body
         );
     }
 

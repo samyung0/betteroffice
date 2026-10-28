@@ -42,10 +42,12 @@ pub fn serialize_paragraph(
     let result = serialize_paragraph_inner(paragraph, context);
     context.leave_paragraph();
     // Only a splice save (upstream's, which Capy never requests) records paragraphs.
-    if let Ok(xml) = &result {
-        context.record_paragraph(paragraph.source_ordinal, xml);
-    }
-    result
+    result.map(
+        |xml| match context.record_paragraph(paragraph.source_ordinal, &xml) {
+            Some(token) => token + &xml,
+            None => xml,
+        },
+    )
 }
 
 fn serialize_paragraph_inner(
@@ -1017,7 +1019,12 @@ fn optional_int(writer: &mut XmlWriter, name: &'static str, value: Option<f64>) 
     }
 }
 
-fn empty_attr(writer: &mut XmlWriter, element: &'static str, name: &'static str, value: &str) {
+pub(crate) fn empty_attr(
+    writer: &mut XmlWriter,
+    element: &'static str,
+    name: &'static str,
+    value: &str,
+) {
     writer
         .start_element(element)
         .attribute(name, value)

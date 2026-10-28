@@ -587,7 +587,13 @@
     "deleted": "हटाया गया",
     "acceptAll": "सभी स्वीकार करें",
     "rejectAll": "सभी अस्वीकार करें",
-    "inFieldsOnly": "ये परिवर्तन फ़ील्ड के अंदर हैं, जैसे विषय-सूची।"
+    "inFieldsOnly": "ये परिवर्तन फ़ील्ड के अंदर हैं, जैसे विषय-सूची।",
+    "agent": "एजेंट",
+    "previousChange": "पिछला बदलाव",
+    "nextChange": "अगला बदलाव",
+    "changeBy": "{author} द्वारा बदलाव",
+    "changeCount": "{count, plural, one {# बदलाव} other {# बदलाव}}",
+    "acceptAllChanges": "सभी बदलाव स्वीकार करें"
   },
   "contextMenu": {
     "ariaLabel": "AI क्रियाएँ मेनू",
@@ -639,6 +645,7 @@
   },
   "errors": {
     "loadingDocument": "दस्तावेज़ लोड हो रहा है...",
+    "stillOpening": null,
     "noDocumentLoaded": "कोई दस्तावेज़ लोड नहीं हुआ",
     "failedToLoad": "दस्तावेज़ लोड करने में विफल",
     "unableToParse": "दस्तावेज़ का विश्लेषण करने में असमर्थ",
@@ -667,6 +674,7 @@
     "borderColor": "बॉर्डर का रंग",
     "borderWidth": "बॉर्डर की चौड़ाई",
     "unknownAction": "अज्ञात क्रिया",
+    "viewGridlines": "ग्रिडलाइनें देखें",
     "borders": {
       "all": "सभी बॉर्डर",
       "outside": "बाहरी बॉर्डर",

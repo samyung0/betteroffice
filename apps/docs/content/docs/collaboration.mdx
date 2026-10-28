@@ -7,7 +7,7 @@ BetterOffice editors synchronize through a Yrs CRDT. Each editor exposes its
 replica to a collaboration provider, which exchanges updates over a transport
 you supply. A relay routes those updates between peers in the same room.
 
-`DocxEditor` defaults to worker-only editing with async reads; deprecated `legacySyncApi` selects the sync hybrid runtime and is removed in 0.6.0. Passing `collaboration` currently selects the hybrid runtime until worker-only collaboration is available.
+`DocxEditor` reads asynchronously by default; deprecated `legacySyncApi` keeps the synchronous API and is removed in 0.6.0. Passing `collaboration` keeps the default editor.
 
 ## How updates flow
 
@@ -49,7 +49,7 @@ Import `CollaborationProvider` from the package for your format:
 | --- | --- |
 | DOCX | `@betteroffice/docx/collaboration` |
 | XLSX | `@betteroffice/xlsx/collaboration` |
-| PPTX | `@betteroffice/pptx` |
+| PPTX | `@betteroffice/pptx/collaboration` |
 | VSDX (source preview) | `@betteroffice/vsdx` |
 
 [VSDX packages](./vsdx) are available from source.

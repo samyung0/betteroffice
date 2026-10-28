@@ -122,6 +122,27 @@ fn a_worksheet_past_the_row_style_cap_is_refused() {
 }
 
 #[test]
+fn parsing_a_large_sheet_reports_progress() {
+    thread_local! {
+        static CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+    fn count() {
+        CALLS.with(|calls| calls.set(calls.get() + 1));
+    }
+    let rows: String = (1..=20_000)
+        .map(|row| format!(r#"<row r="{row}"><c r="A{row}"><v>{row}</v></c></row>"#))
+        .collect();
+    let parts = package(&format!("<sheetData>{rows}</sheetData>"), &[], false);
+
+    xlsx_model::progress::set_hook(Some(count));
+    let parsed = parse_workbook(&parts);
+    xlsx_model::progress::set_hook(None);
+
+    assert!(parsed.is_ok());
+    assert!(CALLS.with(std::cell::Cell::get) >= 4);
+}
+
+#[test]
 fn malformed_custom_format_is_refused_during_parse() {
     let parts = package(
         r#"<sheetData><row r="1" customFormat="&missing;"><c r="A1"><v>1</v></c></row></sheetData>"#,
@@ -1576,6 +1597,56 @@ fn missing_workbook_part_errors() {
     let err =
         parse_workbook(&[("xl/sharedStrings.xml".to_string(), b"<sst/>".to_vec())]).unwrap_err();
     assert!(matches!(err, ParseError::MissingPart(_)), "got {err:?}");
+}
+
+#[test]
+fn refuses_workbook_roots_outside_spreadsheetml() {
+    let with_workbook = |xml: &str| {
+        let mut parts = package("<sheetData/>", &[], false);
+        parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/workbook.xml")
+            .unwrap()
+            .1 = xml.as_bytes().to_vec();
+        parts
+    };
+    let r = r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let sheets = r#"<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>"#;
+    for (title, xml) in [
+        (
+            "foreign default namespace",
+            format!(r#"<workbook xmlns="urn:unsupported-ooxml:main" {r}>{sheets}</workbook>"#),
+        ),
+        (
+            "foreign prefixed namespace",
+            format!(r#"<x:workbook xmlns:x="urn:unsupported-ooxml:main" {r}>{sheets}</x:workbook>"#),
+        ),
+        (
+            "word document root",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#.to_owned(),
+        ),
+    ] {
+        let err = parse_workbook(&with_workbook(&xml)).unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Malformed(message) if message.contains("xl/workbook.xml")),
+            "{title}: {err:?}"
+        );
+    }
+    for namespace in [
+        "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "http://purl.oclc.org/ooxml/spreadsheetml/main",
+    ] {
+        for xml in [
+            format!(r#"<workbook xmlns="{namespace}" {r}>{sheets}</workbook>"#),
+            format!(r#"<x:workbook xmlns:x="{namespace}" {r}>{sheets}</x:workbook>"#),
+        ] {
+            assert_eq!(
+                parse_workbook(&with_workbook(&xml)).unwrap().sheets.len(),
+                1,
+                "{xml}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3448,15 +3519,15 @@ fn keeps_the_stylesheet_when_styles_are_untouched() {
     );
 }
 
-/// A stylesheet holding only unmodeled pools still backs `dxfId` references
-/// from preserved conditional formatting; deleting it breaks the workbook.
+/// A stylesheet holding only differential formats still backs `dxfId`
+/// references from conditional formatting; deleting it breaks the workbook.
 #[test]
 fn keeps_a_stylesheet_that_models_nothing() {
     let styles = r#"<dxfs count="1"><dxf><font><b/></font></dxf></dxfs><tableStyles count="0"/>"#;
     let body = r#"<sheetData/><conditionalFormatting sqref="A1:A9"><cfRule type="expression" dxfId="0" priority="1"><formula>TRUE()</formula></cfRule></conditionalFormatting>"#;
     let parts = package_styled(body, Some(styles), None);
     let parsed = parse_workbook_with_package(&parts).unwrap();
-    assert!(parsed.workbook.styles.is_empty());
+    assert!(!parsed.workbook.styles.is_empty());
 
     let mut workbook = parsed.workbook.clone();
     edit_a1(&mut workbook, 5.0);
@@ -5887,23 +5958,6 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
             "{formula}: {error:?}"
         );
     }
-
-    refs[2].formula = "Data!$B$2:$B$4".to_owned();
-    refs[1].formula = "Data!$B$2:$B$4".to_owned();
-    let mut workbook = parsed.workbook.clone();
-    workbook.sheets[0].set_cell(
-        CellRef::parse_a1("B2").unwrap(),
-        Cell {
-            value: CellValue::Number { value: 3.0 },
-            ..Cell::default()
-        },
-    );
-    let error = crate::chart::patch_chart_refs(CHART, &refs, &workbook, "Data").unwrap_err();
-    assert!(
-        matches!(&error, ParseError::UnsupportedEdit(message)
-            if message.contains("string cache over non-text cells")),
-        "{error:?}"
-    );
 }
 
 /// A cache may legally carry an `extLst` beside its points, or a `formatCode`
@@ -6301,6 +6355,163 @@ fn saves_a_shared_chart_part_its_sheets_agree_on() {
                 .contains(r#"<c:ptCount val="2"/><c:pt idx="1"><c:v>5</c:v></c:pt></c:numCache>"#),
         "a qualified reference both sheets took resolves the same either way: {patched}"
     );
+}
+
+#[test]
+fn saves_authored_caches_when_shared_chart_owners_disagree_only_on_refresh() {
+    let parsed = parse_workbook_with_package(&shared_chart_package()).unwrap();
+    for values in [
+        [Some(17.0), None],
+        [None, Some(23.0)],
+        [Some(17.0), Some(23.0)],
+    ] {
+        let mut workbook = parsed.workbook.clone();
+        for (sheet, value) in workbook.sheets.iter_mut().zip(values) {
+            if let Some(value) = value {
+                sheet.set_cell(
+                    CellRef::new(0, 0),
+                    Cell {
+                        value: CellValue::Number { value },
+                        ..Cell::default()
+                    },
+                );
+            }
+        }
+        let saved = save_shared(&parsed, &workbook).unwrap();
+        assert_eq!(part_bytes(&saved, "xl/charts/chart1.xml"), SHARED_CHART);
+        let reopened = parse_workbook_with_package(&saved).unwrap();
+        for (sheet, value) in reopened.workbook.sheets.iter().zip(values) {
+            if let Some(value) = value {
+                assert_eq!(
+                    sheet.cell(CellRef::new(0, 0)).unwrap().value,
+                    CellValue::Number { value }
+                );
+            }
+            assert_eq!(sheet.charts[0].refs[0].formula, "$A$1:$A$2");
+        }
+    }
+}
+
+#[cfg(feature = "test-counters")]
+#[test]
+fn saving_a_shared_qualified_chart_resolves_and_rebuilds_once_per_part() {
+    let mut source = shared_chart_package();
+    let chart = std::str::from_utf8(SHARED_CHART)
+        .unwrap()
+        .replace("$A$1:$A$2", "First!$A$1:$A$2");
+    set_part(&mut source, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    for (at, rebuilds) in [(CellRef::new(19, 25), 0), (CellRef::new(0, 0), 1)] {
+        let mut workbook = parsed.workbook.clone();
+        workbook.sheets[0].set_cell(
+            at,
+            Cell {
+                value: CellValue::Number { value: 17.0 },
+                ..Cell::default()
+            },
+        );
+        crate::reset_chart_counters();
+        let saved = save_shared(&parsed, &workbook).unwrap();
+        assert_eq!(crate::chart_counters(), (1, 0));
+        assert_eq!(crate::chart_save_counters(), (4, rebuilds));
+        let saved_chart = part_bytes(&saved, "xl/charts/chart1.xml");
+        if rebuilds == 0 {
+            assert_eq!(saved_chart, chart.as_bytes());
+        } else {
+            assert!(
+                String::from_utf8(saved_chart)
+                    .unwrap()
+                    .contains("<c:v>17</c:v>")
+            );
+        }
+    }
+}
+
+#[cfg(feature = "test-counters")]
+#[test]
+fn saving_a_chart_bounds_source_comparisons_across_all_sites() {
+    let mut source = charted_package();
+    let series = (0..64).map(|index| {
+        let start = index * 128 + 1;
+        let end = start + 127;
+        format!(r#"<c:ser><c:idx val="{index}"/><c:val><c:numRef><c:f>Data!$A${start}:$A${end}</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser>"#)
+    }).collect::<String>();
+    let chart = format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart>{series}</c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    );
+    set_part(&mut source, "xl/charts/chart1.xml", chart.as_bytes());
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    for index in 0..64 {
+        workbook.sheets[0].set_cell(
+            CellRef::new(index * 128, 0),
+            Cell {
+                value: CellValue::Number { value: 100.0 },
+                ..Cell::default()
+            },
+        );
+    }
+    crate::reset_chart_counters();
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    assert_eq!(crate::chart_counters(), (1, 0));
+    assert_eq!(
+        crate::chart_save_counters(),
+        (
+            crate::MAX_PROJECTED_CACHE_POINTS * 2,
+            crate::MAX_PROJECTED_CACHE_POINTS / 128
+        )
+    );
+    let saved_chart = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert!(saved_chart.contains("<c:v>100</c:v>"));
+    assert!(
+        saved_chart
+            .rsplit_once("<c:ser>")
+            .unwrap()
+            .1
+            .contains("<c:v>1</c:v>")
+    );
+}
+
+#[test]
+fn saving_a_chart_with_divergent_reference_counts_declines_refresh() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let plan = crate::ChartRefreshPlan::new(CHART);
+    let mut refresh = plan.save_refresh(&parsed.workbook, &parsed.workbook);
+    assert!(refresh.refresh_changed("Data", "Data", &[]).is_none());
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    refs.push(refs[0].clone());
+    assert!(refresh.refresh_changed("Data", "Data", &refs).is_none());
+}
+
+#[test]
+fn saving_a_cross_sheet_source_edit_preserves_the_other_series() {
+    let mut source = charted_package();
+    let original = std::str::from_utf8(CHART).unwrap();
+    let start = original.find("<c:ser>").unwrap();
+    let end = original.find("</c:ser>").unwrap() + "</c:ser>".len();
+    let untouched = &original[start..end];
+    let edited = untouched.replace("Data!", "Report!");
+    let chart = original.replace(untouched, &format!("{edited}{untouched}"));
+    set_part(&mut source, "xl/charts/chart1.xml", chart.as_bytes());
+    set_part(&mut source, "xl/worksheets/sheet2.xml", br#"<worksheet><sheetData><row r="1"><c r="B1" t="inlineStr"><is><t>Series</t></is></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>Q1</t></is></c></row></sheetData></worksheet>"#);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[1].set_cell(
+        CellRef::new(1, 1),
+        Cell {
+            value: CellValue::Number { value: 96.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+    let saved_chart = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert!(saved_chart.contains("<c:v>96</c:v>"));
+    let last_series = saved_chart.rsplit_once("<c:ser>").unwrap().1;
+    let last_series = format!(
+        "<c:ser>{}",
+        &last_series[..last_series.find("</c:ser>").unwrap() + "</c:ser>".len()]
+    );
+    assert_eq!(last_series, untouched);
 }
 
 /// The same aliasing reaches drawing parts: two sheets may relate to one
@@ -6952,17 +7163,31 @@ fn refuses_a_cache_this_crate_could_not_rebuild() {
             "{label}"
         );
     }
+}
 
-    let mut parts = charted_package();
-    let multi_level = String::from_utf8(CHART.to_vec())
-        .unwrap()
-        .replace("strCache>", "multiLvlStrCache>");
-    set_part(&mut parts, "xl/charts/chart1.xml", multi_level.as_bytes());
-    let parsed = parse_workbook_with_package(&parts).unwrap();
-    assert_eq!(
-        parsed.package.unpatchable_reference_part(),
-        Some("xl/charts/chart1.xml")
-    );
+#[test]
+fn multi_level_caches_allow_only_bounded_direct_ranges() {
+    for (formula, patchable) in [
+        ("Data!$A$2:$A$4", true),
+        ("Data!$A$2:$B$4", true),
+        ("SalesRange", false),
+        ("(Data!$A$2:$A$4,Data!$B$2:$B$4)", false),
+        ("[1]Data!$A$2:$B$4", false),
+        ("Data!$A$1:$B$32769", false),
+    ] {
+        let mut parts = charted_package();
+        let chart = String::from_utf8(CHART.to_vec())
+            .unwrap()
+            .replace("strCache>", "multiLvlStrCache>")
+            .replace("Data!$A$2:$A$4", formula);
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert_eq!(
+            parsed.package.unpatchable_reference_part().is_none(),
+            patchable,
+            "{formula}"
+        );
+    }
 }
 
 /// A reference with no cache beside it carries nothing that could go stale,
@@ -7028,7 +7253,14 @@ fn refuses_a_part_declaring_a_foreign_encoding() {
 /// Patch a chart part against a workbook holding the sheet its references name.
 fn patch_refs(part: &[u8], refs: &[xlsx_model::ChartRef]) -> Result<Vec<u8>, ParseError> {
     let workbook = parse_workbook(&charted_package()).unwrap();
-    crate::chart::patch_chart_refs(part, refs, &workbook, "Data")
+    crate::chart::patch_chart_refs(
+        part,
+        "xl/charts/chart1.xml",
+        refs,
+        &workbook,
+        "Data",
+        Some((&workbook, "Data")),
+    )
 }
 
 fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
@@ -7238,13 +7470,89 @@ fn hostile_chart_markup_is_refused_not_survived() {
 
     assert!(crate::chart_space(b"<c:chartSpace xmlns:c=\"c\"/>", &Default::default()).is_none());
     assert!(crate::chart_space(b"not xml at all", &Default::default()).is_none());
+}
+
+#[test]
+fn three_d_depth_axes_drop_and_surfaces_stay_refused() {
+    let part = |plot: &str, ids: &str, extra_axis: &str| {
+        format!(
+            concat!(
+                r#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:{plot}><c:barDir val="col"/><c:grouping val="stacked"/>"#,
+                r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1:$A$2</c:f>"#,
+                r#"<c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache>"#,
+                r#"</c:numRef></c:val></c:ser>{ids}</c:{plot}>"#,
+                r#"<c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx>{extra_axis}"#,
+                r#"</c:plotArea></c:chart></c:chartSpace>"#,
+            ),
+            plot = plot,
+            ids = ids,
+            extra_axis = extra_axis,
+        )
+    };
+    let axis_ids = |xml: String| {
+        crate::chart_space(xml.as_bytes(), &Default::default())
+            .expect("chart")
+            .plot_groups[0]
+            .axis_ids
+            .clone()
+    };
+    let three = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="3"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", three, "")), ["1", "2"]);
+    assert_eq!(
+        axis_ids(part(
+            "bar3DChart",
+            three,
+            r#"<c:serAx><c:axId val="3"/><c:crossAx val="2"/></c:serAx>"#
+        )),
+        ["1", "2"]
+    );
+    let to_value = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="2"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", to_value, "")), ["1", "2", "2"]);
+    let padded = r#"<c:axId val="1"/><c:axId val="2"/><c:axId val="002"/>"#;
+    assert_eq!(axis_ids(part("bar3DChart", padded, "")), ["1", "2", "002"]);
+    assert_eq!(axis_ids(part("barChart", three, "")), ["1", "2", "3"]);
     assert!(
         crate::chart_space(
-            br#"<c:chartSpace xmlns:c="c"><c:chart><c:plotArea><c:bar3DChart/></c:plotArea></c:chart></c:chartSpace>"#,
-            &Default::default(),
+            part("surface3DChart", three, "").as_bytes(),
+            &Default::default()
         )
         .is_none()
     );
+}
+
+#[test]
+fn three_d_charts_read_as_their_flat_families() {
+    for (flat_plot, deep_plot) in [
+        ("barChart", "bar3DChart"),
+        ("pieChart", "pie3DChart"),
+        ("lineChart", "line3DChart"),
+        ("areaChart", "area3DChart"),
+    ] {
+        let part = |plot: &str, view: &str| {
+            format!(
+                concat!(
+                    r#"<c:chartSpace xmlns:c="c"><c:chart>{view}<c:plotArea><c:{plot}>"#,
+                    r#"<c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:f>S!$A$1:$A$2</c:f>"#,
+                    r#"<c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache>"#,
+                    r#"</c:numRef></c:val></c:ser></c:{plot}></c:plotArea></c:chart></c:chartSpace>"#,
+                ),
+                plot = plot,
+                view = view,
+            )
+        };
+        let flat = crate::chart_space(part(flat_plot, "").as_bytes(), &Default::default())
+            .expect("flat chart");
+        let deep = crate::chart_space(
+            part(
+                deep_plot,
+                r#"<c:view3D><c:rotX val="15"/><c:rotY val="20"/></c:view3D>"#,
+            )
+            .as_bytes(),
+            &Default::default(),
+        )
+        .expect("3-D chart");
+        assert_eq!(deep, flat, "{deep_plot}");
+    }
 }
 
 /// A reference carrying markup-significant characters must come back escaped,
@@ -7413,10 +7721,8 @@ fn a_chart_with_a_foreign_reference_vocabulary_is_never_projected() {
     }
 }
 
-/// Live projection is a render-time concern. The bytes a save writes back must
-/// still be the bytes that were imported.
 #[test]
-fn projecting_an_imported_chart_live_does_not_change_what_a_save_writes() {
+fn saving_an_imported_chart_refreshes_edited_series_caches_in_place() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
     let mut model = parsed.workbook.clone();
     for (a1, text) in [("A2", "Live"), ("B1", "Series")] {
@@ -7448,7 +7754,68 @@ fn projecting_an_imported_chart_live_does_not_change_what_a_save_writes() {
         .find(|(path, _)| path == "xl/charts/chart1.xml")
         .map(|(_, bytes)| bytes.as_slice())
         .unwrap();
-    assert_eq!(written, CHART);
+    let expected = std::str::from_utf8(CHART)
+        .unwrap()
+        .replace(
+            r#"<c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache>"#,
+            r#"<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache>"#,
+        )
+        .replace(
+            r#"<c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache>"#,
+            r#"<c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Live</c:v></c:pt></c:strCache>"#,
+        )
+        .replace(
+            r#"<c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache>"#,
+            r#"<c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>4242</c:v></c:pt></c:numCache>"#,
+        );
+    assert_eq!(written, expected.as_bytes());
+    let space = crate::chart::chart_space(written, &model.styles.theme).unwrap();
+    assert_eq!(space.plot_groups[0].series[0].values, vec![4242.0]);
+    assert_eq!(space.plot_groups[0].series[0].categories, vec!["Live"]);
+}
+
+#[test]
+fn saving_a_declined_cache_refresh_preserves_authored_series() {
+    let budget = crate::MAX_PROJECTED_CACHE_POINTS;
+    let ordinary = imported_chart("Data!$A$2:$A$3", "Data!$B$2:$B$3");
+    let mut charts = vec![
+        imported_chart("Data!$A$2:$A$3", "Revenues"),
+        String::from_utf8(ordinary)
+            .unwrap()
+            .replace("</c:numCache>", "<c:extLst/></c:numCache>")
+            .into_bytes(),
+    ];
+    for count in [budget / 2 + 1, budget + 1] {
+        charts.push(imported_chart(
+            &format!("Data!$A$2:$A${}", count + 1),
+            &format!("Data!$B$2:$B${}", count + 1),
+        ));
+    }
+    for chart in charts {
+        let mut source = charted_package();
+        set_part(&mut source, "xl/charts/chart1.xml", &chart);
+        let parsed = parse_workbook_with_package(&source).unwrap();
+        let mut workbook = parsed.workbook.clone();
+        for (at, value) in [
+            (
+                CellRef::new(1, 0),
+                CellValue::Text {
+                    value: "Live".into(),
+                },
+            ),
+            (CellRef::new(1, 1), CellValue::Number { value: 4242.0 }),
+        ] {
+            workbook.sheets[0].set_cell(
+                at,
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+            );
+        }
+        let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+        assert_eq!(part_bytes(&saved, "xl/charts/chart1.xml"), chart);
+    }
 }
 
 /// A three-point source, so a hole can sit between two live points.

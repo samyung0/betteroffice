@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::relationships::RelationshipMap;
 use crate::styles::{DocDefaults, StyleMap, get_default_character_style};
-use crate::theme::{Theme, get_theme_color};
+use crate::theme::{Theme, get_theme_color, resolve_theme_font_ref};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -147,6 +147,10 @@ pub enum RunContent {
         text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         preview: Option<Box<crate::image::Image>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        previews: Vec<crate::image::Image>,
+        #[serde(rename = "textBox", default, skip_serializing_if = "Option::is_none")]
+        text_box: Option<Box<crate::shape::Shape>>,
     },
 }
 
@@ -239,7 +243,25 @@ pub fn parse_run(
         property_changes,
         content: parse_run_contents(element),
     };
-    let resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
+    let mut resolved_formatting = resolve_run_formatting(&run, styles, doc_defaults);
+    if theme.is_some()
+        && let Some(fonts) = resolved_formatting
+            .as_mut()
+            .and_then(|formatting| formatting.font_family.as_mut())
+    {
+        for (explicit, reference) in [
+            (&mut fonts.ascii, &fonts.ascii_theme),
+            (&mut fonts.h_ansi, &fonts.h_ansi_theme),
+            (&mut fonts.east_asia, &fonts.east_asia_theme),
+            (&mut fonts.cs, &fonts.cs_theme),
+        ] {
+            if explicit.as_deref().is_none_or(str::is_empty)
+                && let Some(reference) = reference
+            {
+                *explicit = Some(resolve_theme_font_ref(theme, reference));
+            }
+        }
+    }
     RunProjection {
         run,
         resolved_formatting,
@@ -252,6 +274,8 @@ fn parse_inline_run_properties(
 ) -> Option<TextFormatting> {
     let r_pr = r_pr?;
     let mut formatting = parse_run_properties(Some(r_pr), theme).unwrap_or_default();
+    formatting.font_family =
+        parse_run_properties(Some(r_pr), None).and_then(|properties| properties.font_family);
     formatting.modern_effects = parse_modern_text_effects(r_pr, theme);
     (formatting != TextFormatting::default() || r_pr.child("w", "shd").is_some())
         .then_some(formatting)
@@ -365,6 +389,8 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 xml: child.to_raw_inline_xml(),
                 text: None,
                 preview: None,
+                previews: Vec::new(),
+                text_box: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
@@ -372,6 +398,8 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     xml: child.to_raw_inline_xml(),
                     text: None,
                     preview: None,
+                    previews: Vec::new(),
+                    text_box: None,
                 });
             }
             "ruby" => output.push(RunContent::OpaqueDrawing {
@@ -434,9 +462,9 @@ fn parse_field_char(element: &XmlElement) -> RunContent {
     .to_owned();
     RunContent::FieldChar {
         char_type,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("true" | "1"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("true" | "1")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         form_data: parse_field_form_data(element),
         continuation_id: None,
     }
@@ -1336,9 +1364,9 @@ fn parse_simple_field_at_depth(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })
@@ -1540,11 +1568,7 @@ fn parse_hyperlink_at_depth(
         .attribute(Some("w"), "tgtFrame")
         .filter(|value| !value.is_empty())
         .map(|value| truncate_chars(value, 255));
-    let history = match element.attribute(Some("w"), "history") {
-        Some("1" | "true") => Some(true),
-        Some("0" | "false") => Some(false),
-        _ => None,
-    };
+    let history = element.parse_boolean_attribute(Some("w"), "history");
     let doc_location = element
         .attribute(Some("w"), "docLocation")
         .filter(|value| !value.is_empty())
@@ -2025,7 +2049,7 @@ fn parse_sdt_checkbox(element: &XmlElement, properties: &mut SdtProperties) {
             checked
                 .attribute(Some("w14"), "val")
                 .or_else(|| checked.attribute(Some("w"), "val"))
-                == Some("1")
+                .is_none_or(|value| crate::xml::parse_on_off(value) == Some(true))
         });
     properties.checked = Some(checked);
     properties.checked_state = parse_checkbox_state(element, "checkedState");
@@ -2677,9 +2701,9 @@ fn parse_rich_simple_field(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })

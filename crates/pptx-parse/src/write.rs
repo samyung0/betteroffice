@@ -14,7 +14,7 @@ use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, c
 use crate::drawing::parse_run_properties;
 use crate::model::{
     Bullet, BulletFont, LineSpacing, Placeholder, PptxPackage, RunProperties, ShapeElements,
-    SlideReference,
+    SlideReference, TextAutofit,
 };
 use crate::xml::{
     DRAWINGML_NS, PRESENTATIONML_NS, ParseBudget, ParseLimits, XmlElement, XmlNode,
@@ -27,6 +27,8 @@ const SLIDE_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
 const SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
+const STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/slideLayout";
 const SLIDE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
 const IMAGE_RELATIONSHIP_TYPE: &str =
@@ -56,17 +58,30 @@ pub enum SlideWrite {
     Patch {
         part_path: String,
         shapes: Vec<ShapeWrite>,
+        background: Option<BackgroundWrite>,
+        layout_part_path: Option<String>,
     },
     Clone {
         part_path: String,
         shapes: Vec<ShapeWrite>,
+        background: Option<BackgroundWrite>,
+        layout_part_path: Option<String>,
     },
     /// Mint a new slide part.
     Add {
         name: Option<String>,
         layout_part_path: Option<String>,
         shapes: Vec<ShapeAdd>,
+        background: Option<Box<ShapeFill>>,
     },
+}
+
+/// A slide background write: `Set` replaces the slide's `p:bg`, `Clear`
+/// removes it so the layout or master background shows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackgroundWrite {
+    Set(Box<ShapeFill>),
+    Clear,
 }
 
 pub enum ShapeWrite {
@@ -84,6 +99,7 @@ pub enum ShapeWrite {
 
 #[derive(Default)]
 pub struct ShapePatch {
+    pub placeholder: Option<crate::Placeholder>,
     /// The halves the edit changed. Transform pieces the source already
     /// spells out and the edit did not touch are left as they are.
     pub offset: Option<(i64, i64)>,
@@ -99,6 +115,7 @@ pub struct ShapePatch {
     pub adjust_values: Option<BTreeMap<String, f64>>,
     /// `a:bodyPr@anchor` of the shape's own text body.
     pub text_anchor: Option<String>,
+    pub table_structure: Option<TableStructure>,
     pub texts: Vec<TextWrite>,
     /// Non-empty only when a group's child list must be rebuilt.
     pub children: Vec<ShapeWrite>,
@@ -116,8 +133,30 @@ pub struct InheritedTransform {
     pub flip_vertical: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableStructure {
+    pub generation: String,
+    pub story_keys: Vec<String>,
+    pub grid: Vec<i64>,
+    pub columns: Vec<usize>,
+    pub copied_columns: Vec<bool>,
+    pub rows: Vec<TableRowSource>,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TableRowSource {
+    pub source_row: usize,
+    pub copied: bool,
+    pub copied_cells: Vec<bool>,
+    pub height: i64,
+    pub cells: Vec<[usize; 2]>,
+}
+
 pub struct TextWrite {
     pub target: TextTarget,
+    pub autofit: Option<TextAutofit>,
     pub paragraphs: Vec<ParagraphWrite>,
 }
 
@@ -133,6 +172,7 @@ pub struct ParagraphWrite {
     /// A source paragraph to build on when there is no `source_index`: its
     /// properties, end-of-paragraph run properties and the runs that match.
     pub template_index: Option<usize>,
+    pub source_paragraphs: Vec<Option<String>>,
     pub preserved_xml: Option<String>,
     /// `false` keeps the source paragraph verbatim.
     pub rebuild: bool,
@@ -158,6 +198,7 @@ pub struct RunWrite {
 pub struct ShapeAdd {
     pub name: String,
     pub geometry: String,
+    pub text_box: bool,
     pub x: i64,
     pub y: i64,
     pub width: i64,
@@ -225,24 +266,47 @@ pub fn write_pptx_with_edits(
         };
 
         for slide in &deck.slides {
-            if let SlideWrite::Patch { part_path, shapes } = slide {
+            if let SlideWrite::Patch {
+                part_path,
+                shapes,
+                background,
+                layout_part_path,
+            } = slide
+            {
                 let bytes = package
                     .part_bytes(part_path)
                     .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
                 let mut root = parse_xml(bytes, part_path, &mut budget)?;
                 let original_root = root.clone();
-                let theme = crate::slide_theme(package, Some(part_path), None);
+                let theme =
+                    crate::slide_theme(package, Some(part_path), layout_part_path.as_deref());
                 patch_slide(
                     &mut root,
                     shapes,
+                    background.as_ref(),
                     Some(&theme),
                     part_path,
                     package.shape_elements,
                     &mut sink,
                     &mut budget,
                 )?;
+                if (layout_part_path.is_some() || has_placeholder_patch(shapes))
+                    && background.is_none()
+                    && only_placeholder_edits(shapes)
+                {
+                    root.attributes.clone_from(&original_root.attributes);
+                }
                 if root != original_root {
-                    sink.store(part_path, serialize_xml(&root));
+                    let xml = if layout_part_path.is_some() || has_placeholder_patch(shapes) {
+                        crate::attribute_patch::patch_attributes(bytes, &original_root, &root)
+                            .unwrap_or_else(|| serialize_xml(&root))
+                    } else {
+                        serialize_xml(&root)
+                    };
+                    sink.store(part_path, xml);
+                }
+                if let Some(layout) = layout_part_path {
+                    patch_layout_relationship(&mut sink, part_path, layout, &mut budget)?;
                 }
             }
         }
@@ -281,6 +345,8 @@ pub fn write_pptx_with_edits(
                         SlideWrite::Clone {
                             part_path: source,
                             shapes,
+                            background,
+                            layout_part_path,
                         } => {
                             let bytes = package
                                 .part_bytes(source)
@@ -324,10 +390,23 @@ pub fn write_pptx_with_edits(
                                 &part_path,
                                 &mut budget,
                             )?);
-                            let theme = crate::slide_theme(package, Some(source), None);
+                            if let Some(layout) = layout_part_path {
+                                patch_layout_relationship(
+                                    &mut sink,
+                                    &part_path,
+                                    layout,
+                                    &mut budget,
+                                )?;
+                            }
+                            let theme = crate::slide_theme(
+                                package,
+                                Some(source),
+                                layout_part_path.as_deref(),
+                            );
                             patch_slide(
                                 &mut root,
                                 shapes,
+                                background.as_ref(),
                                 Some(&theme),
                                 &part_path,
                                 package.shape_elements,
@@ -340,6 +419,7 @@ pub fn write_pptx_with_edits(
                             name,
                             layout_part_path,
                             shapes,
+                            background,
                         } => {
                             let layout = layout_part_path
                                 .clone()
@@ -364,6 +444,7 @@ pub fn write_pptx_with_edits(
                             let xml = slide_xml(
                                 name.as_deref(),
                                 shapes,
+                                background.as_deref(),
                                 &part_path,
                                 &mut sink,
                                 &mut budget,
@@ -372,7 +453,6 @@ pub fn write_pptx_with_edits(
                         }
                         _ => unreachable!(),
                     }
-
                     minted.push(MintedSlide {
                         part_path,
                         relationship_id,
@@ -448,6 +528,44 @@ pub fn write_pptx_with_edits(
             &mut removed_paths,
             &mut budget,
         )?;
+    }
+    {
+        let mut sink = PartSink {
+            package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        for slide in &deck.slides {
+            if let SlideWrite::Patch {
+                part_path,
+                layout_part_path: Some(_),
+                ..
+            } = slide
+            {
+                let path = slide_relationships_path(part_path);
+                if let (Some(source), Some(current)) =
+                    (package.part_bytes(&path), sink.current(&path))
+                {
+                    let before = parse_xml(source, &path, &mut budget)?;
+                    let after = parse_xml(&current, &path, &mut budget)?;
+                    if after.children.len() >= before.children.len() {
+                        let mut retained = after.clone();
+                        retained.children.truncate(before.children.len());
+                        if let Some(bytes) =
+                            crate::attribute_patch::patch_attributes(source, &before, &retained)
+                                .and_then(|bytes| {
+                                    append_relationships(
+                                        bytes,
+                                        &after.children[before.children.len()..],
+                                    )
+                                })
+                        {
+                            sink.store(&path, bytes);
+                        }
+                    }
+                }
+            }
+        }
     }
     let mut parts = Vec::with_capacity(package.parts.len() + new_parts.len());
     for part in &package.parts {
@@ -777,11 +895,21 @@ fn patch_comment_parts(
             None => mint_comment_part_path(write, &slide_part_path, &mut taken),
         };
         removed_paths.remove(&part_path);
-        let bytes = match sink.current(&part_path) {
-            Some(bytes) => crate::comment_patch::patch_comments_xml(
-                &bytes, &part_path, write, comments, slide_id, budget,
+        let template = comments
+            .iter()
+            .filter_map(|comment| comment.source.as_ref())
+            .find_map(|(slide, _)| {
+                let path = existing_comment_part(package, slide, write)?;
+                package.part_bytes(&path)
+            });
+        let bytes = match (sink.current(&part_path), template) {
+            (Some(bytes), _) => crate::comment_patch::patch_comments_xml(
+                &bytes, &part_path, write, comments, slide_id, false, budget,
             )?,
-            None => comments_xml(write, comments, slide_id),
+            (None, Some(bytes)) => crate::comment_patch::patch_comments_xml(
+                bytes, &part_path, write, comments, slide_id, true, budget,
+            )?,
+            (None, None) => comments_xml(write, comments, slide_id),
         };
         sink.store(&part_path, bytes);
         if !is_existing {
@@ -1183,6 +1311,110 @@ impl PartSink<'_> {
     }
 }
 
+fn append_relationships(bytes: Vec<u8>, children: &[XmlNode]) -> Option<Vec<u8>> {
+    if children.is_empty() {
+        return Some(bytes);
+    }
+    let mut additions = Vec::new();
+    for child in children {
+        let XmlNode::Element(child) = child else {
+            return None;
+        };
+        additions.extend(serialize_xml_fragment(child));
+    }
+    let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+    let mut depth = 0;
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader.read_event().ok()? {
+            quick_xml::events::Event::Start(_) => depth += 1,
+            quick_xml::events::Event::End(_) => {
+                depth -= 1;
+                if depth == 0 {
+                    let mut output = bytes[..start].to_vec();
+                    output.extend(additions);
+                    output.extend_from_slice(&bytes[start..]);
+                    return Some(output);
+                }
+            }
+            quick_xml::events::Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
+fn only_placeholder_edits(shapes: &[ShapeWrite]) -> bool {
+    shapes.iter().all(|shape| match shape {
+        ShapeWrite::Keep { .. } => true,
+        ShapeWrite::Patch { patch, .. } => {
+            patch.offset.is_none()
+                && patch.extent.is_none()
+                && patch.inherited.is_none()
+                && !patch.materializes
+                && patch.fill.is_none()
+                && patch.outline.is_none()
+                && patch.adjust_values.is_none()
+                && patch.table_structure.is_none()
+                && patch.texts.is_empty()
+                && only_placeholder_edits(&patch.children)
+        }
+        ShapeWrite::Add(_) => false,
+    })
+}
+
+fn has_placeholder_patch(shapes: &[ShapeWrite]) -> bool {
+    shapes.iter().any(|shape| {
+        matches!(shape, ShapeWrite::Patch { patch, .. }
+        if patch.placeholder.is_some() || has_placeholder_patch(&patch.children))
+    })
+}
+
+fn is_slide_layout_relationship(element: &XmlElement) -> bool {
+    element.local_name() == "Relationship"
+        && matches!(
+            element.attribute("Type"),
+            Some(SLIDE_LAYOUT_RELATIONSHIP_TYPE | STRICT_SLIDE_LAYOUT_RELATIONSHIP_TYPE)
+        )
+}
+
+fn patch_layout_relationship(
+    sink: &mut PartSink<'_>,
+    slide: &str,
+    layout: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let path = slide_relationships_path(slide);
+    let bytes = sink
+        .current(&path)
+        .ok_or_else(|| PptxError::InvalidSlideLayoutRelationships {
+            part: slide.to_owned(),
+            count: 0,
+        })?;
+    let mut root = parse_xml(&bytes, &path, budget)?;
+    let before = root.clone();
+    let count = root
+        .child_elements()
+        .filter(|element| is_slide_layout_relationship(element))
+        .count();
+    if count != 1 {
+        return Err(PptxError::InvalidSlideLayoutRelationships {
+            part: slide.to_owned(),
+            count,
+        });
+    }
+    for child in &mut root.children {
+        if let XmlNode::Element(element) = child
+            && is_slide_layout_relationship(element)
+        {
+            element.set_attribute("Target", relative_target(slide, layout));
+        }
+    }
+    let output = crate::attribute_patch::patch_attributes(&bytes, &before, &root)
+        .ok_or_else(|| write_error(&path, "could not patch slide layout relationship"))?;
+    sink.store(&path, output);
+    Ok(())
+}
+
 fn set_relationship(
     sink: &mut PartSink<'_>,
     relationships_path: &str,
@@ -1486,9 +1718,11 @@ impl Prefixes {
 // --- slide patching ---------------------------------------------------------
 
 /// Resolves source ordinals with the original parser filter.
+#[allow(clippy::too_many_arguments)]
 fn patch_slide(
     root: &mut XmlElement,
     shapes: &[ShapeWrite],
+    background: Option<&BackgroundWrite>,
     theme: Option<&Theme>,
     part: &str,
     elements: ShapeElements,
@@ -1496,6 +1730,12 @@ fn patch_slide(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
+    if let Some(background) = background {
+        let common = root
+            .child_mut("cSld")
+            .ok_or_else(|| write_error(part, "slide has no common slide data"))?;
+        patch_background(common, background, &prefixes, part)?;
+    }
     let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
@@ -1794,6 +2034,39 @@ fn remove_in_own(element: &mut XmlElement, nodes: &[TimeNode], removed: &[bool],
         remove_time_nodes(child, nodes, removed, next);
         !(held && child.local_name() == "subTnLst" && child.child_elements().next().is_none())
     });
+}
+
+/// Inserts, replaces or removes the slide's `p:bg` declaration.
+fn patch_background(
+    common: &mut XmlElement,
+    background: &BackgroundWrite,
+    prefixes: &Prefixes,
+    part: &str,
+) -> Result<(), PptxError> {
+    common.children.retain(|child| match child {
+        XmlNode::Element(element) => element.local_name() != "bg",
+        _ => true,
+    });
+    if let BackgroundWrite::Set(fill) = background {
+        common.children.insert(
+            0,
+            XmlNode::Element(background_element(fill, prefixes, part)?),
+        );
+    }
+    Ok(())
+}
+
+/// `<p:bg><p:bgPr>…fill…<a:effectLst/></p:bgPr></p:bg>`, the first `cSld` child.
+fn background_element(
+    fill: &ShapeFill,
+    prefixes: &Prefixes,
+    part: &str,
+) -> Result<XmlElement, PptxError> {
+    Ok(XmlElement::new(prefixes.presentation("bg")).with_child(
+        XmlElement::new(prefixes.presentation("bgPr"))
+            .with_child(fill_element(fill, prefixes, part)?)
+            .with_child(XmlElement::new(prefixes.drawing("effectLst"))),
+    ))
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
@@ -2123,6 +2396,38 @@ fn patch_shape(
     sink: &mut PartSink<'_>,
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
+    if let Some(placeholder) = &patch.placeholder {
+        let non_visual = element
+            .children
+            .iter_mut()
+            .find_map(|child| match child {
+                XmlNode::Element(child)
+                    if matches!(
+                        child.local_name(),
+                        "nvSpPr" | "nvPicPr" | "nvGraphicFramePr" | "nvGrpSpPr" | "nvCxnSpPr"
+                    ) =>
+                {
+                    Some(child)
+                }
+                _ => None,
+            })
+            .and_then(|child| child.child_mut("nvPr"))
+            .and_then(|child| child.child_mut("ph"))
+            .ok_or_else(|| write_error(part, "mapped shape has no placeholder element"))?;
+        non_visual
+            .attributes
+            .retain(|name, _| name == "xmlns" || name.starts_with("xmlns:"));
+        for (name, value) in [
+            ("type", placeholder.placeholder_type.clone()),
+            ("idx", placeholder.index.map(|index| index.to_string())),
+            ("orient", placeholder.orientation.clone()),
+            ("sz", placeholder.size.clone()),
+        ] {
+            if let Some(value) = value {
+                non_visual.set_attribute(name, value);
+            }
+        }
+    }
     if patch.offset.is_some() || patch.extent.is_some() {
         patch_transform(element, patch, prefixes, part)?;
     }
@@ -2145,8 +2450,27 @@ fn patch_shape(
             .ok_or_else(|| write_error(part, "shape has no text body properties"))?
             .set_attribute("anchor", anchor.clone());
     }
+    if let Some(structure) = &patch.table_structure {
+        patch_table(element, structure, part)?;
+    }
     for text in &patch.texts {
+        let empty_runs = if patch.table_structure.is_some() {
+            empty_table_runs(element, text, theme, prefixes)
+        } else {
+            Vec::new()
+        };
         patch_text(element, text, theme, prefixes, part)?;
+        if let TextTarget::TableCell { row, cell } = text.target {
+            for (paragraph, run) in empty_runs {
+                let body = table_cell_mut(element, row, cell)
+                    .and_then(|cell| cell.child_mut("txBody"))
+                    .ok_or_else(|| write_error(part, "table cell has no text body"))?;
+                let paragraph = nth_child_mut(body, "p", paragraph)
+                    .ok_or_else(|| write_error(part, "table cell paragraph is missing"))?;
+                let at = paragraph.children.iter().position(|node| matches!(node, XmlNode::Element(element) if element.local_name() == "endParaRPr")).unwrap_or(paragraph.children.len());
+                paragraph.children.insert(at, XmlNode::Element(run));
+            }
+        }
     }
     if !patch.children.is_empty() {
         patch_shape_children(
@@ -2526,6 +2850,16 @@ fn color_element(color: &ColorValue, prefixes: &Prefixes) -> Option<XmlElement> 
     } else {
         return None;
     };
+    if !color.transforms.is_empty() {
+        for transform in color.drawingml_transforms() {
+            let mut child = XmlElement::new(prefixes.drawing(transform.xml_name()));
+            if let Some(value) = transform.xml_value() {
+                child = child.with_attribute("val", value);
+            }
+            element = element.with_child(child);
+        }
+        return Some(element);
+    }
     let fractions = [
         ("alpha", color.alpha),
         ("lumMod", color.luminance_modulation),
@@ -2751,6 +3085,206 @@ pub fn text_paragraph_xml(
         .collect())
 }
 
+fn table_cell_mut(element: &mut XmlElement, row: usize, cell: usize) -> Option<&mut XmlElement> {
+    element
+        .child_mut("graphic")
+        .and_then(|graphic| graphic.child_mut("graphicData"))
+        .and_then(|data| data.child_mut("tbl"))
+        .and_then(|table| nth_child_mut(table, "tr", row))
+        .and_then(|row| nth_child_mut(row, "tc", cell))
+}
+
+fn empty_table_runs(
+    element: &mut XmlElement,
+    text: &TextWrite,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> Vec<(usize, XmlElement)> {
+    let TextTarget::TableCell { row, cell } = text.target else {
+        return Vec::new();
+    };
+    let Some(body) = table_cell_mut(element, row, cell).and_then(|cell| cell.child_mut("txBody"))
+    else {
+        return Vec::new();
+    };
+    text.paragraphs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, paragraph)| {
+            if !paragraph.rebuild || paragraph.runs.iter().any(|run| !run.text.is_empty()) {
+                return None;
+            }
+            let source = body.children_named("p").nth(paragraph.source_index?)?;
+            let mut run = source.children_named("r").next()?.clone();
+            run.children.retain(
+                |child| matches!(child, XmlNode::Element(element) if element.local_name() == "rPr"),
+            );
+            if let Some(style) = paragraph.runs.first() {
+                if run.child("rPr").is_none() {
+                    run.children.insert(
+                        0,
+                        XmlNode::Element(XmlElement::new(prefixes.drawing("rPr"))),
+                    );
+                }
+                apply_run_properties(
+                    run.child_mut("rPr").unwrap(),
+                    &style.properties,
+                    theme,
+                    prefixes,
+                );
+            }
+            let name = source.children_named("r").next()?.child("t")?.name.clone();
+            run.children.push(XmlNode::Element(XmlElement::new(name)));
+            Some((index, run))
+        })
+        .collect()
+}
+
+fn patch_table(
+    element: &mut XmlElement,
+    structure: &TableStructure,
+    part: &str,
+) -> Result<(), PptxError> {
+    if structure.grid.is_empty()
+        || structure.rows.is_empty()
+        || structure.grid.len() != structure.columns.len()
+        || structure.grid.len() != structure.copied_columns.len()
+        || structure.rows.iter().any(|row| {
+            row.cells.len() != structure.grid.len()
+                || row.copied_cells.len() != structure.grid.len()
+        })
+    {
+        return Err(write_error(
+            part,
+            "table structure grid and cell counts must agree",
+        ));
+    }
+    let table = element
+        .child_mut("graphic")
+        .and_then(|graphic| graphic.child_mut("graphicData"))
+        .and_then(|data| data.child_mut("tbl"))
+        .ok_or_else(|| write_error(part, "table structure target is not a table"))?;
+    let mut used: HashSet<String> = table
+        .descendants_named("rowId")
+        .into_iter()
+        .chain(table.descendants_named("colId"))
+        .chain(table.descendants_named("creationId"))
+        .flat_map(|element| element.attributes.values())
+        .cloned()
+        .collect();
+    let mut next_id = used
+        .iter()
+        .filter_map(|value| value.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0);
+    let original_rows: Vec<_> = table.children_named("tr").cloned().collect();
+    let grid = table
+        .child_mut("tblGrid")
+        .ok_or_else(|| write_error(part, "table has no grid"))?;
+    let originals: Vec<_> = grid.children_named("gridCol").cloned().collect();
+    let columns = structure
+        .grid
+        .iter()
+        .zip(&structure.columns)
+        .zip(&structure.copied_columns)
+        .map(|((width, source), copied)| {
+            let mut column = originals
+                .get(*source)
+                .cloned()
+                .ok_or_else(|| write_error(part, "table source grid column is out of range"))?;
+            column.set_attribute("w", width.to_string());
+            if *copied {
+                fresh_table_ids(&mut column, &mut next_id, &mut used, part)?;
+            }
+            Ok(XmlNode::Element(column))
+        })
+        .collect::<Result<Vec<_>, PptxError>>()?;
+    replace_children(grid, "gridCol", columns);
+    let rows = structure
+        .rows
+        .iter()
+        .map(|source| {
+            let mut row = original_rows
+                .get(source.source_row)
+                .cloned()
+                .ok_or_else(|| write_error(part, "table source row is out of range"))?;
+            row.set_attribute("h", source.height.to_string());
+            let cells = source
+                .cells
+                .iter()
+                .zip(&source.copied_cells)
+                .map(|(&[r, c], copied)| {
+                    let mut cell = original_rows
+                        .get(r)
+                        .and_then(|row| row.children_named("tc").nth(c))
+                        .cloned()
+                        .ok_or_else(|| write_error(part, "table source cell is out of range"))?;
+                    if *copied && !source.copied {
+                        fresh_table_ids(&mut cell, &mut next_id, &mut used, part)?;
+                    }
+                    Ok(XmlNode::Element(cell))
+                })
+                .collect::<Result<Vec<_>, PptxError>>()?;
+            replace_children(&mut row, "tc", cells);
+            if source.copied {
+                fresh_table_ids(&mut row, &mut next_id, &mut used, part)?;
+            }
+            Ok(XmlNode::Element(row))
+        })
+        .collect::<Result<Vec<_>, PptxError>>()?;
+    replace_children(table, "tr", rows);
+    Ok(())
+}
+
+fn fresh_table_ids(
+    element: &mut XmlElement,
+    next: &mut u64,
+    used: &mut HashSet<String>,
+    part: &str,
+) -> Result<(), PptxError> {
+    if matches!(element.local_name(), "rowId" | "colId" | "creationId") {
+        for (key, value) in &mut element.attributes {
+            if matches!(key.rsplit(':').next(), Some("val" | "id")) {
+                loop {
+                    *next = next
+                        .checked_add(1)
+                        .filter(|id| *id <= u64::from(u32::MAX))
+                        .ok_or_else(|| write_error(part, "table identifier range exhausted"))?;
+                    let candidate = if value.parse::<u64>().is_ok() {
+                        next.to_string()
+                    } else {
+                        format!("{{FFFFFFFF-FFFF-4FFF-8FFF-{:012X}}}", *next)
+                    };
+                    if used.insert(candidate.clone()) {
+                        *value = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    for child in &mut element.children {
+        if let XmlNode::Element(child) = child {
+            fresh_table_ids(child, next, used, part)?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_children(parent: &mut XmlElement, local: &str, replacements: Vec<XmlNode>) {
+    let at = parent
+        .children
+        .iter()
+        .position(
+            |child| matches!(child, XmlNode::Element(element) if element.local_name() == local),
+        )
+        .unwrap_or(parent.children.len());
+    parent.children.retain(
+        |child| !matches!(child, XmlNode::Element(element) if element.local_name() == local),
+    );
+    parent.children.splice(at..at, replacements);
+}
+
 fn patch_text(
     element: &mut XmlElement,
     text: &TextWrite,
@@ -2769,6 +3303,35 @@ fn patch_text(
             .and_then(|table_cell| table_cell.child_mut("txBody")),
     };
     let body = body.ok_or_else(|| write_error(part, "text target has no body"))?;
+    if let Some(TextAutofit::Normal {
+        font_scale,
+        line_space_reduction,
+    }) = &text.autofit
+    {
+        if body.child("bodyPr").is_none() {
+            body.children.insert(
+                0,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("bodyPr"))),
+            );
+        }
+        let properties = body.child_mut("bodyPr").unwrap();
+        if properties.child("normAutofit").is_none() {
+            let position = properties.children.iter().position(|child| {
+                matches!(child, XmlNode::Element(element) if matches!(element.local_name(), "scene3d" | "sp3d" | "flatTx" | "extLst"))
+            }).unwrap_or(properties.children.len());
+            properties.children.insert(
+                position,
+                XmlNode::Element(XmlElement::new(prefixes.drawing("normAutofit"))),
+            );
+        }
+        let autofit = properties.child_mut("normAutofit").unwrap();
+        if let Some(scale) = font_scale {
+            autofit.set_attribute("fontScale", format_fixed(scale * 100_000.0));
+        }
+        if let Some(reduction) = line_space_reduction {
+            autofit.set_attribute("lnSpcReduction", format_fixed(reduction * 100_000.0));
+        }
+    }
     rebuild_paragraphs(body, &text.paragraphs, theme, prefixes)?;
     Ok(())
 }
@@ -2814,7 +3377,12 @@ fn rebuild_paragraphs(
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
     for paragraph in paragraphs {
-        let source = if let Some(xml) = &paragraph.preserved_xml {
+        let source = if let Some(first) = paragraph.source_paragraphs.first() {
+            first
+                .as_ref()
+                .map(|xml| parse_xml(xml.as_bytes(), "paragraph", &mut budget))
+                .transpose()?
+        } else if let Some(xml) = &paragraph.preserved_xml {
             Some(parse_xml(xml.as_bytes(), "paragraph", &mut budget)?)
         } else {
             paragraph
@@ -2822,6 +3390,26 @@ fn rebuild_paragraphs(
                 .and_then(|index| originals.get(index).cloned())
                 .or_else(|| templates.get(&paragraph.template_index?).cloned())
         };
+        let mut source = source;
+        for xml in paragraph.source_paragraphs.iter().skip(1) {
+            let source = source.get_or_insert_with(|| XmlElement::new(prefixes.drawing("p")));
+            if let Some(xml) = xml {
+                let next = parse_xml(xml.as_bytes(), "paragraph", &mut budget)?;
+                if next.child("endParaRPr").is_some() {
+                    source.children.retain(|child| {
+                        !matches!(child, XmlNode::Element(element) if element.local_name() == "endParaRPr")
+                    });
+                }
+                source.children.extend(
+                    next.child_elements()
+                        .filter(|child| {
+                            is_run_element(child.local_name()) || child.local_name() == "endParaRPr"
+                        })
+                        .cloned()
+                        .map(XmlNode::Element),
+                );
+            }
+        }
         let element = match source {
             Some(element) if !paragraph.rebuild => element,
             source => build_paragraph(paragraph, source, theme, prefixes),
@@ -3428,7 +4016,8 @@ fn is_flattened_colour_snapshot(
     let (Some(authored), Some(requested)) = (authored, requested) else {
         return false;
     };
-    if requested.theme_color.is_some()
+    if !requested.transforms.is_empty()
+        || requested.theme_color.is_some()
         || requested.theme_tint.is_some()
         || requested.theme_shade.is_some()
         || requested.auto.is_some()
@@ -3438,7 +4027,10 @@ fn is_flattened_colour_snapshot(
     {
         return false;
     }
-    if requested.alpha.is_some() && requested.alpha != authored.alpha {
+    if requested.alpha.is_some()
+        && ooxml_drawingml::resolve_color_value_alpha(requested)
+            != ooxml_drawingml::resolve_color_value_alpha(authored)
+    {
         return false;
     }
     resolve_color_value_to_hex_with_theme(Some(authored), theme)
@@ -3842,13 +4434,17 @@ fn shape_element(
         ));
     }
     let shape_id = alloc_shape_id(next_shape_id, part)?;
+    let mut shape_properties = XmlElement::new(prefixes.presentation("cNvSpPr"));
+    if add.text_box {
+        shape_properties.set_attribute("txBox", "1");
+    }
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
                 .with_attribute("id", shape_id.to_string())
                 .with_attribute("name", add.name.clone()),
         )
-        .with_child(XmlElement::new(prefixes.presentation("cNvSpPr")))
+        .with_child(shape_properties)
         .with_child(non_visual_properties(add.placeholder.as_ref(), prefixes));
     let transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
@@ -4131,6 +4727,7 @@ fn picture_shape_element(
 fn slide_xml(
     name: Option<&str>,
     shapes: &[ShapeAdd],
+    background: Option<&ShapeFill>,
     part: &str,
     sink: &mut PartSink<'_>,
     budget: &mut ParseBudget<'_>,
@@ -4192,6 +4789,9 @@ fn slide_xml(
     if let Some(name) = name {
         common.set_attribute("name", name);
     }
+    if let Some(fill) = background {
+        common = common.with_child(background_element(fill, &prefixes, part)?);
+    }
     root = root.with_child(common.with_child(tree)).with_child(
         XmlElement::new(prefixes.presentation("clrMapOvr"))
             .with_child(XmlElement::new(prefixes.drawing("masterClrMapping"))),
@@ -4221,6 +4821,155 @@ mod tests {
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml, serialize_xml_fragment};
+
+    #[test]
+    fn a_labelled_ellipse_is_not_written_as_a_text_box() {
+        let add = ShapeAdd {
+            name: "Labelled ellipse".to_owned(),
+            geometry: "ellipse".to_owned(),
+            text_box: false,
+            x: 0,
+            y: 0,
+            width: 1_000_000,
+            height: 500_000,
+            adjust_values: BTreeMap::new(),
+            fill: None,
+            outline: None,
+            paragraphs: Some(vec![ParagraphWrite {
+                source_paragraphs: Vec::new(),
+                source_index: None,
+                preserved_xml: None,
+                rebuild: true,
+                properties_changed: true,
+                alignment: None,
+                level: 0,
+                bullet: None,
+                runs: vec![RunWrite {
+                    text: "Ellipse label".to_owned(),
+                    properties: RunProperties::default(),
+                }],
+            }]),
+            picture: None,
+        };
+        let mut root = XmlElement::new("p:sld");
+        let prefixes = Prefixes::from_root(&mut root);
+        let shape = shape_element(&add, &mut Some(2), &prefixes, "ppt/slides/slide1.xml").unwrap();
+        assert!(shape.child("txBody").unwrap().child("p").is_some());
+        assert_eq!(
+            shape
+                .child("spPr")
+                .unwrap()
+                .child("prstGeom")
+                .unwrap()
+                .attribute("prst"),
+            Some("ellipse")
+        );
+        assert_eq!(
+            shape
+                .child("nvSpPr")
+                .unwrap()
+                .child("cNvSpPr")
+                .unwrap()
+                .attribute("txBox"),
+            None
+        );
+    }
+
+    #[test]
+    fn changing_outline_width_preserves_unchanged_color_source() {
+        let limits = ParseLimits::default();
+        let mut properties = parse_xml(
+            br#"<p:spPr><a:ln w="9525"><a:solidFill><a:schemeClr val="accent1"><a:tint val="50%"/><a:lumMod val="60000"/><a:extLst/></a:schemeClr></a:solidFill></a:ln></p:spPr>"#,
+            "shape.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let original_color = properties
+            .child("ln")
+            .unwrap()
+            .child("solidFill")
+            .unwrap()
+            .clone();
+        let mut outline =
+            crate::drawing::parse_outline_element(properties.child("ln").unwrap()).unwrap();
+        outline.width = Some(19050.0);
+        let prefixes = Prefixes::from_root(&mut properties);
+        set_outline(&mut properties, &outline, &prefixes);
+        let line = properties.child("ln").unwrap();
+        assert_eq!(line.attribute("w"), Some("19050"));
+        assert_eq!(line.child("solidFill"), Some(&original_color));
+    }
+
+    #[test]
+    fn rebuilt_color_preserves_transform_order_and_exact_percentages() {
+        let limits = ParseLimits::default();
+        let source = parse_xml(
+            br#"<a:solidFill><a:srgbClr val="4472C4"><a:tint val="50000"/><a:lumMod val="75000"/><a:shade val="12345"/><a:shade val="60000"/><a:hueOff val="-5400000"/><a:comp/><a:alpha val="50000"/></a:srgbClr></a:solidFill>"#,
+            "color.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let color = crate::drawing::parse_color_container(&source).unwrap();
+        let mut properties = XmlElement::new("p:spPr");
+        let prefixes = Prefixes::from_root(&mut properties);
+        let written = color_element(&color, &prefixes).unwrap();
+        assert_eq!(
+            written
+                .child_elements()
+                .map(|child| (child.local_name(), child.attribute("val")))
+                .collect::<Vec<_>>(),
+            vec![
+                ("tint", Some("50000")),
+                ("lumMod", Some("75000")),
+                ("shade", Some("12345")),
+                ("shade", Some("60000")),
+                ("hueOff", Some("-5400000")),
+                ("comp", None),
+                ("alpha", Some("50000")),
+            ]
+        );
+        assert_eq!(
+            crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written)
+            ),
+            Some(color)
+        );
+    }
+
+    #[test]
+    fn mixed_color_alpha_survives_serialization() {
+        use ooxml_drawingml::{ColorTransform, resolve_color_value_to_rgba_hex};
+
+        for step in [None, Some(ColorTransform::AlphaMod(0.5))] {
+            let color = ColorValue {
+                rgb: Some("112233".to_owned()),
+                theme_tint: Some("00".to_owned()),
+                alpha: Some(0.25),
+                transforms: std::iter::once(ColorTransform::Tint(1.0))
+                    .chain(step)
+                    .collect(),
+                ..Default::default()
+            };
+            let mut properties = XmlElement::new("p:spPr");
+            let prefixes = Prefixes::from_root(&mut properties);
+            let written = color_element(&color, &prefixes).unwrap();
+            assert_eq!(written.child("alpha").is_some(), step.is_none());
+            assert_eq!(written.child_elements().count(), 2);
+            let reopened = crate::drawing::parse_color_container(
+                &XmlElement::new("a:solidFill").with_child(written),
+            )
+            .unwrap();
+            let expected = if step.is_none() {
+                "#11223340"
+            } else {
+                "#11223380"
+            };
+            assert_eq!(
+                resolve_color_value_to_rgba_hex(Some(&reopened), None).as_deref(),
+                Some(expected)
+            );
+        }
+    }
 
     #[test]
     fn a_new_gradient_outline_writes_its_stops_and_angle() {
@@ -4360,6 +5109,7 @@ mod tests {
                 },
             ],
             None,
+            None,
             part,
             ShapeElements::WithConnectors,
             &mut sink,
@@ -4372,6 +5122,183 @@ mod tests {
         assert!(!xml.contains(r#"name="two""#), "{xml}");
         let survivor = xml.split(r#"name="three""#).nth(1).unwrap();
         assert!(survivor.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    fn patch_background_fixture(xml: &[u8], background: Option<&BackgroundWrite>) -> String {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(xml, part, &mut budget).unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Keep { source_index: 0 }],
+            background,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+        String::from_utf8(serialize_xml(&root)).unwrap()
+    }
+
+    #[test]
+    fn a_new_background_precedes_the_shape_tree() {
+        let xml = patch_background_fixture(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            Some(&BackgroundWrite::Set(Box::new(ShapeFill {
+                color: Some(ColorValue::from_attribute("0F1720")),
+                ..ShapeFill::named("solid")
+            }))),
+        );
+        let common = xml.find("<p:cSld>").unwrap();
+        let bg = xml.find("<p:bg>").unwrap();
+        let effects = xml.find("<a:effectLst/>").unwrap();
+        let tree = xml.find("<p:spTree>").unwrap();
+        assert!(common < bg && bg < effects && effects < tree, "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn clearing_a_background_removes_only_the_declaration() {
+        let xml = patch_background_fixture(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            Some(&BackgroundWrite::Clear),
+        );
+        assert!(!xml.contains("<p:bg>"), "{xml}");
+        assert!(xml.contains(r#"name="one""#), "{xml}");
+    }
+
+    #[test]
+    fn an_untouched_background_survives_a_shape_patch() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn a_patched_use_bg_fill_shape_keeps_the_attribute() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp useBgFill="1"><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    fill: Some(ShapeFill {
+                        color: Some(ColorValue::from_attribute("DC2626")),
+                        ..ShapeFill::named("solid")
+                    }),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            None,
+            part,
+            ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+
+        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
+        assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
+    }
+
+    #[test]
+    fn an_added_slide_background_precedes_the_shape_tree() {
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let fill = ShapeFill {
+            color: Some(ColorValue::from_attribute("F8FAFC")),
+            ..ShapeFill::named("solid")
+        };
+        let xml = slide_xml(
+            None,
+            &[],
+            Some(&fill),
+            "ppt/slides/slide9.xml",
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
+        let xml = String::from_utf8(xml).unwrap();
+        let common = xml.find("<p:cSld>").unwrap();
+        let bg = xml.find("<p:bg>").unwrap();
+        let tree = xml.find("<p:spTree>").unwrap();
+        assert!(common < bg && bg < tree, "{xml}");
+        assert!(xml.contains(r#"<a:srgbClr val="F8FAFC"/>"#), "{xml}");
     }
 
     #[test]
@@ -4397,6 +5324,7 @@ mod tests {
         patch_slide(
             &mut root,
             &[],
+            None,
             None,
             part,
             ShapeElements::WithoutConnectors,
@@ -4507,6 +5435,7 @@ mod tests {
         let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
         let prefixes = Prefixes::from_root(&mut root);
         let write = ParagraphWrite {
+            source_paragraphs: Vec::new(),
             source_index: Some(0),
             template_index: None,
             preserved_xml: None,
@@ -4894,6 +5823,7 @@ mod tests {
                     ..ShapePatch::default()
                 }),
             }],
+            None,
             None,
             part,
             ShapeElements::WithConnectors,

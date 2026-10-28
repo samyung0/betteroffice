@@ -1,13 +1,73 @@
 //! Font-independent paragraph semantics shared by rendering and editing: the layout and master a
 //! slide inherits from, the paragraph-property cascade, and list markers.
 
-use ooxml_drawingml::ColorValue;
+use ooxml_drawingml::{ColorValue, ResolvedCellStyle};
 use pptx_parse::{
-    Bullet, ParagraphProperties, Placeholder, PptxPackage, RunProperties, ShapeNode, Slide,
-    SlideLayout, SlideMaster, TextBody,
+    Bullet, ParagraphProperties, Placeholder, PptxPackage, Presentation, RunProperties, ShapeNode,
+    Slide, SlideLayout, SlideMaster, TextBody,
 };
 
 use crate::deck::shape_base;
+
+/// The paragraph levels table text inherits outside the table style: each level the master's
+/// `otherStyle` authors, else `p:defaultTextStyle` over its `a:defPPr`.
+pub fn table_text_levels(
+    master: Option<&SlideMaster>,
+    master_levels: &[bool; 9],
+    presentation: &Presentation,
+) -> Vec<ParagraphProperties> {
+    master_levels
+        .iter()
+        .enumerate()
+        .map(|(index, present)| {
+            let mut level = ParagraphProperties::default();
+            if *present {
+                if let Some(source) = master.and_then(|master| master.text_styles.other.get(index))
+                {
+                    merge_paragraph_properties(&mut level, source);
+                }
+            } else {
+                if let Some(source) = presentation.default_text_paragraph.as_deref() {
+                    merge_paragraph_properties(&mut level, source);
+                }
+                if let Some(source) = presentation
+                    .default_text_style
+                    .get(index)
+                    .or_else(|| presentation.default_text_style.first())
+                {
+                    merge_paragraph_properties(&mut level, source);
+                }
+            }
+            level
+        })
+        .collect()
+}
+
+/// Table text defaults from the master and table style, shaped as a body the cascade inherits
+/// from.
+pub fn table_style_text_body(
+    style: &ResolvedCellStyle,
+    text_levels: &[ParagraphProperties],
+) -> TextBody {
+    let properties = ParagraphProperties {
+        default_run: Some(RunProperties {
+            bold: style.bold,
+            italic: style.italic,
+            color: style.color.clone(),
+            ..RunProperties::default()
+        }),
+        ..ParagraphProperties::default()
+    };
+    let mut list_style = text_levels.to_vec();
+    for level in &mut list_style {
+        merge_paragraph_properties(level, &properties);
+    }
+    TextBody {
+        default_list_style: Some(Box::new(properties)),
+        list_style,
+        ..TextBody::default()
+    }
+}
 
 /// The largest number a list marker shows: the largest `startAt` plus one per paragraph a story
 /// renders.

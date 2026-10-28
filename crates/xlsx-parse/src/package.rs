@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, OnceLock};
 
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -35,6 +36,7 @@ pub struct PreservedPackage {
     pub(crate) active_sheet: SheetId,
     pub(crate) unpatchable_references: Vec<UnpatchableReference>,
     pub(crate) rich_shared_strings: BTreeSet<usize>,
+    pub(crate) text_runs: Arc<OnceLock<crate::rich_text::RichTextIndex>>,
 }
 
 impl PreservedPackage {
@@ -83,6 +85,7 @@ impl PreservedPackage {
         let sheet_entries = parse_sheet_entries(workbook_xml)?;
         let mut sheets = Vec::with_capacity(sheet_entries.len());
         for (index, entry) in sheet_entries.into_iter().enumerate() {
+            xlsx_model::progress::pulse();
             let relationship = entry
                 .relationship_id
                 .as_deref()
@@ -194,6 +197,7 @@ impl PreservedPackage {
             active_sheet,
             unpatchable_references,
             rich_shared_strings,
+            text_runs: Arc::new(OnceLock::new()),
         })
     }
 
@@ -393,6 +397,12 @@ impl PreservedPackage {
             .is_none_or(PreservedSheet::is_worksheet)
     }
 
+    /// The workbook as the package was opened.
+    #[doc(hidden)]
+    pub fn original_workbook(&self) -> &Workbook {
+        &self.original_workbook
+    }
+
     /// The original name of a source sheet.
     #[doc(hidden)]
     pub fn source_sheet_name(&self, index: usize) -> Option<&str> {
@@ -467,6 +477,27 @@ impl PreservedPackage {
                     })
                 })
             })
+    }
+
+    #[doc(hidden)]
+    pub fn source_sheet_allows_chart_edits(&self, index: usize) -> bool {
+        match self.source_sheet_kind(index) {
+            Some(SourceSheetKind::Worksheet) => !self.source_sheet_is_protected(index),
+            Some(SourceSheetKind::Chartsheet) => self.sheets[index]
+                .template
+                .child("sheetProtection")
+                .is_none_or(|protection| {
+                    attributes_from_fragment(&protection.bytes).is_ok_and(|attributes| {
+                        attributes
+                            .iter()
+                            .filter(|attribute| {
+                                matches!(attribute.name.as_str(), "content" | "objects")
+                            })
+                            .all(|attribute| matches!(attribute.value.as_str(), "0" | "false"))
+                    })
+                }),
+            _ => false,
+        }
     }
 
     /// Whether a protected source sheet still lets users format cells (`formatCells="0"`).
@@ -748,7 +779,44 @@ impl XmlTemplate {
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
         let bom = utf8_bom_len(data);
-        let mut reader = NsReader::from_reader(&data[bom..]);
+        Self::capture_from_reader(data, NsReader::from_reader(&data[bom..]), 0)
+    }
+
+    pub(crate) fn capture_child(&self, child: &XmlChild) -> Result<Self, ParseError> {
+        let mut writer = Writer::new(Vec::new());
+        let mut root = BytesStart::new("context");
+        for (prefix, namespace) in &self.namespaces {
+            let name = match prefix {
+                Some(prefix) => format!("xmlns:{prefix}"),
+                None => "xmlns".to_owned(),
+            };
+            root.push_attribute((name.as_str(), namespace.as_str()));
+        }
+        writer.write_event(Event::Start(root)).map_err(xml_err)?;
+        let mut document = writer.into_inner();
+        let context_len = document.len();
+        document.extend_from_slice(&child.bytes);
+        document.extend_from_slice(b"</context>");
+        let mut reader = NsReader::from_reader(document.as_slice());
+        reader.read_event().map_err(xml_err)?;
+        let mut template = Self::capture_from_reader(&child.bytes, reader, context_len)?;
+        let local_namespaces = std::mem::take(&mut template.namespaces);
+        template.namespaces = self.namespaces.clone();
+        for binding in local_namespaces {
+            template
+                .namespaces
+                .retain(|(prefix, _)| *prefix != binding.0);
+            template.namespaces.push(binding);
+        }
+        Ok(template)
+    }
+
+    fn capture_from_reader(
+        data: &[u8],
+        mut reader: NsReader<&[u8]>,
+        context_len: usize,
+    ) -> Result<Self, ParseError> {
+        let bom = utf8_bom_len(data);
         let config = reader.config_mut();
         config.expand_empty_elements = false;
         config.check_end_names = true;
@@ -764,10 +832,11 @@ impl XmlTemplate {
         let mut spans = Vec::new();
 
         loop {
-            let before = bom + reader.buffer_position() as usize;
+            let before = bom + reader.buffer_position() as usize - context_len;
             let (namespace, event) = reader.read_resolved_event().map_err(xml_err)?;
+            xlsx_model::progress::tick();
             let namespace = resolved_namespace(namespace);
-            let after = bom + reader.buffer_position() as usize;
+            let after = bom + reader.buffer_position() as usize - context_len;
             match event {
                 Event::Start(element) => {
                     if depth == 0 {

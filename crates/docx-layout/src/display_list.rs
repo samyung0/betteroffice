@@ -139,6 +139,13 @@ pub struct DisplayPage {
     pub footer: Option<HfRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub note_areas: Vec<NoteRegion>,
+    /// Where host layout reservations landed on this page; never painted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reservations: Vec<DisplayReservation>,
+    /// Table cell edges without a visible border, for a view-only overlay;
+    /// never painted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub table_gridlines: Vec<DisplayGridline>,
     /// Geometry only: the page's content is built when a host asks for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unbuilt: bool,
@@ -149,6 +156,28 @@ pub struct DisplayPage {
     /// For an unbuilt page, the header and footer parts its build paints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hf_parts: Option<HfParts>,
+}
+
+/// The page rect a host's layout reservation takes, in page coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayReservation {
+    pub owner: String,
+    pub id: String,
+    pub x: Number,
+    pub y: Number,
+    pub width: Number,
+    pub height: Number,
+}
+
+/// One table cell edge segment in page coordinates.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DisplayGridline {
+    pub x1: Number,
+    pub y1: Number,
+    pub x2: Number,
+    pub y2: Number,
 }
 
 /// Relationship ids of the header and footer parts a page paints.
@@ -884,6 +913,12 @@ pub struct EchoRunFacts {
     pub scale: f64,
     #[serde(default)]
     pub can_empty: bool,
+    /// Unstretched width of a line that justification stretches to `right`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stretch: Option<f64>,
+    /// Width a centered line centers in from `x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center_width: Option<f64>,
 }
 
 fn echo_coordinate<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
@@ -1256,6 +1291,7 @@ pub struct BuildInput {
     stale_block_pruning_passes: usize,
     contract_version: Option<u32>,
     measured: Vec<MeasuredBlockIn>,
+    converted_measurements: HashMap<String, ConvertedMeasurement>,
     options: Value,
     layout: LayoutIn,
     /// Optional header/footer payload; see [`crate::hf_bands`] for its shape.
@@ -1322,7 +1358,62 @@ pub struct ResidentDisplayInput {
     input: BuildInput,
 }
 
+struct ConvertedMeasurement {
+    fingerprint: u128,
+    extent_key: Vec<u8>,
+    source: crate::types::LayoutBlock,
+}
+
 impl ResidentDisplayInput {
+    #[doc(hidden)]
+    pub fn remember_measurement_fingerprints(
+        &mut self,
+        pagination: &crate::types::Input,
+        fingerprints: &[u128],
+    ) {
+        self.input.converted_measurements.clear();
+        if fingerprints.len() != pagination.measured.len() {
+            return;
+        }
+        let keys: HashSet<_> = self
+            .input
+            .measured
+            .iter()
+            .filter_map(measured_block_key)
+            .collect();
+        let unreadable: HashSet<_> = self
+            .input
+            .unreadable
+            .iter()
+            .filter(|known| known.page.is_none())
+            .map(|known| known.block.as_str())
+            .collect();
+        let mut seen = HashSet::new();
+        for (measured, &fingerprint) in pagination.measured.iter().zip(fingerprints) {
+            let Some(key) = resident_block_key(&measured.block) else {
+                continue;
+            };
+            if !seen.insert(key.to_string()) {
+                self.input.converted_measurements.remove(key.as_ref());
+                continue;
+            }
+            if keys.contains(&key) && !unreadable.contains(key.as_ref()) {
+                let mut extent_key = Vec::new();
+                if crate::extent_key::encode(&mut extent_key, &measured.measure).is_err() {
+                    continue;
+                }
+                self.input.converted_measurements.insert(
+                    key.into_owned(),
+                    ConvertedMeasurement {
+                        fingerprint,
+                        extent_key,
+                        source: measured.block.clone(),
+                    },
+                );
+            }
+        }
+    }
+
     #[doc(hidden)]
     pub fn defer_stale_block_pruning(&mut self, defer: bool) {
         self.input.defer_stale_block_pruning = defer;
@@ -1418,6 +1509,7 @@ impl<'de> Deserialize<'de> for BuildInput {
             stale_block_pruning_passes: 0,
             contract_version: wire.contract_version,
             measured: wire.measured,
+            converted_measurements: HashMap::new(),
             options: wire.options,
             layout: wire.layout,
             headers_footers,
@@ -1622,8 +1714,25 @@ pub(crate) enum BlockIn {
     Shape(Box<ShapeBlockIn>),
     #[serde(rename = "chart")]
     Chart(Box<ChartBlockIn>),
+    #[serde(rename = "reserved")]
+    Reserved(Box<ReservedBlockIn>),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize, Clone, Default)]
+struct ReservationRefIn {
+    #[serde(default)]
+    owner: String,
+    #[serde(default)]
+    id: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ReservedBlockIn {
+    pub(crate) id: Value,
+    #[serde(default)]
+    reservation: ReservationRefIn,
 }
 
 #[derive(Deserialize)]
@@ -1683,8 +1792,25 @@ enum RunIn {
     LineBreak(LineBreakRunIn),
     #[serde(rename = "field")]
     Field(FieldRunIn),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedRunIn),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ReservedRunIn {
+    #[serde(default)]
+    reservation: ReservationRefIn,
+    #[serde(default)]
+    width: f64,
+    #[serde(default)]
+    height: f64,
+    #[serde(default)]
+    pm_start: Option<i64>,
+    #[serde(default)]
+    pm_end: Option<i64>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -2180,6 +2306,8 @@ pub(crate) struct TableBlockIn {
     /// header/footer flow cursor.
     #[serde(default)]
     pub(crate) floating: Option<FloatingTablePositionIn>,
+    #[serde(default)]
+    gridlines: Option<bool>,
 }
 
 pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
@@ -2526,6 +2654,8 @@ struct ChartSeriesIn {
     #[serde(default, deserialize_with = "blank_numbers::deserialize")]
     values: Vec<f64>,
     #[serde(default)]
+    value_format: Option<String>,
+    #[serde(default)]
     color: Option<String>,
     #[serde(default)]
     points: Vec<ChartPointIn>,
@@ -2602,6 +2732,8 @@ struct ChartAxisIn {
     major_tick_mark: Option<String>,
     #[serde(default)]
     minor_tick_mark: Option<String>,
+    #[serde(default)]
+    tick_label_position: Option<String>,
     #[serde(default)]
     major_gridlines: bool,
     #[serde(default)]
@@ -3002,6 +3134,8 @@ pub(crate) struct PageIn {
     #[serde(default)]
     page_borders: Option<PageBordersIn>,
     #[serde(default)]
+    page_borders: Option<PageBordersIn>,
+    #[serde(default)]
     columns: Option<ColumnLayoutIn>,
     #[serde(default)]
     note_areas: Vec<NoteAreaIn>,
@@ -3129,8 +3263,24 @@ enum FragmentIn {
     Shape(ShapeFragmentIn),
     #[serde(rename = "chart")]
     Chart(ChartFragmentIn),
+    #[serde(rename = "reserved")]
+    Reserved(ReservedFragmentIn),
     #[serde(other)]
     Unsupported,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReservedFragmentIn {
+    block_id: Value,
+    #[serde(default)]
+    x: f64,
+    #[serde(default)]
+    y: f64,
+    #[serde(default)]
+    width: f64,
+    #[serde(default)]
+    height: f64,
 }
 
 #[derive(Deserialize)]
@@ -4126,6 +4276,12 @@ fn resolve_line_segments<'a>(runs: &'a [RunIn], line: &LineIn) -> Vec<ResolvedSe
                 pm_start: t.pm_start,
                 pm_end: t.pm_end,
             }),
+            RunIn::Reserved(t) => out.push(ResolvedSegment {
+                run,
+                text: String::new(),
+                pm_start: t.pm_start,
+                pm_end: t.pm_end,
+            }),
             RunIn::Unsupported => {}
         }
     }
@@ -4168,6 +4324,11 @@ enum LinePaintItem<'a> {
         pm_start: Option<i64>,
         level: u8,
     },
+    Reserved {
+        run: &'a ReservedRunIn,
+        single: bool,
+        level: u8,
+    },
 }
 
 impl LinePaintItem<'_> {
@@ -4176,7 +4337,8 @@ impl LinePaintItem<'_> {
             LinePaintItem::Text(item) => item.level,
             LinePaintItem::Tab { level, .. }
             | LinePaintItem::Image { level, .. }
-            | LinePaintItem::LineBreak { level, .. } => *level,
+            | LinePaintItem::LineBreak { level, .. }
+            | LinePaintItem::Reserved { level, .. } => *level,
         }
     }
 
@@ -4190,6 +4352,7 @@ impl LinePaintItem<'_> {
                 .and_then(|bounds| bounds.width)
                 .unwrap_or(run.width),
             LinePaintItem::LineBreak { .. } => 0.0,
+            LinePaintItem::Reserved { run, .. } => run.width,
         }
     }
 }
@@ -4365,9 +4528,26 @@ pub(crate) struct RenderCtx<'a> {
     pub(crate) shape: Option<&'a ShapeFonts<'a>>,
     /// Per-page PAGE/NUMPAGES widths for header/footer field lines.
     pub(crate) field_widths: Option<&'a FieldWidthMap>,
+    /// Collects the page's reservation rects; `None` drops them.
+    pub(crate) reservations: Option<&'a std::cell::RefCell<Vec<DisplayReservation>>>,
+    /// Collects the page's table gridlines; `None` drops them.
+    pub(crate) gridlines: Option<&'a std::cell::RefCell<Vec<DisplayGridline>>>,
 }
 
 impl RenderCtx<'_> {
+    fn reserve(&self, reservation: &ReservationRefIn, x: f64, y: f64, width: f64, height: f64) {
+        if let Some(reservations) = self.reservations {
+            reservations.borrow_mut().push(DisplayReservation {
+                owner: reservation.owner.clone(),
+                id: reservation.id.clone(),
+                x: px(x),
+                y: px(y),
+                width: px(width),
+                height: px(height),
+            });
+        }
+    }
+
     /// `(fallback_width, resolved_width_on_this_page)` for a field run, when the
     /// input supplied a per-page width keyed on its document position.
     fn field_width(&self, pm_start: Option<i64>) -> Option<(f64, f64)> {
@@ -4445,23 +4625,22 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
     let content_width = (page.size.w - margins.left - margins.right).max(0.0);
     let content_bottom = page.size.h - margins.bottom;
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut cursor = page.margins.left;
-        for index in 0..columns.count.saturating_sub(1) {
-            let width = columns
+        let rectangles = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            columns.count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .unwrap_or(0.0);
-            let space = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .unwrap_or(columns.gap);
-            cursor += width;
+                .iter()
+                .map(|column| (column.width, column.space)),
+        );
+        for pair in rectangles.windows(2) {
+            let right = pair[0].0 + pair[0].1;
+            let x = page.margins.left + (right + pair[1].0) / 2.0;
             prims.push(Primitive::Line(LinePrimitive {
-                x1: px(cursor + space / 2.0),
+                x1: px(x),
                 y1: px(margins.top),
-                x2: px(cursor + space / 2.0),
+                x2: px(x),
                 y2: px(content_bottom),
                 stroke_width: px(0.5),
                 color: "#000000".to_string(),
@@ -4473,7 +4652,6 @@ fn emit_column_separators(prims: &mut Vec<Primitive>, page: &PageIn) {
                 border_owner: None,
                 attrs: DocAttrs::default(),
             }));
-            cursor += space;
         }
         return;
     }
@@ -4519,55 +4697,23 @@ fn page_content_geometry(page: &PageIn) -> (DisplayBounds, Vec<DisplayBounds>) {
     };
     let count = columns.count.clamp(1, 45);
     if columns.equal_width == Some(false) && !columns.columns.is_empty() {
-        let mut widths = Vec::with_capacity(count);
-        let mut gaps = Vec::with_capacity(count);
-        for index in 0..count {
-            let width = columns
+        let bounds = crate::page_flow::unequal_column_rectangles(
+            content_width,
+            count,
+            columns.gap,
+            columns
                 .columns
-                .get(index)
-                .and_then(|column| column.width)
-                .filter(|value| value.is_finite() && *value > 0.0)
-                .unwrap_or(0.0);
-            let gap = columns
-                .columns
-                .get(index)
-                .and_then(|column| column.space)
-                .filter(|value| value.is_finite() && *value >= 0.0)
-                .unwrap_or_else(|| columns.gap.max(0.0));
-            widths.push(width);
-            gaps.push(gap);
-        }
-        let gap_total: f64 = gaps.iter().take(count.saturating_sub(1)).sum();
-        let known_total: f64 = widths.iter().sum();
-        let missing = widths.iter().filter(|width| **width <= 0.0).count();
-        let fallback = if missing > 0 {
-            (content_width - gap_total - known_total).max(0.0) / missing as f64
-        } else {
-            0.0
-        };
-        for width in &mut widths {
-            if *width <= 0.0 {
-                *width = fallback;
-            }
-        }
-        let widths_total: f64 = widths.iter().sum();
-        if widths_total + gap_total > content_width && widths_total > 0.0 {
-            let scale = (content_width - gap_total).max(0.0) / widths_total.max(1.0);
-            for width in &mut widths {
-                *width *= scale;
-            }
-        }
-        let mut x = page.margins.left;
-        let mut bounds = Vec::with_capacity(count);
-        for index in 0..count {
-            bounds.push(DisplayBounds {
-                x: px(x),
-                y: px(margins.top),
-                width: px(widths[index]),
-                height: px(content_height),
-            });
-            x += widths[index] + if index + 1 < count { gaps[index] } else { 0.0 };
-        }
+                .iter()
+                .map(|column| (column.width, column.space)),
+        )
+        .into_iter()
+        .map(|(x, width)| DisplayBounds {
+            x: px(page.margins.left + x),
+            y: px(margins.top),
+            width: px(width),
+            height: px(content_height),
+        })
+        .collect();
         return (content, bounds);
     }
 
@@ -4706,6 +4852,16 @@ fn emit_note_item(
                 };
                 emit_table_fragment(prims, &fragment, block, measure, ctx);
                 cursor += measure.total_height;
+            }
+            (BlockIn::Reserved(block), MeasureIn::Image(measure)) => {
+                ctx.reserve(
+                    &block.reservation,
+                    x,
+                    y + cursor,
+                    measure.width.min(width.max(0.0)).max(0.0),
+                    measure.height,
+                );
+                cursor += measure.height;
             }
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let mut attrs = BlockRef::of(&block.id).attrs();
@@ -4970,6 +5126,8 @@ fn recompose_hf_region(
     total_pages: u64,
     cached_page_totals: bool,
     shape: Option<&ShapeFonts<'_>>,
+    reservations: &std::cell::RefCell<Vec<DisplayReservation>>,
+    gridlines: &std::cell::RefCell<Vec<DisplayGridline>>,
 ) {
     let Some(variant) = hf
         .variants
@@ -5000,6 +5158,8 @@ fn recompose_hf_region(
         cached_page_totals,
         shape,
         field_widths: (!field_widths.is_empty()).then_some(&field_widths),
+        reservations: Some(reservations),
+        gridlines: Some(gridlines),
     };
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let height = variant
@@ -5104,6 +5264,16 @@ fn recompose_hf_region(
                     carried_to_next: None,
                 };
                 emit_table_fragment(&mut flow, &fragment, block, measure, &ctx);
+            }
+            (BlockIn::Reserved(block), MeasureIn::Image(measure)) => {
+                let y = origin_y + hf_flow.place(measure.height, 0.0, 0.0);
+                ctx.reserve(
+                    &block.reservation,
+                    page.margins.left,
+                    y,
+                    measure.width.min(content_width.max(0.0)).max(0.0),
+                    measure.height,
+                );
             }
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let x = page.margins.left;
@@ -5212,6 +5382,7 @@ fn build_display_list_selected(
             BlockIn::TextBox(t) => block_key(&t.id),
             BlockIn::Shape(s) => block_key(&s.id),
             BlockIn::Chart(c) => block_key(&c.id),
+            BlockIn::Reserved(r) => block_key(&r.id),
             BlockIn::Unsupported => continue,
         };
         by_id.entry(key).or_insert(mb);
@@ -5229,6 +5400,8 @@ fn build_display_list_selected(
         if selected_pages.is_some_and(|selected| !selected.contains(&page_index)) {
             continue;
         }
+        let page_reservations = std::cell::RefCell::new(Vec::new());
+        let page_gridlines = std::cell::RefCell::new(Vec::new());
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
             page_label: page.page_label.clone(),
@@ -5237,6 +5410,8 @@ fn build_display_list_selected(
             cached_page_totals: input.layout.cached_page_totals,
             shape: shape_fonts.as_ref(),
             field_widths: None,
+            reservations: Some(&page_reservations),
+            gridlines: Some(&page_gridlines),
         };
         let mut prims: Vec<Primitive> = Vec::new();
         let mut page_borders: Vec<PageBorderPrimitive> = Vec::new();
@@ -5387,7 +5562,32 @@ fn build_display_list_selected(
                     else {
                         continue;
                     };
+                    let stamp_from = prims.len();
                     emit_table_fragment(&mut prims, tf, block, measure, &ctx);
+                    if page.columns.as_ref().is_some_and(|columns| {
+                        columns.count > 1 && columns.equal_width == Some(false)
+                    }) && tf.width < table_total_width(measure)
+                    {
+                        let clip = ClipRect {
+                            x: Some(px(tf.x)),
+                            y: Some(px(tf.y)),
+                            w: Some(px(tf.width.max(0.0))),
+                            h: Some(px(tf.height.max(0.0))),
+                        };
+                        for primitive in &mut prims[stamp_from..] {
+                            let attrs = match primitive {
+                                Primitive::Line(line) => Some(&mut line.attrs),
+                                other => doc_attrs_mut(other),
+                            };
+                            if let Some(attrs) = attrs {
+                                apply_clip_group(
+                                    attrs,
+                                    format!("clip-{}-column", block_key(&tf.block_id)),
+                                    clip.clone(),
+                                );
+                            }
+                        }
+                    }
                 }
                 FragmentIn::Image(imf) => {
                     prev_para_borders = None;
@@ -5460,6 +5660,14 @@ fn build_display_list_selected(
                     };
                     emit_chart_fragment(&mut prims, cf, block);
                 }
+                FragmentIn::Reserved(rf) => {
+                    prev_para_borders = None;
+                    if let Some(mb) = by_id.get(block_key(&rf.block_id).as_ref())
+                        && let BlockIn::Reserved(block) = &mb.block
+                    {
+                        ctx.reserve(&block.reservation, rf.x, rf.y, rf.width, rf.height);
+                    }
+                }
                 FragmentIn::Unsupported => {
                     prev_para_borders = None;
                 }
@@ -5503,6 +5711,8 @@ fn build_display_list_selected(
                     total_pages,
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
+                    &page_reservations,
+                    &page_gridlines,
                 );
             }
             if let Some(region) = &mut footer {
@@ -5514,6 +5724,8 @@ fn build_display_list_selected(
                     total_pages,
                     input.layout.cached_page_totals,
                     shape_fonts.as_ref(),
+                    &page_reservations,
+                    &page_gridlines,
                 );
             }
         }
@@ -5540,6 +5752,8 @@ fn build_display_list_selected(
             header,
             footer,
             note_areas,
+            reservations: page_reservations.take(),
+            table_gridlines: page_gridlines.take(),
             unbuilt: false,
             position_span: None,
             hf_parts: None,
@@ -6174,10 +6388,45 @@ fn authoritative_line_items<'a>(
                 pm_start: line_break.pm_start,
                 level,
             }),
+            RunIn::Reserved(reserved) => out.push(LinePaintItem::Reserved {
+                run: reserved,
+                single: item_count == 1,
+                level,
+            }),
             RunIn::Image(_) | RunIn::Unsupported => {}
         }
     }
     Some(out)
+}
+
+pub(crate) fn line_text_insets(
+    indent_left: f64,
+    hanging: f64,
+    first_line: f64,
+    is_first_line: bool,
+    has_list_marker: bool,
+    overrun: f64,
+) -> (f64, f64) {
+    let has_hanging = hanging > 0.0;
+    let has_first_line = first_line > 0.0;
+    let mut pad_left = indent_left;
+    let mut text_indent = 0.0;
+    if is_first_line {
+        if indent_left > 0.0 && has_hanging {
+            text_indent = if has_list_marker {
+                (hanging - indent_left).max(0.0) + overrun
+            } else {
+                -hanging
+            };
+        } else if has_first_line {
+            text_indent = first_line;
+        } else if has_list_marker && has_hanging {
+            text_indent = hanging;
+        }
+    } else if indent_left <= 0.0 && has_hanging {
+        pad_left = hanging;
+    }
+    (pad_left, text_indent)
 }
 
 /// paint one typeset line: pen starts at the indent-derived x, runs advance by
@@ -6208,7 +6457,6 @@ fn emit_line(
 
     // The first line carries the hanging or first-line shift.
     let has_hanging = geom.hanging > 0.0;
-    let has_first_line = geom.first_line > 0.0;
     let overrun = if geom.is_first_line
         && geom.has_list_marker
         && geom.indent_left > 0.0
@@ -6219,26 +6467,14 @@ fn emit_line(
     } else {
         0.0
     };
-    let mut pad_left = geom.indent_left;
-    let mut text_indent = 0.0;
-    if geom.is_first_line {
-        if geom.indent_left > 0.0 && has_hanging {
-            text_indent = if geom.has_list_marker {
-                // The marker consumes the hanging width before body text.
-                (geom.hanging - geom.indent_left).max(0.0) + overrun
-            } else {
-                -geom.hanging
-            };
-        } else if has_first_line {
-            text_indent = geom.first_line;
-        } else if geom.has_list_marker && has_hanging {
-            // no left indent: the marker fills [0, hanging] and body text
-            // follows at the hang (matches the body-line branch below)
-            text_indent = geom.hanging;
-        }
-    } else if geom.indent_left <= 0.0 && has_hanging {
-        pad_left = geom.hanging;
-    }
+    let (pad_left, text_indent) = line_text_insets(
+        geom.indent_left,
+        geom.hanging,
+        geom.first_line,
+        geom.is_first_line,
+        geom.has_list_marker,
+        overrun,
+    );
 
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);
@@ -6268,6 +6504,7 @@ fn emit_line(
                         fixed_width += image_layout_width(imr);
                     }
                 }
+                RunIn::Reserved(reserved) => fixed_width += reserved.width,
                 RunIn::Text(text) => {
                     if let Some(rule) = attrs.and_then(|attrs| {
                         attrs
@@ -6547,6 +6784,13 @@ fn emit_line(
                 RunIn::LineBreak(lb) => {
                     logical_items.push(LinePaintItem::LineBreak {
                         pm_start: lb.pm_start,
+                        level: default_bidi_level,
+                    });
+                }
+                RunIn::Reserved(reserved) => {
+                    logical_items.push(LinePaintItem::Reserved {
+                        run: reserved,
+                        single: segments.len() == 1,
                         level: default_bidi_level,
                     });
                 }
@@ -6831,6 +7075,20 @@ fn emit_line(
                     line_break_pos = *pm_start;
                 }
             }
+            LinePaintItem::Reserved { run, single, .. } => {
+                let y = if *single && line.descent <= 0.0 {
+                    geom.line_top + (line.ascent - run.height).max(0.0)
+                } else if *single {
+                    geom.line_top + ((line.line_height - run.height) / 2.0).max(0.0)
+                } else {
+                    baseline - run.height
+                };
+                ctx.reserve(&run.reservation, pen_x, y, run.width, run.height);
+                if line_break_pos.is_none() {
+                    line_break_pos = run.pm_start;
+                }
+                pen_x += run.width;
+            }
         }
     }
 
@@ -6879,13 +7137,24 @@ fn emit_line(
         }
     }
 
+    let echo_placement = match geom.alignment {
+        _ if geom.is_rtl => None,
+        None | Some("left") => Some((None, None)),
+        Some("justify") if justified => Some((Some(effective_line_width), None)),
+        Some("justify") => Some((None, None)),
+        Some("center") => Some((None, Some(usable_width))),
+        _ => None,
+    };
     for primitive in &mut prims[echo_start..] {
         if let Primitive::GlyphRun(run) = primitive {
-            if geom.is_rtl || !matches!(geom.alignment, None | Some("left")) {
-                run.echo = None;
-            } else if let Some(echo) = &mut run.echo {
-                echo.x = echo_x;
-                echo.right = echo_x + usable_width;
+            match (echo_placement, &mut run.echo) {
+                (Some((stretch, center_width)), Some(echo)) => {
+                    echo.x = echo_x;
+                    echo.right = echo_x + usable_width;
+                    echo.stretch = stretch;
+                    echo.center_width = center_width;
+                }
+                _ => run.echo = None,
             }
         }
     }
@@ -7948,6 +8217,8 @@ fn try_emit_glyph_runs(
                 position: fmt.position_px.unwrap_or(0.0),
                 scale: fmt.horizontal_scale.unwrap_or(100.0),
                 can_empty: false,
+                stretch: None,
+                center_width: None,
             }),
             paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
@@ -8739,6 +9010,50 @@ fn emit_shape_fragment(
     block: &ShapeBlockIn,
     ctx: &RenderCtx<'_>,
 ) {
+    let clip = block.scene.as_ref().and_then(|scene| {
+        matches!(
+            scene.pointer("/root/kind").and_then(Value::as_str),
+            Some("group" | "canvas")
+        )
+        .then(|| shape_text_bounds(frag, block))
+    });
+    emit_shape_fragment_with_clip(prims, frag, block, ctx, clip);
+}
+
+fn shape_text_bounds(frag: &ShapeFragmentIn, block: &ShapeBlockIn) -> ClipRect {
+    let rotation = block
+        .transform
+        .as_ref()
+        .and_then(|transform| transform.rotation)
+        .unwrap_or(0.0);
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let width = frag.width * cos.abs() + frag.height * sin.abs();
+    let height = frag.width * sin.abs() + frag.height * cos.abs();
+    ClipRect {
+        x: Some(px(frag.x + (frag.width - width) / 2.0)),
+        y: Some(px(frag.y + (frag.height - height) / 2.0)),
+        w: Some(px(width)),
+        h: Some(px(height)),
+    }
+}
+
+fn emit_shape_fragment_with_clip(
+    prims: &mut Vec<Primitive>,
+    frag: &ShapeFragmentIn,
+    block: &ShapeBlockIn,
+    ctx: &RenderCtx<'_>,
+    group_clip: Option<ClipRect>,
+) {
+    let group_clip = if !block.children.is_empty() {
+        group_clip.map(|clip| {
+            let mut attrs = DocAttrs::default();
+            apply_clip_group(&mut attrs, String::new(), clip);
+            apply_clip_group(&mut attrs, String::new(), shape_text_bounds(frag, block));
+            attrs.clip_group.unwrap().clip.unwrap()
+        })
+    } else {
+        group_clip
+    };
     let stamp_from = prims.len();
     let block_ref = BlockRef::of(&frag.block_id);
     let mut attrs = block_ref.attrs();
@@ -8813,12 +9128,36 @@ fn emit_shape_fragment(
             .and_then(|margins| margins.get("bottom"))
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
-        let content_height: f64 = block
-            .inner_measures
+        let mut flow = crate::header_footer::HeaderFooterFlow::default();
+        let tops: Vec<f64> = block
+            .inner_text
             .iter()
-            .map(|measure| measure.total_height)
-            .sum();
-        let available_height = (frag.height - margin_top - margin_bottom).max(0.0);
+            .zip(&block.inner_measures)
+            .map(|(para, pm)| {
+                let spacing = para.attrs.as_ref().and_then(|attrs| attrs.spacing);
+                let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
+                let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
+                let content_height = (pm.total_height - before - after).max(0.0);
+                flow.place(content_height, before, after)
+            })
+            .collect();
+        let content_height = flow.height();
+        let properties = block.text_body_properties.as_ref();
+        let vertical = properties
+            .and_then(|properties| properties.get("vertical"))
+            .and_then(Value::as_str);
+        let vertical_rotation = match vertical {
+            Some("vertical") => 90.0,
+            Some("vertical270") => -90.0,
+            _ => 0.0,
+        };
+        let body_width = (frag.width - margin_left - margin_right).max(0.0);
+        let body_height = (frag.height - margin_top - margin_bottom).max(0.0);
+        let (content_width, available_height) = if vertical_rotation != 0.0 {
+            (body_height, body_width)
+        } else {
+            (body_width, body_height)
+        };
         let anchor = block
             .text_body_properties
             .as_ref()
@@ -8829,14 +9168,40 @@ fn emit_shape_fragment(
             Some("bottom") => (available_height - content_height).max(0.0),
             _ => 0.0,
         };
-        let content_x = frag.x + margin_left;
-        let content_width = (frag.width - margin_left - margin_right).max(0.0);
-        let mut y_offset = margin_top + anchor_offset;
+        let content_x = frag.x + margin_left + (body_width - content_width) / 2.0;
+        let content_y = frag.y + margin_top + (body_height - available_height) / 2.0;
+        let text_start = prims.len();
+        let bounded = group_clip.is_some()
+            && properties
+                .and_then(|properties| properties.get("autoFit"))
+                .and_then(Value::as_str)
+                != Some("shape")
+            && properties
+                .and_then(|properties| properties.get("verticalOverflow"))
+                .and_then(Value::as_str)
+                != Some("overflow");
         for (i, para) in block.inner_text.iter().enumerate() {
-            let Some(pm) = block.inner_measures.get(i) else {
+            let (Some(pm), Some(&top)) = (block.inner_measures.get(i), tops.get(i)) else {
                 continue;
             };
-            let para_y = frag.y + y_offset;
+            let y_offset = anchor_offset + top;
+            let para_y = content_y + y_offset;
+            let mut line_y = y_offset;
+            let to_line = if bounded {
+                pm.lines
+                    .iter()
+                    .take_while(|line| {
+                        let fits = line_y + line.ascent <= available_height + 1e-6;
+                        line_y += line.line_height;
+                        fits
+                    })
+                    .count()
+            } else {
+                pm.lines.len()
+            };
+            if to_line == 0 {
+                break;
+            }
             let synthetic = ParagraphFragmentIn {
                 block_id: para.id.clone(),
                 x: content_x,
@@ -8844,7 +9209,7 @@ fn emit_shape_fragment(
                 width: content_width,
                 height: pm.total_height,
                 from_line: 0,
-                to_line: pm.lines.len(),
+                to_line,
                 pm_start: para.pm_start,
                 pm_end: para.pm_end,
                 carried_from_prev: None,
@@ -8853,7 +9218,51 @@ fn emit_shape_fragment(
             emit_paragraph_fragment(
                 prims, &synthetic, para, pm, ctx, content_x, para_y, None, None, true, true,
             );
-            y_offset += pm.total_height;
+        }
+        let shape_rotation = if properties
+            .and_then(|properties| properties.get("upright"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            0.0
+        } else {
+            block
+                .transform
+                .as_ref()
+                .and_then(|transform| transform.rotation)
+                .unwrap_or(0.0)
+        };
+        let rotation = shape_rotation
+            + vertical_rotation
+            + properties
+                .and_then(|properties| properties.get("rotation"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+        rotate_shape_text(
+            &mut prims[text_start..],
+            (frag.x + frag.width / 2.0, frag.y + frag.height / 2.0),
+            rotation,
+        );
+        if let Some(group_clip) = &group_clip {
+            let clip = if bounded {
+                shape_text_bounds(frag, block)
+            } else {
+                group_clip.clone()
+            };
+            for primitive in &mut prims[text_start..] {
+                if let Some(attrs) = doc_attrs_mut(primitive) {
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        group_clip.clone(),
+                    );
+                    apply_clip_group(
+                        attrs,
+                        format!("shape-text:{}", block_key(&block.id)),
+                        clip.clone(),
+                    );
+                }
+            }
         }
     }
 
@@ -8871,10 +9280,70 @@ fn emit_shape_fragment(
             is_anchored: None,
             z_index: None,
         };
-        emit_shape_fragment(prims, &child_frag, child, ctx);
+        emit_shape_fragment_with_clip(prims, &child_frag, child, ctx, group_clip.clone());
     }
 
     stamp_sdt_range(&mut prims[stamp_from..], &block.sdt_groups, false);
+}
+
+fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation: f64) {
+    if rotation == 0.0 {
+        return;
+    }
+    let (sin, cos) = rotation.to_radians().sin_cos();
+    let delta = |x: f64, y: f64| {
+        let dx = x - center.0;
+        let dy = y - center.1;
+        (
+            center.0 + cos * dx - sin * dy - x,
+            center.1 + sin * dx + cos * dy - y,
+        )
+    };
+    for primitive in primitives {
+        match primitive {
+            Primitive::Text(text) => {
+                let size = text
+                    .font
+                    .split_whitespace()
+                    .find_map(|part| {
+                        part.strip_suffix("px")
+                            .and_then(|size| size.parse::<f64>().ok())
+                    })
+                    .unwrap_or(11.0 * 96.0 / 72.0);
+                let (dx, dy) = delta(
+                    num_f64(&text.x) + num_f64(&text.width) / 2.0,
+                    num_f64(&text.baseline_y) - size * 0.2,
+                );
+                text.x = px(num_f64(&text.x) + dx);
+                text.baseline_y = px(num_f64(&text.baseline_y) + dy);
+                text.rotation_deg = Some(px(rotation));
+                text.paint_clip = None;
+            }
+            Primitive::GlyphRun(run) => {
+                let Some(first) = run.glyphs.first() else {
+                    continue;
+                };
+                let left = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f64::INFINITY, f64::min);
+                let right = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x + glyph.advance)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let (dx, dy) = delta((left + right) / 2.0, first.y - run.size * 0.2);
+                for glyph in &mut run.glyphs {
+                    glyph.x += dx;
+                    glyph.y += dy;
+                }
+                run.rotation_deg = Some(px(rotation));
+                run.paint_clip = None;
+            }
+            _ => {}
+        }
+    }
 }
 
 fn shape_fill_color(fill: Option<&ShapeFillIn>) -> Option<String> {
@@ -9085,7 +9554,11 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 max: axis.max,
             }),
         axis_titles: PlotAxisTitles::default(),
-        series: chart.series.iter().map(plot_series_from).collect(),
+        series: chart
+            .series
+            .iter()
+            .map(|series| plot_series_from(series, None))
+            .collect(),
         plot_groups: chart
             .plot_groups
             .iter()
@@ -9095,17 +9568,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                 series: group
                     .series
                     .iter()
-                    .map(|series| {
-                        let mut plotted = plot_series_from(series);
-                        plotted.labels = plot_labels_from(
-                            group.data_labels.as_ref(),
-                            series.data_labels.as_ref(),
-                        );
-                        for point in &mut plotted.points {
-                            point.labels = plotted.labels;
-                        }
-                        plotted
-                    })
+                    .map(|series| plot_series_from(series, group.data_labels.as_ref()))
                     .collect(),
                 overlap: group.overlap,
                 gap_width: group.gap_width,
@@ -9213,6 +9676,7 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         minor_unit: axis.minor_unit,
         major_tick_mark: axis.major_tick_mark.as_deref(),
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
+        tick_label_position: axis.tick_label_position.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
         cross_between: axis.cross_between.as_deref(),
@@ -9235,7 +9699,16 @@ fn plot_line_from(line: &ChartLineIn) -> PlotLine<'_> {
     }
 }
 
-fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
+fn plot_series_from<'a>(
+    series: &'a ChartSeriesIn,
+    group_labels: Option<&'a ChartDataLabelsIn>,
+) -> PlotSeries<'a> {
+    let mut labels = plot_labels_from(group_labels, series.data_labels.as_ref());
+    if let Some(spec) = labels.as_mut()
+        && spec.number_format.is_none()
+    {
+        spec.number_format = series.value_format.as_deref();
+    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -9252,7 +9725,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
                 label: point.label.as_deref(),
                 label_runs: None,
                 explosion: point.explosion,
-                labels: None,
+                labels,
             })
             .collect(),
         grouping: series.grouping.as_deref(),
@@ -9260,7 +9733,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         x_values: &series.x_values,
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
-        labels: plot_labels_from(None, series.data_labels.as_ref()),
+        labels,
         line: None,
     }
 }
@@ -9730,6 +10203,7 @@ struct CellPaint {
     grid_index: usize,
     cell_y: f64,
     cell_h: f64,
+    content_h: f64,
     is_first_row: bool,
     selectable: bool,
 }
@@ -9895,6 +10369,7 @@ impl TablePaintPlan {
                 grid_index,
                 cell_y: to_frag_y(row_tops.get(g.row_index).copied().unwrap_or(0.0)),
                 cell_h: span_height(g),
+                content_h: span_height(g),
                 is_first_row: false,
                 selectable: false,
             });
@@ -9908,13 +10383,25 @@ impl TablePaintPlan {
                 if g.row_index != vr.row_index {
                     continue;
                 }
+                let cell_h = if g.row_span > 1 {
+                    span_height(g)
+                } else {
+                    row_h
+                };
                 paints.push(CellPaint {
                     grid_index,
                     cell_y: vr.frag_y,
-                    cell_h: if g.row_span > 1 {
-                        span_height(g)
+                    cell_h,
+                    content_h: if vr.band_height.is_some() {
+                        measure
+                            .rows
+                            .iter()
+                            .skip(g.row_index)
+                            .take(g.row_span)
+                            .map(|row| row.height)
+                            .sum()
                     } else {
-                        row_h
+                        cell_h
                     },
                     is_first_row: g.row_index == 0 || vr.is_first_in_fragment,
                     selectable: true,
@@ -10237,8 +10724,10 @@ pub(crate) fn emit_table_fragment(
         // the neighbour's facing edge; top and left draw only on the outer boundary
         let borders = cell.borders.as_ref();
         let bidi = block.bidi == Some(true);
-        let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: &BorderEdgeIn| {
-            if !border_visible(e) {
+        let gridlines = ctx.gridlines.filter(|_| block.gridlines == Some(true));
+        let mut push_edge = |x1: f64, y1: f64, x2: f64, y2: f64, e: Option<&BorderEdgeIn>| {
+            let visible = e.filter(|e| border_visible(e));
+            if visible.is_none() && gridlines.is_none() {
                 return;
             }
             // clip vertically to the window band
@@ -10249,6 +10738,18 @@ pub(crate) fn emit_table_fragment(
             if y1 == y2 && (y1 < clip_top_y || y1 > clip_bottom_y) {
                 return;
             }
+            let (y1, y2) = if y1 == y2 { (y1, y2) } else { (y1c, y2c) };
+            let Some(e) = visible else {
+                if let Some(gridlines) = gridlines {
+                    gridlines.borrow_mut().push(DisplayGridline {
+                        x1: px(x1),
+                        y1: px(y1),
+                        x2: px(x2),
+                        y2: px(y2),
+                    });
+                }
+                return;
+            };
             let style = display_border_style(e.style.as_deref());
             let width = e.width.unwrap_or(1.0);
             // explicit ownership: the owning grid cell rides on the line so
@@ -10259,9 +10760,9 @@ pub(crate) fn emit_table_fragment(
             };
             prims.push(Primitive::Line(LinePrimitive {
                 x1: px(x1),
-                y1: px(if y1 == y2 { y1 } else { y1c }),
+                y1: px(y1),
                 x2: px(x2),
-                y2: px(if y1 == y2 { y2 } else { y2c }),
+                y2: px(y2),
                 stroke_width: px(width),
                 color: e.color.clone().unwrap_or_else(|| "#000000".to_string()),
                 dash: border_dash(style, width),
@@ -10272,18 +10773,16 @@ pub(crate) fn emit_table_fragment(
                 ..LinePrimitive::contract_defaults()
             }));
         };
-        if p.is_first_row
-            && let Some(e) = borders.and_then(|b| b.top.as_ref())
-        {
+        if p.is_first_row {
+            let e = borders.and_then(|b| b.top.as_ref());
             let starts_table = if carried {
                 plan.header_row_count > 0
             } else {
                 frag.clip_top.unwrap_or(0.0) == 0.0
             };
-            let inset = if p.g.row_index == 0 && starts_table {
-                e.width.unwrap_or(1.0) / 2.0
-            } else {
-                0.0
+            let inset = match e {
+                Some(e) if p.g.row_index == 0 && starts_table => e.width.unwrap_or(1.0) / 2.0,
+                _ => 0.0,
             };
             push_edge(cx, cy + inset, cx + p.g.width, cy + inset, e);
         }
@@ -10298,9 +10797,8 @@ pub(crate) fn emit_table_fragment(
                         .as_ref()
                 })
                 .and_then(|b| b.left.as_ref());
-            if let Some(e) = resolve_shared_border(own_right, neighbour_left) {
-                push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
-            }
+            let e = resolve_shared_border(own_right, neighbour_left);
+            push_edge(cx + p.g.width, cy, cx + p.g.width, cy + p.cell_h, e);
         } else {
             let base_top = row_tops.get(p.g.row_index).copied().unwrap_or(0.0);
             let mut run_start_row = p.g.row_index;
@@ -10326,39 +10824,39 @@ pub(crate) fn emit_table_fragment(
                 let next_resolved = resolve_shared_border(own_right, next_left);
                 if !borders_edge_equal(run_resolved, next_resolved) {
                     uniform = false;
-                    if let Some(e) = run_resolved {
-                        let y1 = cy
-                            + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top);
-                        let y2 = cy + (row_tops.get(r).copied().unwrap_or(base_top) - base_top);
-                        push_edge(cx + p.g.width, y1, cx + p.g.width, y2, e);
-                    }
+                    let y1 =
+                        cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top);
+                    let y2 = cy + (row_tops.get(r).copied().unwrap_or(base_top) - base_top);
+                    push_edge(cx + p.g.width, y1, cx + p.g.width, y2, run_resolved);
                     run_start_row = r;
                     run_resolved = next_resolved;
                 }
             }
-            if let Some(e) = run_resolved {
-                let y1 = if uniform {
-                    cy
-                } else {
-                    cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
-                };
-                push_edge(cx + p.g.width, y1, cx + p.g.width, cy + p.cell_h, e);
-            }
+            let y1 = if uniform {
+                cy
+            } else {
+                cy + (row_tops.get(run_start_row).copied().unwrap_or(base_top) - base_top)
+            };
+            push_edge(
+                cx + p.g.width,
+                y1,
+                cx + p.g.width,
+                cy + p.cell_h,
+                run_resolved,
+            );
         }
         let own_bottom = borders.and_then(|b| b.bottom.as_ref());
-        let bottom_y = |e: &BorderEdgeIn| {
+        let bottom_y = |e: Option<&BorderEdgeIn>| {
             if plan.full_bottom_border && p.g.row_index + p.g.row_span >= block.rows.len() {
-                frag.y + frag.height - e.width.unwrap_or(1.0) / 2.0
+                frag.y + frag.height - e.map_or(0.0, |e| e.width.unwrap_or(1.0)) / 2.0
             } else {
                 cy + p.cell_h
             }
         };
         let below_row = plan.row_painted_below(p.g, frag);
         if below_row.is_none() {
-            if let Some(e) = own_bottom {
-                let y = bottom_y(e);
-                push_edge(cx, y, cx + p.g.width, y, e);
-            }
+            let y = bottom_y(own_bottom);
+            push_edge(cx, y, cx + p.g.width, y, own_bottom);
         } else if p.g.col_span <= 1 {
             let neighbour_top = below_row
                 .and_then(|row| plan.cell_starting_at(row, p.g.column_index))
@@ -10368,10 +10866,9 @@ pub(crate) fn emit_table_fragment(
                         .as_ref()
                 })
                 .and_then(|b| b.top.as_ref());
-            if let Some(e) = resolve_shared_border(own_bottom, neighbour_top) {
-                let y = bottom_y(e);
-                push_edge(cx, y, cx + p.g.width, y, e);
-            }
+            let e = resolve_shared_border(own_bottom, neighbour_top);
+            let y = bottom_y(e);
+            push_edge(cx, y, cx + p.g.width, y, e);
         } else {
             let col_at = |offset: usize| {
                 if bidi {
@@ -10407,23 +10904,25 @@ pub(crate) fn emit_table_fragment(
                 let next_resolved = resolve_shared_border(own_bottom, next_top);
                 if !borders_edge_equal(run_resolved, next_resolved) {
                     uniform = false;
-                    if let Some(e) = run_resolved {
-                        let y = bottom_y(e);
-                        push_edge(run_x1, y, cursor_x, y, e);
-                    }
+                    let y = bottom_y(run_resolved);
+                    push_edge(run_x1, y, cursor_x, y, run_resolved);
                     run_x1 = cursor_x;
                     run_resolved = next_resolved;
                 }
                 cursor_x += col_width(c);
             }
-            if let Some(e) = run_resolved {
-                let y = bottom_y(e);
-                let x2 = if uniform { cx + p.g.width } else { cursor_x };
-                push_edge(run_x1, y, x2, y, e);
-            }
+            let y = bottom_y(run_resolved);
+            let x2 = if uniform { cx + p.g.width } else { cursor_x };
+            push_edge(run_x1, y, x2, y, run_resolved);
         }
-        if is_first_col && let Some(e) = borders.and_then(|b| b.left.as_ref()) {
-            push_edge(cx, cy, cx, cy + p.cell_h, e);
+        if is_first_col {
+            push_edge(
+                cx,
+                cy,
+                cx,
+                cy + p.cell_h,
+                borders.and_then(|b| b.left.as_ref()),
+            );
         }
 
         let content_stamp_from = prims.len();
@@ -10442,7 +10941,7 @@ pub(crate) fn emit_table_fragment(
                 &CellPaintRef::from(p.g),
                 cx,
                 content_y,
-                p.cell_h,
+                paint.content_h,
                 is_first_col,
                 content_clip_top,
                 content_clip_bottom,
@@ -10765,7 +11264,7 @@ fn cell_content_frame<'m>(
                 }
                 prev_after = 0.0;
             }
-            (BlockIn::Image(_), Some(MeasureIn::Image(image))) => {
+            (BlockIn::Image(_) | BlockIn::Reserved(_), Some(MeasureIn::Image(image))) => {
                 stack_cursor += prev_after;
                 block_tops.push(stack_cursor);
                 stack_cursor += image.height;
@@ -10863,6 +11362,9 @@ fn emit_cell_content(
     let rotated = rotation != 0.0;
     let windowed_lines = line_clip.is_some();
     let (cull_top_y, cull_bottom_y) = line_clip.unwrap_or((clip_top_y, clip_bottom_y));
+    let reserved_from = ctx
+        .reservations
+        .map_or(0, |reserved| reserved.borrow().len());
 
     // Behind-document floats paint below cell content.
     emit_cell_floating_images(
@@ -10988,6 +11490,14 @@ fn emit_cell_content(
                 windowed_lines,
                 selectable,
                 None,
+            );
+        } else if let (BlockIn::Reserved(block), MeasureIn::Image(measure)) = (cell_block, m) {
+            ctx.reserve(
+                &block.reservation,
+                content_x,
+                content_top + block_tops[i],
+                measure.width.min(content_width.max(0.0)).max(0.0),
+                measure.height,
             );
         } else if let (BlockIn::Image(image), MeasureIn::Image(image_measure)) = (cell_block, m) {
             let image_x = content_x;
@@ -11137,6 +11647,60 @@ fn emit_cell_content(
     }
     if rotated {
         rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
+    }
+    finish_cell_reservations(
+        ctx,
+        reserved_from,
+        selectable,
+        (cull_top_y, cull_bottom_y),
+        rotated.then_some((physical, rotation)),
+    );
+}
+
+/// Keeps a selectable paint's new reservation rects inside the cull band,
+/// turned with rotated cell content; a repaint adds none.
+fn finish_cell_reservations(
+    ctx: &RenderCtx<'_>,
+    from: usize,
+    selectable: bool,
+    (cull_top, cull_bottom): (f64, f64),
+    rotation: Option<((f64, f64, f64, f64), f64)>,
+) {
+    let Some(reservations) = ctx.reservations else {
+        return;
+    };
+    let mut reservations = reservations.borrow_mut();
+    if !selectable {
+        reservations.truncate(from);
+        return;
+    }
+    let mut index = from;
+    while index < reservations.len() {
+        let top = num_f64(&reservations[index].y);
+        let bottom = top + num_f64(&reservations[index].height);
+        if bottom <= cull_top || top >= cull_bottom {
+            reservations.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    let Some((cell, rotation)) = rotation else {
+        return;
+    };
+    for reservation in &mut reservations[from..] {
+        let width = num_f64(&reservation.width);
+        let height = num_f64(&reservation.height);
+        let x = num_f64(&reservation.x) + width / 2.0;
+        let y = num_f64(&reservation.y) + height / 2.0;
+        let (center_x, center_y) = if rotation < 0.0 {
+            (cell.0 + y, cell.1 + cell.3 - x)
+        } else {
+            (cell.0 + cell.2 - y, cell.1 + x)
+        };
+        reservation.x = px(center_x - height / 2.0);
+        reservation.y = px(center_y - width / 2.0);
+        reservation.width = px(height);
+        reservation.height = px(width);
     }
 }
 
@@ -11540,7 +12104,7 @@ fn visit_table_fragment(
             &CellPaintRef::from(g),
             frag.x + g.x,
             content_y,
-            paint.cell_h,
+            paint.content_h,
             is_first_grid_column(g, block, measure),
             clip_top,
             clip_bottom,
@@ -11922,6 +12486,21 @@ pub fn build_resident_display_pages_with_fonts(
     list: &mut DisplayList,
     pages: &[usize],
 ) -> Result<Vec<usize>, String> {
+    build_resident_display_pages_with_fonts_and_fingerprints(
+        pagination, layout, fonts, resident, list, pages, None,
+    )
+}
+
+#[doc(hidden)]
+pub fn build_resident_display_pages_with_fonts_and_fingerprints(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    list: &mut DisplayList,
+    pages: &[usize],
+    fingerprints: Option<&[u128]>,
+) -> Result<Vec<usize>, String> {
     if list.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
@@ -11937,11 +12516,14 @@ pub fn build_resident_display_pages_with_fonts(
     if wanted.is_empty() {
         return Ok(wanted);
     }
-    refresh_resident_display_pages(
+    let reading: HashSet<usize> = wanted.iter().copied().collect();
+    refresh_resident_display_pages_reading(
         &mut resident.input,
         pagination,
         layout,
         wanted.iter().copied(),
+        &reading,
+        fingerprints,
     )?;
     let selected: HashSet<usize> = wanted.iter().copied().collect();
     for page in build_display_list_selected(&resident.input, fonts, Some(&selected)).pages {
@@ -12159,6 +12741,10 @@ fn prune_resident_display_measured(resident: &mut ResidentDisplayInput, list: &D
     resident.input.measured.retain(|measured| {
         measured_block_key(measured).is_some_and(|key| keys.contains(key.as_ref()))
     });
+    resident
+        .input
+        .converted_measurements
+        .retain(|key, _| keys.contains(key.as_str()));
     prune_unreadable_blocks(&mut resident.input);
 }
 
@@ -12211,6 +12797,8 @@ fn unbuilt_page_with_span(
         header: None,
         footer: None,
         note_areas: Vec::new(),
+        reservations: Vec::new(),
+        table_gridlines: Vec::new(),
         unbuilt: true,
         position_span,
         hf_parts: headers_footers
@@ -12255,6 +12843,7 @@ fn layout_page_position_span(
             Fragment::TextBox(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Shape(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
             Fragment::Chart(fragment) => positions.extend([fragment.pm_start, fragment.pm_end]),
+            Fragment::Reserved(_) => {}
             Fragment::Table(fragment) => {
                 if let Some(measured) =
                     blocks.get(resident_block_id_key(&fragment.block_id).as_ref())
@@ -12294,7 +12883,7 @@ fn resident_build_input(
 }
 
 /// [`resident_build_input`] holding only the measured blocks that `pages`
-/// place; [`refresh_resident_display_pages`] adds the others as their pages
+/// place; [`refresh_resident_display_pages_reading`] adds the others as their pages
 /// build.
 fn resident_build_input_for(
     pagination: &crate::types::Input,
@@ -12354,6 +12943,7 @@ fn resident_build_input_for(
         stale_block_pruning_passes: 0,
         contract_version: extras.contract_version,
         measured,
+        converted_measurements: HashMap::new(),
         options,
         layout,
         headers_footers,
@@ -12386,6 +12976,8 @@ fn convert_measured_block(
     measured: &crate::types::MeasuredBlock,
     unreadable: &mut Vec<UnreadableDisplayInput>,
 ) -> Option<MeasuredBlockIn> {
+    #[cfg(any(test, feature = "test-support"))]
+    resident_conversion_test_support::count_measured_block();
     let key = resident_block_key(&measured.block).map(Cow::into_owned);
     match transcoder.convert(measured) {
         Ok(block) => {
@@ -12406,6 +12998,110 @@ fn convert_measured_block(
             None
         }
     }
+}
+
+fn refresh_paragraph_positions(
+    block: &mut ParagraphBlockIn,
+    source: &crate::types::ParagraphBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    (block.pm_start, block.pm_end) = transcoder.convert(&(source.pm_start, source.pm_end))?;
+    for (run, source) in block.runs.iter_mut().zip(&source.runs) {
+        let (start, end) = transcoder.convert(&(source.pm_start(), source.pm_end()))?;
+        match run {
+            RunIn::Text(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Tab(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Image(run) => {
+                (run.pm_start, run.pm_end) = (start, end);
+                if let crate::types::Run::Image(source) = source {
+                    run.inline_shape = transcoder.convert(&source.inline_shape)?;
+                    run.inline_chart = transcoder.convert(&source.inline_chart)?;
+                }
+            }
+            RunIn::LineBreak(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Field(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Reserved(run) => (run.pm_start, run.pm_end) = (start, end),
+            RunIn::Unsupported => {}
+        }
+    }
+    Ok(())
+}
+
+fn refresh_shape_positions(
+    block: &mut ShapeBlockIn,
+    source: &crate::types::ShapeBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    (block.pm_start, block.pm_end, block.doc_start, block.doc_end) = transcoder.convert(&(
+        source.pm_start,
+        source.pm_end,
+        source.doc_start,
+        source.doc_end,
+    ))?;
+    for (paragraph, source) in block
+        .inner_text
+        .iter_mut()
+        .zip(source.inner_text.iter().flatten())
+    {
+        refresh_paragraph_positions(paragraph, source, transcoder)?;
+    }
+    for (child, source) in block.children.iter_mut().zip(&source.children) {
+        refresh_shape_positions(child, source, transcoder)?;
+    }
+    Ok(())
+}
+
+fn refresh_block_positions(
+    block: &mut BlockIn,
+    source: &crate::types::LayoutBlock,
+    transcoder: &mut crate::transcode::Transcoder,
+) -> Result<(), String> {
+    use crate::types::LayoutBlock;
+
+    match (block, source) {
+        (BlockIn::Paragraph(block), LayoutBlock::Paragraph(source)) => {
+            refresh_paragraph_positions(block, source, transcoder)?;
+        }
+        (BlockIn::Table(block), LayoutBlock::Table(source)) => {
+            for (row, source) in block.rows.iter_mut().zip(&source.rows) {
+                for (cell, source) in row.cells.iter_mut().zip(&source.cells) {
+                    for (block, source) in cell.blocks.iter_mut().zip(&source.blocks) {
+                        refresh_block_positions(block, source, transcoder)?;
+                    }
+                }
+            }
+        }
+        (BlockIn::TextBox(block), LayoutBlock::TextBox(source)) => {
+            (block.pm_start, block.pm_end) =
+                transcoder.convert(&(source.pm_start, source.pm_end))?;
+            for (paragraph, source) in block.content.iter_mut().zip(&source.content) {
+                refresh_paragraph_positions(paragraph, source, transcoder)?;
+            }
+        }
+        (BlockIn::Shape(block), LayoutBlock::Shape(source)) => {
+            refresh_shape_positions(block, source, transcoder)?;
+        }
+        (BlockIn::Image(block), LayoutBlock::Image(source)) => {
+            (block.pm_start, block.pm_end) =
+                transcoder.convert(&(source.pm_start, source.pm_end))?;
+        }
+        (BlockIn::Chart(block), LayoutBlock::Chart(source)) => {
+            (block.pm_start, block.pm_end, block.doc_start, block.doc_end) =
+                transcoder.convert(&(
+                    source.pm_start,
+                    source.pm_end,
+                    source.doc_start,
+                    source.doc_end,
+                ))?;
+        }
+        (BlockIn::Reserved(_), LayoutBlock::Reserved(_))
+        | (BlockIn::Unsupported, LayoutBlock::SectionBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::PageBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::ColumnBreak(_))
+        | (BlockIn::Unsupported, LayoutBlock::Unsupported) => {}
+        _ => return Err("resident display block kind changed".to_owned()),
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -12506,6 +13202,8 @@ pub mod resident_conversion_test_support {
 
     std::thread_local! {
         static STATE: Cell<(bool, usize)> = const { Cell::new((false, 0)) };
+        static MEASURED_BLOCKS: Cell<usize> = const { Cell::new(0) };
+        static REUSE_MEASUREMENTS: Cell<bool> = const { Cell::new(true) };
     }
 
     pub(super) fn force_full() -> bool {
@@ -12517,6 +13215,32 @@ pub mod resident_conversion_test_support {
             let (force_full, converted) = state.get();
             state.set((force_full, converted + pages));
         });
+    }
+
+    pub(super) fn count_measured_block() {
+        MEASURED_BLOCKS.with(|count| count.set(count.get() + 1));
+    }
+
+    pub(super) fn reuse_measurements() -> bool {
+        REUSE_MEASUREMENTS.with(Cell::get)
+    }
+
+    pub fn with_measured_block_conversion<T>(reuse: bool, build: impl FnOnce() -> T) -> (T, usize) {
+        struct Restore(usize, bool);
+
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                MEASURED_BLOCKS.with(|count| count.set(self.0));
+                REUSE_MEASUREMENTS.with(|enabled| enabled.set(self.1));
+            }
+        }
+
+        let _restore = Restore(
+            MEASURED_BLOCKS.with(|count| count.replace(0)),
+            REUSE_MEASUREMENTS.with(|enabled| enabled.replace(reuse)),
+        );
+        let result = build();
+        (result, MEASURED_BLOCKS.with(Cell::get))
     }
 
     pub fn with_layout_conversion<T>(force_full: bool, build: impl FnOnce() -> T) -> (T, usize) {
@@ -12777,6 +13501,38 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
     build: &dyn Fn(usize) -> bool,
     observe_phase: &mut impl FnMut(),
 ) -> Result<Option<IncrementalDisplayShifts>, String> {
+    update_resident_display_list_incremental_partial_with_fonts_cached(
+        pagination,
+        layout,
+        fonts,
+        resident,
+        previous,
+        rebuilt_page_start,
+        rebuilt_page_end,
+        extra_pages,
+        position_deltas,
+        build,
+        observe_phase,
+        None,
+    )
+}
+
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub fn update_resident_display_list_incremental_partial_with_fonts_cached(
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    resident: &mut ResidentDisplayInput,
+    previous: &mut DisplayList,
+    rebuilt_page_start: usize,
+    rebuilt_page_end: usize,
+    extra_pages: &[usize],
+    position_deltas: &HashMap<String, i64>,
+    build: &dyn Fn(usize) -> bool,
+    observe_phase: &mut impl FnMut(),
+    fingerprints: Option<&[u128]>,
+) -> Result<Option<IncrementalDisplayShifts>, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
     {
@@ -12803,6 +13559,7 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
         layout,
         selected.iter().copied(),
         &built,
+        fingerprints,
     )?;
     observe_phase();
 
@@ -12845,17 +13602,6 @@ pub fn update_resident_display_list_incremental_partial_with_fonts_shifts(
     Ok(Some(shifts))
 }
 
-fn refresh_resident_display_pages(
-    input: &mut BuildInput,
-    pagination: &crate::types::Input,
-    layout: &crate::types::Layout,
-    rebuilt_pages: impl IntoIterator<Item = usize>,
-) -> Result<(), String> {
-    let pages: Vec<usize> = rebuilt_pages.into_iter().collect();
-    let reading: HashSet<usize> = pages.iter().copied().collect();
-    refresh_resident_display_pages_reading(input, pagination, layout, pages, &reading)
-}
-
 /// Refreshes the layout pages `rebuilt_pages`, and the measured blocks of those
 /// among them in `reading`.
 fn refresh_resident_display_pages_reading(
@@ -12864,7 +13610,25 @@ fn refresh_resident_display_pages_reading(
     layout: &crate::types::Layout,
     rebuilt_pages: impl IntoIterator<Item = usize>,
     reading: &HashSet<usize>,
+    fingerprints: Option<&[u128]>,
 ) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-support"))]
+    let fingerprints =
+        fingerprints.filter(|_| resident_conversion_test_support::reuse_measurements());
+    let fingerprints = fingerprints.filter(|values| values.len() == pagination.measured.len());
+    let document_keys: HashSet<_> = pagination
+        .measured
+        .iter()
+        .filter_map(|measured| resident_block_key(&measured.block))
+        .collect();
+    input
+        .converted_measurements
+        .retain(|key, _| document_keys.contains(key.as_str()));
+    if fingerprints.is_some() {
+        input.measured.retain(|measured| {
+            measured_block_key(measured).is_none_or(|key| document_keys.contains(&key))
+        });
+    }
     let mut selected_blocks = HashSet::new();
     let mut transcoder = crate::transcode::Transcoder::default();
     for page_index in rebuilt_pages {
@@ -12902,7 +13666,8 @@ fn refresh_resident_display_pages_reading(
     let mut pending_blocks = selected_blocks;
     let mut added_blocks = false;
     let mut unreadable_indices = Vec::new();
-    for measured in &pagination.measured {
+    let mut extent_key = Vec::new();
+    for (source_index, measured) in pagination.measured.iter().enumerate() {
         if pending_blocks.is_empty() {
             break;
         }
@@ -12912,11 +13677,46 @@ fn refresh_resident_display_pages_reading(
         if !pending_blocks.remove(key.as_ref()) {
             continue;
         }
+        let fingerprint = fingerprints.map(|values| values[source_index]);
+        extent_key.clear();
+        let extent_key_valid = fingerprint.is_some()
+            && crate::extent_key::encode(&mut extent_key, &measured.measure).is_ok();
+        if let Some(&index) = current_indices.get(key.as_ref())
+            && let Some(cached) = input.converted_measurements.get(key.as_ref())
+            && Some(cached.fingerprint) == fingerprint
+            && extent_key_valid
+            && cached.extent_key == extent_key
+            && cached.source == measured.block
+            && refresh_block_positions(
+                &mut input.measured[index].block,
+                &measured.block,
+                &mut transcoder,
+            )
+            .is_ok()
+        {
+            input
+                .unreadable
+                .retain(|known| known.page.is_some() || known.block.as_str() != key.as_ref());
+            continue;
+        }
+        input.converted_measurements.remove(key.as_ref());
         let Some(block) = convert_measured_block(&mut transcoder, measured, &mut input.unreadable)
         else {
             unreadable_indices.extend(current_indices.get(key.as_ref()).copied());
             continue;
         };
+        if let Some(fingerprint) = fingerprint
+            && extent_key_valid
+        {
+            input.converted_measurements.insert(
+                key.to_string(),
+                ConvertedMeasurement {
+                    fingerprint,
+                    extent_key: extent_key.clone(),
+                    source: measured.block.clone(),
+                },
+            );
+        }
         match current_indices.get(key.as_ref()) {
             Some(&index) => input.measured[index] = block,
             None => {
@@ -12971,6 +13771,7 @@ fn resident_block_key(block: &crate::types::LayoutBlock) -> Option<Cow<'_, str>>
         LayoutBlock::TextBox(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::Shape(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::Chart(value) => Some(resident_block_id_key(&value.id)),
+        LayoutBlock::Reserved(value) => Some(resident_block_id_key(&value.id)),
         LayoutBlock::SectionBreak(_)
         | LayoutBlock::PageBreak(_)
         | LayoutBlock::ColumnBreak(_)
@@ -12988,6 +13789,7 @@ fn resident_fragment_block_key(fragment: &crate::types::Fragment) -> Cow<'_, str
         Fragment::TextBox(value) => &value.block_id,
         Fragment::Shape(value) => &value.block_id,
         Fragment::Chart(value) => &value.block_id,
+        Fragment::Reserved(value) => &value.block_id,
     };
     resident_block_id_key(id)
 }
@@ -13018,6 +13820,7 @@ fn measured_block_key(measured: &MeasuredBlockIn) -> Option<Cow<'_, str>> {
         BlockIn::TextBox(value) => Some(block_key(&value.id)),
         BlockIn::Shape(value) => Some(block_key(&value.id)),
         BlockIn::Chart(value) => Some(block_key(&value.id)),
+        BlockIn::Reserved(value) => Some(block_key(&value.id)),
         BlockIn::Unsupported => None,
     }
 }
@@ -13031,6 +13834,7 @@ fn fragment_block_key_ref(fragment: &FragmentIn) -> Option<Cow<'_, str>> {
         FragmentIn::TextBox(value) => &value.block_id,
         FragmentIn::Shape(value) => &value.block_id,
         FragmentIn::Chart(value) => &value.block_id,
+        FragmentIn::Reserved(value) => &value.block_id,
         FragmentIn::Unsupported => return None,
     };
     Some(block_key(id))
@@ -13067,18 +13871,13 @@ fn shift_unbuilt_span(
         return DisplayShift::Inert;
     };
     let delta = layout_page
-        .and_then(|layout_page| layout_page.fragments.first())
-        .map(|fragment| {
-            use crate::types::Fragment;
-            resident_block_id_key(match fragment {
-                Fragment::Paragraph(value) => &value.block_id,
-                Fragment::Table(value) => &value.block_id,
-                Fragment::Image(value) => &value.block_id,
-                Fragment::TextBox(value) => &value.block_id,
-                Fragment::Shape(value) => &value.block_id,
-                Fragment::Chart(value) => &value.block_id,
-            })
+        .and_then(|layout_page| {
+            layout_page
+                .fragments
+                .iter()
+                .find(|fragment| !matches!(fragment, crate::types::Fragment::Reserved(_)))
         })
+        .map(resident_fragment_block_key)
         .and_then(|key| deltas.get(key.as_ref()))
         .filter(|&&delta| delta != 0);
     if let Some(&delta) = delta {
@@ -13679,6 +14478,56 @@ mod tests {
     }
 
     #[test]
+    fn unequal_column_bounds_and_separators_match_placement() {
+        for (count, widths, expected) in [
+            (
+                3,
+                vec![100.0],
+                vec![(20.0, 100.0), (140.0, 130.0), (290.0, 130.0)],
+            ),
+            (2, vec![300.0, 200.0], vec![(20.0, 228.0), (268.0, 152.0)]),
+        ] {
+            let columns = serde_json::json!({
+                "count": count, "gap": 20, "equalWidth": false, "separator": true,
+                "columns": widths.into_iter().map(|width| serde_json::json!({
+                    "width": width,
+                })).collect::<Vec<_>>(),
+            });
+            let margins = serde_json::json!({
+                "top": 20, "right": 20, "bottom": 20, "left": 20,
+            });
+            let page: PageIn = serde_json::from_value(serde_json::json!({
+                "size": {"w": 440, "h": 500}, "margins": margins, "columns": columns,
+            }))
+            .unwrap();
+            let paginator = crate::page_flow::Paginator::new(
+                crate::types::Size { w: 440.0, h: 500.0 },
+                serde_json::from_value(margins).unwrap(),
+                serde_json::from_value(columns).unwrap(),
+                None,
+            )
+            .unwrap();
+            let (_, bounds) = page_content_geometry(&page);
+            let mut separators = Vec::new();
+            emit_column_separators(&mut separators, &page);
+            assert_eq!(bounds.len(), expected.len());
+            assert_eq!(separators.len(), expected.len() - 1);
+            for (index, (x, width)) in expected.iter().copied().enumerate() {
+                assert!((paginator.get_column_x(index) - x).abs() < 1e-9);
+                assert!((paginator.get_column_width(index) - width).abs() < 1e-9);
+                assert_eq!(bounds[index].x, px(x));
+                assert_eq!(bounds[index].width, px(width));
+                assert!(x + width <= 420.0);
+                if let Some(Primitive::Line(line)) = separators.get(index) {
+                    let separator_x = (x + width + expected[index + 1].0) / 2.0;
+                    assert_eq!(line.x1, px(separator_x));
+                    assert_eq!(line.x2, px(separator_x));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn image_and_text_box_positions_ignore_legacy_metadata() {
         let position = serde_json::json!({
             "horizontal": {"relativeTo": "page", "posOffset": 914400},
@@ -14187,6 +15036,229 @@ mod tests {
         })
         .to_string();
         (pagination, layout, extras)
+    }
+
+    #[test]
+    fn equal_fingerprints_with_different_extents_reconvert() {
+        use resident_conversion_test_support::with_measured_block_conversion;
+
+        let mut pagination: crate::types::Input = serde_json::from_value(json!({
+            "measured": [{
+                "block": {"kind": "paragraph", "id": "p", "runs": [
+                    {"kind": "text", "text": "Text"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [{
+                    "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 4,
+                    "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16
+                }]}
+            }],
+            "options": {}
+        }))
+        .unwrap();
+        let layout = crate::compute_layout_input(&mut pagination).unwrap();
+        let fonts = ooxml_text::FontStore::default();
+        let (mut resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            "{}",
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        resident.remember_measurement_fingerprints(&pagination, &[1]);
+        let reading = HashSet::from([0]);
+        for (width, left_offset) in [
+            (61.0, None),
+            (61.0, Some(f64::NAN)),
+            (61.0, Some(f64::INFINITY)),
+            (61.0, Some(f64::NEG_INFINITY)),
+            (61.0, None),
+            (61.0, Some(0.0)),
+            (61.0, Some(-0.0)),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0001))),
+            (61.0, Some(f64::from_bits(0x7ff8_0000_0000_0002))),
+        ] {
+            let crate::types::BlockExtent::Paragraph(extent) = &mut pagination.measured[0].measure
+            else {
+                panic!("expected a paragraph");
+            };
+            extent.lines[0].width = width;
+            extent.lines[0].left_offset = left_offset;
+            for expected in [1, 0] {
+                let (_, converted) = with_measured_block_conversion(true, || {
+                    refresh_resident_display_pages_reading(
+                        &mut resident.input,
+                        &pagination,
+                        &layout,
+                        [0],
+                        &reading,
+                        Some(&[1]),
+                    )
+                    .unwrap();
+                });
+                assert_eq!(converted, expected);
+                let cold = resident_build_input(&pagination, &layout, "{}").unwrap();
+                assert_eq!(
+                    serde_json::to_vec(&build_display_list(&resident.input, &fonts)).unwrap(),
+                    serde_json::to_vec(&build_display_list(&cold, &fonts)).unwrap(),
+                );
+                assert_eq!(resident.unreadable(), cold.unreadable.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn cached_table_conversion_refreshes_positions_and_drops_unreadable_and_released_blocks() {
+        use resident_conversion_test_support::with_measured_block_conversion;
+
+        let (mut pagination, mut layout, extras) = selective_conversion_fixture();
+        let fonts = ooxml_text::FontStore::default();
+        let mut fingerprints = vec![1; pagination.measured.len()];
+        let (mut resident, _) = build_resident_display_list_with_fonts_observed(
+            &pagination,
+            &layout,
+            &extras,
+            &fonts,
+            &mut || {},
+        )
+        .unwrap();
+        resident.remember_measurement_fingerprints(&pagination, &fingerprints);
+        let pages: Vec<_> = (0..layout.pages.len()).collect();
+        let reading: HashSet<_> = pages.iter().copied().collect();
+        let refresh = |resident: &mut ResidentDisplayInput,
+                       pagination: &crate::types::Input,
+                       layout: &crate::types::Layout,
+                       fingerprints: &[u128]| {
+            let (_, converted) = with_measured_block_conversion(true, || {
+                refresh_resident_display_pages_reading(
+                    &mut resident.input,
+                    pagination,
+                    layout,
+                    pages.iter().copied(),
+                    &reading,
+                    Some(fingerprints),
+                )
+                .unwrap();
+            });
+            let cold = resident_build_input(pagination, layout, &extras).unwrap();
+            assert_eq!(
+                build_display_list(&resident.input, &fonts),
+                build_display_list(&cold, &fonts)
+            );
+            assert_eq!(resident.unreadable(), cold.unreadable.as_slice());
+            converted
+        };
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+            for block in &mut cell.blocks {
+                if let crate::types::LayoutBlock::Paragraph(paragraph) = block {
+                    paragraph.pm_start = paragraph.pm_start.map(|position| position + 3.0);
+                    paragraph.pm_end = paragraph.pm_end.map(|position| position + 3.0);
+                }
+            }
+        }
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            0
+        );
+        fingerprints[0] += 1;
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let crate::types::LayoutBlock::Paragraph(paragraph) = &mut table.rows[0].cells[0].blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        let position = paragraph.pm_start;
+        paragraph.pm_start = Some(1.5);
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+        let table_key = resident_block_key(&pagination.measured[0].block)
+            .unwrap()
+            .into_owned();
+        assert!(
+            !resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        let crate::types::LayoutBlock::Table(table) = &mut pagination.measured[0].block else {
+            panic!("expected a table");
+        };
+        let crate::types::LayoutBlock::Paragraph(paragraph) = &mut table.rows[0].cells[0].blocks[0]
+        else {
+            panic!("expected a paragraph");
+        };
+        paragraph.pm_start = position;
+        assert_eq!(
+            refresh(&mut resident, &pagination, &layout, &fingerprints),
+            1
+        );
+        let mut list = build_display_list(&resident.input, &fonts);
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &[0])
+            .unwrap();
+        assert!(
+            resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        let (_, converted) = with_measured_block_conversion(true, || {
+            build_resident_display_pages_with_fonts_and_fingerprints(
+                &pagination,
+                &layout,
+                &fonts,
+                &mut resident,
+                &mut list,
+                &[0],
+                Some(&fingerprints),
+            )
+            .unwrap();
+        });
+        assert_eq!(converted, 0);
+        assert_eq!(
+            list,
+            build_display_list(
+                &resident_build_input(&pagination, &layout, &extras).unwrap(),
+                &fonts,
+            )
+        );
+        release_resident_display_pages(&pagination, &layout, &mut resident, &mut list, &pages)
+            .unwrap();
+        assert!(resident.input.converted_measurements.is_empty());
+        assert!(resident.input.measured.is_empty());
+        build_resident_display_pages_with_fonts_and_fingerprints(
+            &pagination,
+            &layout,
+            &fonts,
+            &mut resident,
+            &mut list,
+            &pages,
+            Some(&fingerprints),
+        )
+        .unwrap();
+        assert!(
+            resident
+                .input
+                .converted_measurements
+                .contains_key(&table_key)
+        );
+        pagination.measured.clear();
+        for page in &mut layout.pages {
+            page.fragments.clear();
+        }
+        assert_eq!(refresh(&mut resident, &pagination, &layout, &[]), 0);
+        assert!(resident.input.converted_measurements.is_empty());
+        assert!(resident.input.measured.is_empty());
     }
 
     #[test]

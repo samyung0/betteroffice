@@ -587,7 +587,13 @@
     "deleted": "Supprimé",
     "acceptAll": "Tout accepter",
     "rejectAll": "Tout refuser",
-    "inFieldsOnly": "Ces modifications se trouvent dans des champs, comme une table des matières."
+    "inFieldsOnly": "Ces modifications se trouvent dans des champs, comme une table des matières.",
+    "agent": "agent",
+    "previousChange": "Modification précédente",
+    "nextChange": "Modification suivante",
+    "changeBy": "Modification de {author}",
+    "changeCount": "{count, plural, one {# modification} other {# modifications}}",
+    "acceptAllChanges": "Accepter toutes les modifications"
   },
   "contextMenu": {
     "ariaLabel": "Menu des actions IA",
@@ -639,6 +645,7 @@
   },
   "errors": {
     "loadingDocument": "Chargement du document...",
+    "stillOpening": null,
     "noDocumentLoaded": "Aucun document chargé",
     "failedToLoad": "Échec du chargement du document",
     "unableToParse": "Impossible d'analyser le document",
@@ -667,6 +674,7 @@
     "borderColor": "Couleur de la bordure",
     "borderWidth": "Épaisseur de la bordure",
     "unknownAction": "Action inconnue",
+    "viewGridlines": "Afficher le quadrillage",
     "borders": {
       "all": "Toutes les bordures",
       "outside": "Bordures extérieures",
