@@ -159,9 +159,10 @@ describe('DOCX viewer wasm', () => {
             document.package.settings?.defaultTabStop ?? null,
           numericIds: {},
         });
-        expect(JSON.parse(view.layoutRequestJson())).toEqual(
-          JSON.parse(JSON.stringify(editor))
-        );
+        // bodyFontSize sizes the viewer's reading layout; the editor never reads it.
+        const { bodyFontSize, ...request } = JSON.parse(view.layoutRequestJson());
+        expect(bodyFontSize).toBeGreaterThan(0);
+        expect(request).toEqual(JSON.parse(JSON.stringify(editor)));
       } finally {
         view.free();
         session.destroy();
