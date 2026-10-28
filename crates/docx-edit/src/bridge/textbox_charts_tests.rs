@@ -169,3 +169,53 @@ fn text_box_chart_carrier_uses_constrained_chart_dimensions() {
         }
     }
 }
+
+#[test]
+fn charts_in_two_text_boxes_of_one_paragraph_keep_their_own_ids() {
+    let text_box = |id: u32| {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="{id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>{x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="2743200" cy="1371600"/><wp:wrapNone/><wp:docPr id="{id}" name="Box {id}"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r>{DRAWING}</w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#,
+            x = id * 2_743_200,
+        )
+    };
+    let body = format!("<w:p>{}{}</w:p>", text_box(1), text_box(2));
+    let parts = [
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_owned()),
+        ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#.to_owned()),
+        ("word/charts/chart1.xml", CHART.to_owned()),
+        ("word/document.xml", format!(r#"<w:document {NAMESPACES}><w:body>{body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#)),
+    ];
+    let parts: Vec<_> = parts
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+        .collect();
+    let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+    let engine = EngineSession::new(75303);
+    crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &crate::bridge::RenderEnv::default())
+            .unwrap(),
+    )
+    .unwrap();
+    fn chart_ids(value: &Value, ids: &mut Vec<String>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(id) = map
+                    .get("inlineChart")
+                    .and_then(|chart| chart["id"].as_str())
+                {
+                    ids.push(id.to_owned());
+                }
+                map.values().for_each(|value| chart_ids(value, ids));
+            }
+            Value::Array(values) => values.iter().for_each(|value| chart_ids(value, ids)),
+            _ => {}
+        }
+    }
+    let mut ids = Vec::new();
+    chart_ids(&blocks, &mut ids);
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert_ne!(ids[0], ids[1]);
+}

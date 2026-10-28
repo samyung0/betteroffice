@@ -10,12 +10,20 @@ const ANCHOR: &str = r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" simpl
 
 fn document(content: &str, boxed: bool) -> Vec<u8> {
     let paragraph = format!("<w:p><w:r>{content}</w:r></w:p>");
+    document_paragraphs(&paragraph, boxed)
+}
+
+fn document_paragraphs(paragraph: &str, boxed: bool) -> Vec<u8> {
+    document_paragraphs_with_fill(paragraph, boxed, "<a:noFill/>")
+}
+
+fn document_paragraphs_with_fill(paragraph: &str, boxed: bool, fill: &str) -> Vec<u8> {
     let body = if boxed {
         format!(
-            r#"<w:p><w:r><w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+            r#"<w:p><w:r><w:drawing>{ANCHOR}<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="2743200" cy="1371600"/></a:xfrm><a:prstGeom prst="rect"/>{fill}<a:ln><a:noFill/></a:ln></wps:spPr><wps:txbx><w:txbxContent>{paragraph}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
         )
     } else {
-        paragraph
+        paragraph.to_owned()
     };
     let parts = [
         ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_owned()),
@@ -40,6 +48,15 @@ fn document(content: &str, boxed: bool) -> Vec<u8> {
 
 fn primitives(content: &str, boxed: bool) -> Vec<Value> {
     let display = display(&document(content, boxed));
+    assert_eq!(display["pages"].as_array().unwrap().len(), 1);
+    display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+fn primitives_for_paragraphs(paragraphs: &str, boxed: bool) -> Vec<Value> {
+    let display = display(&document_paragraphs(paragraphs, boxed));
     assert_eq!(display["pages"].as_array().unwrap().len(), 1);
     display["pages"][0]["primitives"]
         .as_array()
@@ -90,6 +107,33 @@ fn text(primitives: &[Value]) -> String {
         .filter(|primitive| matches!(primitive["kind"].as_str(), Some("text" | "glyphRun")))
         .filter_map(|primitive| primitive["text"].as_str())
         .collect()
+}
+
+fn text_primitive<'a>(primitives: &'a [Value], word: &str) -> &'a Value {
+    let first = &word[..1];
+    primitives
+        .iter()
+        .find(|p| {
+            matches!(p["kind"].as_str(), Some("text" | "glyphRun"))
+                && p["text"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with(first))
+        })
+        .unwrap_or_else(|| panic!("no text starting with {first}"))
+}
+
+fn baseline_y(primitive: &Value) -> f64 {
+    primitive["baselineY"]
+        .as_f64()
+        .or_else(|| primitive["glyphs"][0]["y"].as_f64())
+        .unwrap()
+}
+
+fn start_x(primitive: &Value) -> f64 {
+    primitive["x"]
+        .as_f64()
+        .or_else(|| primitive["glyphs"][0]["x"].as_f64())
+        .unwrap()
 }
 
 fn shown_anchor_pages(display: &Value, layout: &Value, anchor_text: &str) -> Vec<usize> {
@@ -211,6 +255,243 @@ fn text_only_text_box_still_paints() {
     let display = primitives("<w:t>Plain text</w:t>", true);
     assert!(images(&display).is_empty());
     assert_eq!(text(&display), "Plain text");
+}
+
+#[test]
+fn text_box_paragraph_spacing_collapses_between_paragraphs() {
+    let unspaced = primitives_for_paragraphs(
+        "<w:p><w:r><w:t>First</w:t></w:r></w:p><w:p><w:r><w:t>Second</w:t></w:r></w:p>",
+        true,
+    );
+    let spaced = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240" w:after="240"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>Second</w:t></w:r></w:p>"#,
+        true,
+    );
+    let unspaced_first = baseline_y(text_primitive(&unspaced, "First"));
+    let spaced_first = baseline_y(text_primitive(&spaced, "First"));
+    let unspaced_second = baseline_y(text_primitive(&unspaced, "Second"));
+    let spaced_second = baseline_y(text_primitive(&spaced, "Second"));
+    assert!(spaced_second > unspaced_second);
+    assert!((spaced_first - unspaced_first - 16.0).abs() < 1e-3);
+    assert!((spaced_second - unspaced_second - 32.0).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_exact_line_spacing_gives_32px_line_pitch() {
+    let display = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:line="480" w:lineRule="exact"/></w:pPr><w:r><w:t>First</w:t><w:br/><w:t>Second</w:t></w:r></w:p>"#,
+        true,
+    );
+    let first = baseline_y(text_primitive(&display, "First"));
+    let second = baseline_y(text_primitive(&display, "Second"));
+    assert!((second - first - 32.0).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_before_lines_spacing_lowers_first_baseline() {
+    let unspaced = primitives_for_paragraphs("<w:p><w:r><w:t>First</w:t></w:r></w:p>", true);
+    let twips = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+    );
+    let lines = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:beforeLines="100"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+    );
+    let both = primitives_for_paragraphs(
+        r#"<w:p><w:pPr><w:spacing w:before="240" w:beforeLines="100"/></w:pPr><w:r><w:t>First</w:t></w:r></w:p>"#,
+        true,
+    );
+    let unspaced_y = baseline_y(text_primitive(&unspaced, "First"));
+    let twips_y = baseline_y(text_primitive(&twips, "First"));
+    let lines_y = baseline_y(text_primitive(&lines, "First"));
+    let both_y = baseline_y(text_primitive(&both, "First"));
+    assert!((lines_y - unspaced_y - 16.0).abs() < 1e-3);
+    assert!((lines_y - twips_y).abs() < 1e-3);
+    assert!((both_y - lines_y).abs() < 1e-3);
+}
+
+#[test]
+fn text_box_paragraph_hanging_indent_offsets_first_and_following_lines() {
+    let lines = "<w:r><w:t>First</w:t><w:br/><w:t>Second</w:t></w:r>";
+    let plain = primitives_for_paragraphs(&format!("<w:p>{lines}</w:p>"), true);
+    let indented = primitives_for_paragraphs(
+        &format!(r#"<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>{lines}</w:p>"#),
+        true,
+    );
+    let shift = |needle: &str| {
+        start_x(text_primitive(&indented, needle)) - start_x(text_primitive(&plain, needle))
+    };
+    assert!((shift("First") - 24.0).abs() < 1e-3, "{}", shift("First"));
+    assert!((shift("Second") - 48.0).abs() < 1e-3, "{}", shift("Second"));
+}
+
+#[test]
+fn textbox_automatic_text_color_uses_nearest_background() {
+    let dark = r#"<a:solidFill><a:srgbClr val="000000"/></a:solidFill>"#;
+    let light = r#"<a:solidFill><a:srgbClr val="FFFF00"/></a:solidFill>"#;
+    let scheme_dark = r#"<a:solidFill><a:schemeClr val="lt1"><a:lumMod val="10000"/></a:schemeClr></a:solidFill>"#;
+    let scheme_light = r#"<a:solidFill><a:schemeClr val="dk1"><a:lumOff val="90000"/></a:schemeClr></a:solidFill>"#;
+    let gradient = r#"<a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="000000"/></a:gs><a:gs pos="100000"><a:srgbClr val="000000"/></a:gs></a:gsLst><a:lin ang="0" scaled="1"/></a:gradFill>"#;
+    let picture =
+        r#"<a:blipFill><a:blip r:embed="rId9"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>"#;
+    let mut position = None;
+    for (fill, paragraph_properties, run_properties, expected) in [
+        (dark, "", "", "#FFFFFF"),
+        (dark, "", r#"<w:color w:val="auto"/>"#, "#FFFFFF"),
+        (light, "", "", "#000000"),
+        (dark, "", r#"<w:color w:val="FF0000"/>"#, "#FF0000"),
+        (dark, r#"<w:shd w:fill="FFFFFF"/>"#, "", "#000000"),
+        (dark, "", r#"<w:shd w:fill="FFFFFF"/>"#, "#000000"),
+        (light, r#"<w:shd w:fill="000000"/>"#, "", "#FFFFFF"),
+        (
+            dark,
+            r#"<w:shd w:fill="FFFFFF"/>"#,
+            r#"<w:shd w:fill="000000"/>"#,
+            "#FFFFFF",
+        ),
+        (scheme_dark, "", "", "#FFFFFF"),
+        (scheme_light, "", "", "#000000"),
+        ("<a:noFill/>", "", "", "#000000"),
+        (gradient, "", "", "#000000"),
+        (picture, "", "", "#000000"),
+    ] {
+        let paragraph = format!(
+            "<w:p><w:pPr>{paragraph_properties}</w:pPr><w:r><w:rPr>{run_properties}</w:rPr><w:t>Label</w:t></w:r></w:p>"
+        );
+        let display = display(&document_paragraphs_with_fill(&paragraph, true, fill));
+        assert_eq!(display["pages"].as_array().unwrap().len(), 1);
+        let painted = display["pages"][0]["primitives"].as_array().unwrap();
+        let label = text_primitive(painted, "Label");
+        assert_eq!(label["color"], expected, "{fill} {paragraph}");
+        let current_position = (start_x(label), baseline_y(label));
+        assert_eq!(*position.get_or_insert(current_position), current_position);
+    }
+}
+
+#[test]
+fn automatic_text_color_matches_word_background_threshold() {
+    for (color, expected) in [
+        ("000000", "#FFFFFF"),
+        ("0000FF", "#FFFFFF"),
+        ("004A7F", "#FFFFFF"),
+        ("007AA8", "#FFFFFF"),
+        ("EE0000", "#000000"),
+        ("009A96", "#000000"),
+        ("0099A8", "#000000"),
+        ("00B050", "#000000"),
+        ("4F81BD", "#000000"),
+        ("7E7E7E", "#000000"),
+        ("BFBFBF", "#000000"),
+    ] {
+        let fill = format!(r#"<a:solidFill><a:srgbClr val="{color}"/></a:solidFill>"#);
+        for boxed in [false, true] {
+            for background in ["run", "paragraph", "cell", "shape"] {
+                if !boxed && background == "shape" {
+                    continue;
+                }
+                let shading = format!(r#"<w:shd w:fill="{color}"/>"#);
+                let ppr = if background == "paragraph" {
+                    shading.as_str()
+                } else {
+                    ""
+                };
+                let rpr = if background == "run" {
+                    shading.as_str()
+                } else {
+                    ""
+                };
+                let paragraph = format!(
+                    "<w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>Label</w:t></w:r></w:p>"
+                );
+                let content = if background == "cell" {
+                    format!(
+                        r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr>{shading}</w:tcPr>{paragraph}</w:tc></w:tr></w:tbl>"#
+                    )
+                } else {
+                    paragraph
+                };
+                let shape_fill = if background == "shape" {
+                    fill.as_str()
+                } else {
+                    "<a:noFill/>"
+                };
+                let display = display(&document_paragraphs_with_fill(&content, boxed, shape_fill));
+                let painted = display["pages"][0]["primitives"].as_array().unwrap();
+                assert_eq!(
+                    text_primitive(painted, "Label")["color"],
+                    expected,
+                    "{color} {background} boxed={boxed}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cell_automatic_text_color_uses_nearest_background() {
+    for boxed in [false, true] {
+        for (ppr, rpr, expected) in [
+            ("", r#"<w:color w:val="FF0000"/>"#, "#FF0000"),
+            (r#"<w:shd w:fill="FFFFFF"/>"#, "", "#000000"),
+            ("", r#"<w:shd w:fill="FFFFFF"/>"#, "#000000"),
+            (
+                r#"<w:shd w:fill="FFFFFF"/>"#,
+                r#"<w:shd w:fill="000000"/>"#,
+                "#FFFFFF",
+            ),
+        ] {
+            let content = format!(
+                r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="000000"/></w:tcPr><w:p><w:pPr>{ppr}</w:pPr><w:r><w:rPr>{rpr}</w:rPr><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            );
+            let display = display(&document_paragraphs(&content, boxed));
+            let painted = display["pages"][0]["primitives"].as_array().unwrap();
+            assert_eq!(
+                text_primitive(painted, "Label")["color"],
+                expected,
+                "{content} boxed={boxed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn textbox_cell_shading_paints_behind_automatic_text() {
+    for (ppr, background, expected) in [
+        ("", "#000000", "#FFFFFF"),
+        (r#"<w:shd w:fill="FFFFFF"/>"#, "#FFFFFF", "#000000"),
+    ] {
+        let content = format!(
+            r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="000000"/></w:tcPr><w:p><w:pPr>{ppr}</w:pPr><w:r><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        );
+        let display = display(&document_paragraphs(&content, true));
+        let painted = display["pages"][0]["primitives"].as_array().unwrap();
+        let label = text_primitive(painted, "Label");
+        assert_eq!(label["color"], expected, "{ppr}");
+        let label_index = painted.iter().position(|p| std::ptr::eq(p, label)).unwrap();
+        let (x, y) = (start_x(label), baseline_y(label));
+        let behind = painted[..label_index].iter().rev().find(|p| {
+            p["kind"] == "rect"
+                && p["x"].as_f64().unwrap() <= x
+                && x < p["x"].as_f64().unwrap() + p["w"].as_f64().unwrap()
+                && p["y"].as_f64().unwrap() <= y
+                && y <= p["y"].as_f64().unwrap() + p["h"].as_f64().unwrap()
+        });
+        assert_eq!(
+            behind.map(|rect| rect["fill"].as_str().unwrap().to_ascii_uppercase()),
+            Some(background.to_owned()),
+            "{ppr}"
+        );
+    }
+}
+
+#[test]
+fn textbox_cell_shading_precedes_shape_fill() {
+    let fill = r#"<a:solidFill><a:srgbClr val="000000"/></a:solidFill>"#;
+    let content = r#"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:shd w:fill="FFFFFF"/></w:tcPr><w:p><w:r><w:t>Label</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let display = display(&document_paragraphs_with_fill(content, true, fill));
+    let painted = display["pages"][0]["primitives"].as_array().unwrap();
+    assert_eq!(text_primitive(painted, "Label")["color"], "#000000");
 }
 
 pub(super) fn table_boundary_document(

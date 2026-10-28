@@ -504,7 +504,7 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
             shift(&mut column_break.pm_end);
             shift_break_id(&mut column_break.id, story_id, "columnBreak", units);
         }
-        LayoutBlock::Unsupported => {}
+        LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => {}
     }
 }
 
@@ -552,6 +552,10 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
             Run::Field(field) => {
                 shift(&mut field.pm_start);
                 shift(&mut field.pm_end);
+            }
+            Run::Reserved(reserved) => {
+                shift(&mut reserved.pm_start);
+                shift(&mut reserved.pm_end);
             }
             Run::Unsupported => {}
         }
@@ -841,6 +845,7 @@ fn lower_story<T: ReadTxn>(
                             })
                         } else {
                             LayoutBlock::PageBreak(PageBreakBlock {
+                                section_mark_ineligible: None,
                                 sdt_groups: None,
                                 id,
                                 pm_start: Some(start as f64),
@@ -892,6 +897,7 @@ fn lower_story<T: ReadTxn>(
                         let leading = slot.leading || !after_paragraph;
                         slot.breaks.push(blocks.len());
                         blocks.push(LayoutBlock::PageBreak(PageBreakBlock {
+                            section_mark_ineligible: None,
                             sdt_groups: None,
                             id,
                             pm_start: Some(pm_cursor as f64),
@@ -1242,6 +1248,8 @@ fn lower_story<T: ReadTxn>(
                             wrap_polygon: None,
                             allow_overlap: None,
                             layout_in_cell: None,
+                            horizontal_rule: None,
+                            no_change_aspect: None,
                             effect_extent: None,
                             effects: None,
                             outline: None,
@@ -1280,11 +1288,25 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 // Raw OOXML the model cannot draw holds its place and paints
-                // nothing, but a phonetic guide's base text, which it shows.
+                // nothing, but a phonetic guide's base text and a legacy VML
+                // text box's display shape, which it shows.
                 Out::YMap(opaque)
                     if shared_map_string(&opaque, txn, "_kind").as_deref()
                         == Some("opaqueDrawing") =>
                 {
+                    if let Some(block) = opaque_text_box(
+                        &opaque,
+                        txn,
+                        paragraph_pm_start + 1 + u64::from(paragraph_pm_units),
+                        env,
+                    ) {
+                        paragraph_drawings.push(DrawingMarker {
+                            pm_offset: paragraph_pm_units,
+                            anchored: shapes::anchored_shape(&block),
+                            block: LayoutBlock::Shape(block),
+                            hidden: mark_bool(attributes, "hidden") == Some(true),
+                        });
+                    }
                     if let Some(text) = shared_map_string(&opaque, txn, "text") {
                         paragraph_runs.push(RawRun {
                             kind: RawRunKind::Field {
@@ -1592,12 +1614,15 @@ fn lower_table<T: ReadTxn>(
 
             // `w:allowSpaceOfSameStyleInTable`: same-style cell paragraphs keep
             // their spacing.
-            if env.compatibility_flags.allow_space_of_same_style_in_table {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block
-                        && let Some(attrs) = &mut paragraph.attrs
-                    {
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block
+                    && let Some(attrs) = &mut paragraph.attrs
+                {
+                    if env.compatibility_flags.allow_space_of_same_style_in_table {
                         attrs.contextual_spacing = Some(false);
+                    }
+                    if !env.compatibility_flags.adjust_line_height_in_table {
+                        attrs.snap_to_grid = Some(false);
                     }
                 }
             }
@@ -1611,19 +1636,9 @@ fn lower_table<T: ReadTxn>(
                     }
                 });
             let background = map_string(tc_pr, "backgroundColor").map(|value| format!("#{value}"));
-            if background.as_deref().is_some_and(dark_cell_background) {
-                for block in &mut blocks {
-                    if let LayoutBlock::Paragraph(paragraph) = block {
-                        for run in &mut paragraph.runs {
-                            let formatting = match run {
-                                Run::Text(value) => &mut value.fmt,
-                                Run::Tab(value) => &mut value.fmt,
-                                Run::Field(value) => &mut value.fmt,
-                                _ => continue,
-                            };
-                            formatting.color.get_or_insert_with(|| "#FFFFFF".to_owned());
-                        }
-                    }
+            for block in &mut blocks {
+                if let LayoutBlock::Paragraph(paragraph) = block {
+                    resolve_paragraph_auto_text_color(paragraph, background.as_deref(), None);
                 }
             }
             cells.push(TableCell {
@@ -1733,6 +1748,7 @@ fn lower_table<T: ReadTxn>(
             // Capy's table width rules (2026-10-06) size every table: upstream's
             // Word autofit, which this field turns on, stays off this round.
             table_layout: None,
+            gridlines: None,
             style_cascade: None,
             background: None,
             justification: map_string(tbl_pr, "justification"),
@@ -1749,7 +1765,55 @@ fn lower_table<T: ReadTxn>(
     ))
 }
 
-fn dark_cell_background(color: &str) -> bool {
+fn resolve_paragraph_auto_text_color(
+    paragraph: &mut ParagraphBlock,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let paragraph_background = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.shading.as_deref());
+    for run in &mut paragraph.runs {
+        let formatting = match run {
+            Run::Text(run) => &mut run.fmt,
+            Run::Tab(run) => &mut run.fmt,
+            Run::Field(run) => &mut run.fmt,
+            _ => continue,
+        };
+        resolve_auto_text_color(
+            formatting,
+            paragraph_background,
+            cell_background,
+            shape_background,
+        );
+    }
+}
+
+fn resolve_auto_text_color(
+    formatting: &mut RunFormatting,
+    paragraph_background: Option<&str>,
+    cell_background: Option<&str>,
+    shape_background: Option<&str>,
+) {
+    let background = formatting
+        .highlight
+        .as_deref()
+        .or(paragraph_background)
+        .or(cell_background)
+        .or(shape_background);
+    if let Some(background) = background {
+        formatting.color.get_or_insert_with(|| {
+            if automatic_text_needs_white(background) {
+                "#FFFFFF".to_owned()
+            } else {
+                "#000000".to_owned()
+            }
+        });
+    }
+}
+
+fn automatic_text_needs_white(color: &str) -> bool {
     let Some(value) = color
         .strip_prefix('#')
         .filter(|value| value.len() == 6)
@@ -1757,10 +1821,21 @@ fn dark_cell_background(color: &str) -> bool {
     else {
         return false;
     };
-    let red = (value >> 16) & 255;
-    let green = (value >> 8) & 255;
-    let blue = value & 255;
-    299 * red + 587 * green + 114 * blue < 128_000
+    let linearize = |channel: u32| {
+        let channel = f64::from(channel) / 255.0;
+        if channel <= 0.04045 {
+            channel / 12.92
+        } else {
+            ((channel + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let red = linearize((value >> 16) & 255);
+    let green = linearize((value >> 8) & 255);
+    let blue = linearize(value & 255);
+    let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    // Choose the higher WCAG contrast: Word uses white on 007AA8, black on EE0000 and 009A96.
+    // Relative luminances between 0.167 and 0.182 are unobserved.
+    luminance < 0.1791
 }
 
 fn any_json(value: &Any) -> Option<Value> {
@@ -1951,6 +2026,8 @@ fn lower_image_values(
         wrap_polygon: None,
         allow_overlap: None,
         layout_in_cell: None,
+        horizontal_rule: map_bool(values, "horizontalRule").filter(|rule| *rule),
+        no_change_aspect: None,
         effect_extent: None,
         effects: None,
         outline: image_outline(values, env),
@@ -2256,7 +2333,7 @@ fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
             LayoutBlock::SectionBreak(block) => &mut block.sdt_groups,
             LayoutBlock::PageBreak(block) => &mut block.sdt_groups,
             LayoutBlock::ColumnBreak(block) => &mut block.sdt_groups,
-            LayoutBlock::Unsupported => continue,
+            LayoutBlock::Reserved(_) | LayoutBlock::Unsupported => continue,
         };
         groups.get_or_insert_with(Vec::new).insert(0, group.clone());
     }
@@ -2720,6 +2797,26 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
 }
 
+/// The display-only shape a legacy VML text box carries next to its verbatim markup.
+fn opaque_text_box<T: ReadTxn>(
+    opaque: &MapRef,
+    txn: &T,
+    pm_start: u64,
+    env: &RenderEnv,
+) -> Option<ShapeBlock> {
+    let value =
+        serde_json::from_str::<Value>(&shared_map_string(opaque, txn, "textBoxJson")?).ok()?;
+    if value.get("hidden").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    shapes::lower_shape_json(
+        &value,
+        format!("shape:{}", embed_item_key(opaque)),
+        pm_start,
+        env,
+    )
+}
+
 /// A paragraph's shape or chart child, at the offset it occupied.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
@@ -2766,9 +2863,10 @@ impl CommentIndex {
         })
     }
 
-    /// `story`'s intervals in story order. An anchor that no longer resolves
-    /// is an error, because the run cuts derived from these intervals would
-    /// silently misplace the comment.
+    /// `story`'s intervals in story order. An anchor whose text this replica
+    /// has not integrated yet contributes nothing: anchors are opaque bytes, so
+    /// a comment can arrive before the text it points at, and the next
+    /// lowering picks it up once that text arrives.
     fn intervals<T: ReadTxn>(
         &self,
         txn: &T,
@@ -2787,12 +2885,9 @@ impl CommentIndex {
         let offsets = yrs::StickyIndex::get_offsets(txn, &edges);
         let mut intervals = Vec::new();
         for ((id, _, _), [start, end]) in anchors.iter().zip(offsets.as_chunks::<2>().0) {
-            let start = start.as_ref().ok_or_else(|| {
-                EditError::InvalidComment("start anchor no longer resolves".into())
-            })?;
-            let end = end
-                .as_ref()
-                .ok_or_else(|| EditError::InvalidComment("end anchor no longer resolves".into()))?;
+            let (Some(start), Some(end)) = (start, end) else {
+                continue;
+            };
             if start.index < end.index {
                 intervals.push(CommentInterval {
                     start: start.index,
@@ -2956,12 +3051,23 @@ fn flush_paragraph_parts(
             false
         });
     }
+    // A paragraph holding drawings, or units that show nothing, is never a
+    // bare section mark.
+    let has_source_content = !drawings.is_empty();
+    let mark_source_content = |paragraph: &mut ParagraphBlock| {
+        if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
+            paragraph
+                .attrs
+                .get_or_insert_with(Default::default)
+                .has_source_content = Some(true);
+        }
+    };
     let (anchored, drawings): (Vec<_>, Vec<_>) =
         drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
-        let paragraph = flush_paragraph(
+        let mut paragraph = flush_paragraph(
             raw_runs,
             values,
             pilcrow_attributes,
@@ -2971,6 +3077,7 @@ fn flush_paragraph_parts(
             paragraph_pm_units,
             list_state,
         );
+        mark_source_content(&mut paragraph);
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
             && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
@@ -3013,6 +3120,7 @@ fn flush_paragraph_parts(
                 &mut continuation
             },
         );
+        mark_source_content(&mut paragraph);
         if part > 0 {
             // Layout and paint key blocks by id, so each part needs its own.
             if let BlockId::Str(id) = &mut paragraph.id {
@@ -3155,7 +3263,7 @@ fn flush_paragraph(
         .collect();
     stamp_logical_order(&mut runs);
 
-    ParagraphBlock {
+    let mut paragraph = ParagraphBlock {
         sdt_groups: None,
         id: BlockId::Str(para_id.clone()),
         para_id: (!para_id.is_empty() && !para_id_is_generated).then_some(para_id),
@@ -3163,7 +3271,9 @@ fn flush_paragraph(
         attrs: Some(attrs),
         pm_start: Some(paragraph_pm_start as f64),
         pm_end: Some((paragraph_pm_start + u64::from(paragraph_pm_units) + 2) as f64),
-    }
+    };
+    resolve_paragraph_auto_text_color(&mut paragraph, None, None);
+    paragraph
 }
 
 fn pilcrow_values<T: ReadTxn>(pilcrow: &MapRef, txn: &T) -> BTreeMap<String, Any> {
@@ -3438,7 +3548,7 @@ fn stamp_logical_order(runs: &mut [Run]) {
             Run::Text(run) => run.fmt.logical_order = Some(index as u64),
             Run::Tab(run) => run.fmt.logical_order = Some(index as u64),
             Run::Field(run) => run.fmt.logical_order = Some(index as u64),
-            Run::Image(_) | Run::LineBreak(_) | Run::Unsupported => {}
+            Run::Image(_) | Run::LineBreak(_) | Run::Reserved(_) | Run::Unsupported => {}
         }
     }
 }
@@ -3944,6 +4054,13 @@ fn lower_paragraph_attrs(
             .filter(|style| !style.is_empty());
     }
     lower_paragraph_spacing(values, &mut result, env);
+    // A framed paragraph is never a bare section mark.
+    if values
+        .get("frame")
+        .is_some_and(|frame| !matches!(frame, Any::Null))
+    {
+        result.has_source_content = Some(true);
+    }
     // Section document-grid pitch for line-height snapping, stamped at
     // lowering so incremental reuse compares resolved blocks. The engine
     // overwrites this per section after lowering.
@@ -5390,7 +5507,7 @@ mod tests {
                     "kind": "text", "text": text, "fontSize": 10.0, "logicalOrder": 0,
                     "pmStart": start + 1.0, "pmEnd": start + 2.0
                 }],
-                "attrs": {"defaultFontSize": 10.0},
+                "attrs": {"defaultFontSize": 10.0, "snapToGrid": false},
                 "pmStart": start, "pmEnd": start + 3.0
             })
         };

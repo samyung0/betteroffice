@@ -1322,7 +1322,8 @@ pub(crate) fn image_payload(image: &Value) -> JsonObject {
         "effectExtentRight": number(field(field(Some(image), "padding"), "right"))
             .map(emu_to_pixels),
         "layoutInCell": nullish(field(Some(image), "layoutInCell")),
-        "allowOverlap": nullish(field(Some(image), "allowOverlap"))
+        "allowOverlap": nullish(field(Some(image), "allowOverlap")),
+        "horizontalRule": nullish(field(Some(image), "horizontalRule"))
     }))
 }
 
@@ -1773,12 +1774,16 @@ fn run_content_to_units(
             1,
         )],
         // A phonetic guide keeps its run's formatting, as text does.
+        // A legacy VML text box also carries its display-only shape.
         "opaqueDrawing" => vec![embed_unit(
             "opaqueDrawing",
             map_from_value(json!({
                 "kind": field(Some(content), "kind"),
                 "xml": field(Some(content), "xml"),
                 "text": field(Some(content), "text"),
+                "textBoxJson": field(Some(content), "textBox")
+                    .filter(|value| value.is_object())
+                    .map(|text_box| source_json(text_box, source)),
             })),
             if string(field(Some(content), "kind")) == Some("ruby") {
                 marks
