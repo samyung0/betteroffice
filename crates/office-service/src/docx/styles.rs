@@ -885,6 +885,11 @@ mod tests {
         assert_eq!(enclosing_cell_story("body:sdt1"), None);
         assert!(is_cell_story("hf:rId7:t2:r10c0"));
         assert!(!is_cell_story("body:t0:r1"));
+        assert!(is_cell_story("body:t0:r1c2~51"));
+        assert_eq!(
+            enclosing_cell_story("body:t0:r1c2~51:sdt0").as_deref(),
+            Some("body:t0:r1c2~51")
+        );
     }
 
     #[test]

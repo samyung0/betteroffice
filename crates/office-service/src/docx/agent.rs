@@ -2395,6 +2395,11 @@ mod tests {
     fn cell_stories_name_their_table_story() {
         assert_eq!(table_story("body:t0:r1c2"), Some("body"));
         assert_eq!(table_story("body:t3:r0c0:t1:r10c4"), Some("body:t3:r0c0"));
+        assert_eq!(table_story("body:t0:r1c2~51"), Some("body"));
+        assert_eq!(
+            table_story("body:t3:r0c0~51:t1:r10c4~52"),
+            Some("body:t3:r0c0~51")
+        );
         assert_eq!(table_story("body"), None);
         assert_eq!(table_story("body:t0:rxc1"), None);
         assert_eq!(table_story("hf:rId1"), None);
@@ -2428,7 +2433,10 @@ mod tests {
             .doc()
             .insert_row(&ctx(), &docx_edit::CellLoc::new(BODY, 1, 0, 0), true)
             .unwrap();
-        assert!(session.story_paras("body:t1:r1c0").is_ok());
+        // Cells an edit made carry the replica's `~{client}`.
+        let client = session.engine.doc().client_id();
+        let cell = |bare: &str| format!("{bare}~{client}");
+        assert!(session.story_paras(&cell("body:t1:r1c0")).is_ok());
         let read = |cell: &str| {
             let para_id = session.story_paras(cell).unwrap()[0].para_id.clone();
             format!("{cell}:paragraph:{para_id}")
@@ -2437,8 +2445,8 @@ mod tests {
             EditCode::UnavailableTarget,
             format!(
                 "\"body:t1\" names 2 tables, which the read shows as {:?}, {:?}: copy each id whole from inspect_office_document, reading the file first",
-                read("body:t1:r0c0"),
-                read("body:t2:r0c0"),
+                read(&cell("body:t1:r0c0")),
+                read(&cell("body:t2:r0c0")),
             ),
         );
         assert_eq!(
@@ -2447,7 +2455,7 @@ mod tests {
         );
         session.apply(&delete("body:t2", &["C", ""])).unwrap();
         session.apply(&delete("body:t1", &["B"])).unwrap();
-        assert!(session.story_paras("body:t1:r0c0").is_err());
+        assert!(session.story_paras(&cell("body:t1:r0c0")).is_err());
     }
 
     /// xorshift64: the commands a seed draws.
