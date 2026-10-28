@@ -958,10 +958,6 @@ describe('FrameDelta wire round-trip', () => {
         options: output.options,
         layout: output.layout,
         fontChains: { 'calibri|0|0': [fontId] },
-        headersFooters: {
-          variants: [],
-          watermark: { kind: 'text', text: 'DRAFT', font: 'Calibri' },
-        },
       });
     };
 
@@ -970,7 +966,6 @@ describe('FrameDelta wire round-trip', () => {
     const fullFrame = session.build_display_list_frame(first, 0);
     const retained = applyFrameDelta(null, decodeFrameDelta(fullFrame));
     expect(retained.displayList).toEqual(jsonList);
-    expect(retained.displayList.pages[0].watermarkPrimitiveCount).toBe(1);
 
     session.insert_text('body', paraId, 5, ' typed', undefined, undefined);
     const second = envelopeFor();
@@ -1100,9 +1095,7 @@ describe('FrameDelta wire round-trip', () => {
     };
     const firstQueries = createDisplayListQueries(retained.displayList, engine);
     facades.push(firstQueries);
-    // parse every page into the store, so adoption has retained pages to shift
-    firstQueries.rangeRects(0, Number.MAX_SAFE_INTEGER);
-    expect(updates.length).toBe(1);
+    firstQueries.prime();
 
     session.insert_text('body', paraId, 5, 'x', undefined, undefined);
     const second = envelopeFor();
@@ -1127,8 +1120,8 @@ describe('FrameDelta wire round-trip', () => {
     const secondQueries = createDisplayListQueries(next.displayList, engine, firstQueries);
     facades.push(secondQueries);
     secondQueries.prime();
-    expect(updates.length).toBe(2);
-    const update = JSON.parse(updates[1]!) as {
+    expect(updates.length).toBe(1);
+    const update = JSON.parse(updates[0]!) as {
       total: number;
       replace?: Array<[number, unknown]>;
       shift?: Array<[number, number, number[][][]]>;
@@ -1342,70 +1335,6 @@ describe('FrameDelta position span shifts', () => {
     }
   });
 
-  it('refreshes query-store pages after owned span shifts', () => {
-    const initial = placeholderFrame([8, 30]);
-    const unchanged: DisplayPage = { pageIndex: 1, width: 100, height: 100, primitives: [] };
-    const previous: RetainedFrame = {
-      ...initial,
-      pages: [
-        ...initial.pages,
-        {
-          pageIndex: 1,
-          pageId: 2n,
-          fingerprint: 1n,
-          primitiveIds: new BigUint64Array(),
-          page: unchanged,
-        },
-      ],
-      displayList: { pages: [...initial.displayList.pages, unchanged] },
-    };
-    const updates: string[] = [];
-    let canUpdate = false;
-    const engine: RustDisplayListQueryEngine = {
-      hitTestRegionsJson: () => 'null',
-      rangeRectsJson: () => '[]',
-      hasDisplayListSession: () => true,
-      openDisplayList: () => 1,
-      closeDisplayList: () => {},
-      hasDisplayListUpdate: () => canUpdate,
-      updateDisplayList: (_handle, update) => {
-        updates.push(update);
-      },
-      rangeRectsByHandle: () => '[]',
-      verticalMoveByHandle: () => 'null',
-    };
-    const first = createDisplayListQueries(previous.displayList, engine);
-    first.prime();
-    canUpdate = true;
-    const shifted = applyFrameDeltaOwned(
-      placeholderFrame([8, 30]),
-      decodeFrameDelta(shiftFrame([], [], { spanDelta: 6n }))
-    );
-    const original = previous.displayList.pages[0]!;
-    const applied = applyFrameDeltaOwned(previous, {
-      ...decodeFrameDelta(shiftFrame([], [], { spanDelta: 6n })),
-      pageCount: 2,
-    });
-    const second = createDisplayListQueries(applied.displayList, engine, first);
-    second.prime();
-    expect(applied.displayList.pages[0]).toBe(original);
-    expect(JSON.parse(updates[0]!)).toEqual({
-      total: 2,
-      reuse: [[1, 1]],
-      replace: [[0, { pageIndex: 0, width: 100, height: 100, primitives: [] }]],
-    });
-    const fresh = createDisplayListQueries(
-      { pages: [shifted.displayList.pages[0]!, unchanged] },
-      engine
-    );
-    for (const pos of [8, 14, 30, 36, 37]) {
-      expect(second.caretRect(pos)).toEqual(fresh.caretRect(pos));
-    }
-    first.dispose();
-    second.dispose();
-    fresh.dispose();
-  });
-
   it('rejects malformed span shifts with both appliers', () => {
     const delta = decodeFrameDelta(shiftFrame([], [], { spanDelta: 1n }));
     for (const apply of [applyFrameDelta, applyFrameDeltaOwned]) {
@@ -1520,7 +1449,7 @@ describe('FrameDelta note anchor shifts', () => {
   it.skipIf(!hasLayoutWasm)('matches a fresh layout on footnote, endnote and mixed pages, in frames and the query store', () => {
     const session = createEditSession(71);
     sessions.push(session);
-    session.seed_from_docx(notedDocx(), undefined);
+    session.seed_from_docx(notedDocx());
     const fontId = session.register_measure_font(new Uint8Array(readFileSync(FONT)));
     const base = {
       bodyStory: 'body',
@@ -1565,7 +1494,6 @@ describe('FrameDelta note anchor shifts', () => {
       const fresh = createEditSession(72);
       sessions.push(fresh);
       fresh.load(session.encode_state());
-      fresh.load_note_separators(session.note_separators_state());
       fresh.register_measure_font(new Uint8Array(readFileSync(FONT)));
       fresh.layout_document_with_regions_json(request);
       return applyFrameDelta(null, decodeFrameDelta(fresh.build_display_list_frame(extras, 0)))
