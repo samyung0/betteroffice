@@ -13,7 +13,7 @@
  * - Validation and error handling
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, FormEvent, KeyboardEvent } from 'react';
 import { useTranslation } from '../../i18n';
 import { DrawnIcon } from '../ui/Icons';
@@ -346,11 +346,12 @@ export function HyperlinkDialog({
   const [touched, setTouched] = useState(false);
 
   // Refs
+  const dialogRef = useRef<HTMLDivElement>(null);
   const urlInputRef = useRef<HTMLInputElement>(null);
   const bookmarkSelectRef = useRef<HTMLSelectElement>(null);
 
   // Initialize form with initial data or selected text
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isOpen) {
       if (initialData) {
         // Editing existing hyperlink
@@ -379,13 +380,16 @@ export function HyperlinkDialog({
   // Focus input when dialog opens
   useEffect(() => {
     if (isOpen) {
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        const active = document.activeElement;
+        if (active instanceof HTMLInputElement && dialogRef.current?.contains(active)) return;
         if (linkType === 'url') {
           urlInputRef.current?.focus();
         } else {
           bookmarkSelectRef.current?.focus();
         }
       }, 100);
+      return () => clearTimeout(timer);
     }
   }, [isOpen, linkType]);
 
@@ -488,6 +492,7 @@ export function HyperlinkDialog({
 
   return (
     <div
+      ref={dialogRef}
       className={`docx-hyperlink-dialog-overlay ${className || ''}`}
       style={{ ...DIALOG_OVERLAY_STYLE, ...style }}
       onClick={handleOverlayClick}
