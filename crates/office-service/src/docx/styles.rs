@@ -621,8 +621,14 @@ fn strip_control(id: &str) -> Option<String> {
         .then(|| id[..at].to_owned())
 }
 
-/// Ends in `:tN:rNcN`.
+/// Ends in `:tN:rNcN`, with a `~<client>` suffix when an edit made it.
 fn is_cell_story(id: &str) -> bool {
+    let id = match id.rsplit_once('~') {
+        Some((id, client)) if !client.is_empty() && client.bytes().all(|b| b.is_ascii_digit()) => {
+            id
+        }
+        _ => id,
+    };
     let Some(at) = id.rfind(":t") else {
         return false;
     };

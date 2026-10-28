@@ -149,10 +149,15 @@ fn in_body(story: &str) -> Result<()> {
     ))
 }
 
-/// A cell story's table story: `<story>:t<n>:r<row>c<column>` names a cell.
+/// A cell story's table story: `<story>:t<n>:r<row>c<column>` names a cell, with a
+/// `~<client>` suffix when an edit made it.
 fn table_story(cell: &str) -> Option<&str> {
     let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
     let (rest, place) = cell.rsplit_once(':')?;
+    let place = match place.split_once('~') {
+        Some((place, client)) if digits(client) => place,
+        _ => place,
+    };
     let (row, column) = place.strip_prefix('r')?.split_once('c')?;
     let (story, table) = rest.rsplit_once(':')?;
     (digits(row) && digits(column) && table.strip_prefix('t').is_some_and(digits)).then_some(story)
