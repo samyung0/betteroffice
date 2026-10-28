@@ -2755,7 +2755,6 @@ mod tests {
 
     fn charted(wb: &mut Workbook, sheet: SheetId, formulas: &[&str]) {
         wb.sheet_mut(sheet).unwrap().charts = vec![xlsx_model::SheetChart {
-            raw_xml: None,
             part: "xl/charts/chart1.xml".to_owned(),
             drawing: "xl/drawings/drawing1.xml".to_owned(),
             anchor_index: 0,

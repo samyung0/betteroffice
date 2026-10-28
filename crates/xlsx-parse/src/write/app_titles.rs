@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use xlsx_model::Workbook;
+use xlsx_model::{CellRef, Workbook};
 
-use crate::chart::quoted_sheet;
 use crate::package::Relationship;
 use crate::tree::{Element, Part, Replacement, names_are_resolvable};
 use crate::xml::resolve_part_path;
@@ -180,7 +179,32 @@ fn replace_text(
 ) -> Option<()> {
     let range = element
         .splice_target()
-        .filter(|range| !part.text()[range.clone()].contains('<'))?;
+        .filter(|range| !part.text(range.clone()).contains('<'))?;
     edits.push((range, Replacement::Text(text)));
     Some(())
+}
+
+/// a sheet name as a formula qualifies it: quoted unless Excel would read it
+/// bare (not a cell address or R1C1 reference).
+fn quoted_sheet(name: &str) -> String {
+    let upper = name.to_ascii_uppercase();
+    let r1c1 = matches!(upper.as_str(), "R" | "C")
+        || upper.strip_prefix('R').is_some_and(|rest| {
+            rest.trim_start_matches(|c: char| c.is_ascii_digit())
+                .starts_with('C')
+        });
+    let plain = name
+        .chars()
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        && CellRef::parse_a1(name).is_err()
+        && !r1c1;
+    if plain {
+        name.to_owned()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
 }
