@@ -116,6 +116,12 @@ export class PptxRenderer {
      */
     registerEmbeddedFontsJson(document: PptxDocument): string;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
+    /**
+     * Saves `document` with the normal-autofit scales this renderer refit
+     * its edited text to (upstream #1526); `PptxDocument.saveBytes` keeps
+     * the stored ones.
+     */
+    saveBytes(document: PptxDocument): Uint8Array;
 }
 
 export function compileSlideJson(slide_json: string): string;
@@ -225,6 +231,7 @@ export interface InitOutput {
     readonly pptxrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
     readonly pptxrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
 }
 
