@@ -199,6 +199,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   deferChrome,
   fullMirror,
   selectableText,
+  flush,
   registerCanvas,
 }: {
   page: DisplayPage;
@@ -210,6 +211,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   deferChrome: boolean;
   fullMirror: boolean;
   selectableText: boolean;
+  flush: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
@@ -222,7 +224,7 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           width: page.width * zoom,
           height: page.height * zoom,
           background: '#ffffff',
-          boxShadow: '0 1px 3px var(--doc-shadow)',
+          boxShadow: flush ? undefined : '0 1px 3px var(--doc-shadow)',
         }}
       />
       <CanvasPageMirror
@@ -254,6 +256,7 @@ export function CanvasPagesView({
   zoom = 1,
   interactive = false,
   selectableText = false,
+  flush = false,
   glyphOutlineProvider,
   offscreenReplay,
   onWorkerPresentationChange,
@@ -282,6 +285,8 @@ export function CanvasPagesView({
   interactive?: boolean;
   /** Read-only viewers: the a11y mirror becomes a selectable text layer (see CanvasPageMirror). */
   selectableText?: boolean;
+  /** Pages abut with no gap, padding or shadow: one continuous column. */
+  flush?: boolean;
   /** Outline source sharing the display engine's resident font store. */
   /** False disables the separate outline WASM for display lists that contain browser text runs. */
   glyphOutlineProvider?: GlyphOutlineProvider | null | false;
@@ -352,17 +357,19 @@ export function CanvasPagesView({
   const windowMeasuredRef = useRef(false);
   // Column-space page tops/bottoms from display-list geometry alone (no DOM
   // reads): padding, then each page height at the current zoom plus the gap.
+  const pageGap = flush ? 0 : CANVAS_PAGE_GAP_PX;
+  const pagesPadding = flush ? 0 : CANVAS_PAGES_PADDING_PX;
   const pageOffsets = useMemo(() => {
     const tops = new Array<number>(displayList.pages.length);
     const bottoms = new Array<number>(displayList.pages.length);
-    let y = CANVAS_PAGES_PADDING_PX;
+    let y = pagesPadding;
     displayList.pages.forEach((page, index) => {
       tops[index] = y;
       bottoms[index] = y + page.height * zoom;
-      y = bottoms[index] + CANVAS_PAGE_GAP_PX;
+      y = bottoms[index] + pageGap;
     });
     return { tops, bottoms };
-  }, [displayList, zoom]);
+  }, [displayList, zoom, pageGap, pagesPadding]);
   useLayoutEffect(() => {
     if (!windowingEnabled) {
       windowMeasuredRef.current = false;
@@ -676,8 +683,8 @@ export function CanvasPagesView({
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
-          gap: CANVAS_PAGE_GAP_PX,
-          padding: CANVAS_PAGES_PADDING_PX,
+          gap: pageGap,
+          padding: pagesPadding,
           transform: sidebarOpen ? `translateX(-${SIDEBAR_DOCUMENT_SHIFT}px)` : undefined,
           transition: 'transform 0.2s ease',
         }}
@@ -702,6 +709,7 @@ export function CanvasPagesView({
               deferChrome={!chromeInWindow(i)}
               fullMirror={mirrorInWindow(i)}
               selectableText={selectableText}
+              flush={flush}
               registerCanvas={registerCanvas}
             />
           );

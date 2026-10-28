@@ -2004,6 +2004,9 @@ pub struct LayoutOptions {
     pub section_page_float_bands: Option<Vec<SectionPageFloatBands>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+    /// Authored page breaks, page-break-before and new-page section breaks
+    /// start no page: a reading layout's text flows on.
+    pub continuous_flow: bool,
 }
 
 /// Body margins for a section's first page under `w:titlePg` and its even

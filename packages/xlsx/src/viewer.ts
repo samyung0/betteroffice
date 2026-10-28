@@ -9,7 +9,9 @@ export { paintDisplayList } from './render/canvas2d';
 export { buildA11yGrid } from './a11y';
 export type { A11yGrid, A11yStrings } from './a11y';
 export { cellAtPoint, cellRect, chartRegionAtPoint, rangeRect } from './hittest';
-export { zoomedViewport } from './viewport/index';
+export { parseHyperlinkLocation } from './hyperlinks/index';
+export type { HyperlinkDestination } from './hyperlinks/index';
+export { MAX_SCROLL_EXTENT_PX, zoomedViewport } from './viewport/index';
 export type { ScrollBox } from './viewport/index';
 export {
   analyzeOpenWorkbook,

@@ -40,11 +40,23 @@ pub(crate) fn assert_checkpoint(
 
 /// office-checkpoint.ts `assetFromDataUrl` for a string `src`.
 pub(crate) fn asset_from_data_url(src: &str) -> Result<Asset> {
-    let unsupported =
-        || Error::Engine("Image object does not contain supported embedded image bytes".into());
-    let rest = src.strip_prefix("data:").ok_or_else(unsupported)?;
-    let (mime, data) = rest.split_once(";base64,").ok_or_else(unsupported)?;
-    let subtype = mime.strip_prefix("image/").ok_or_else(unsupported)?;
+    let (mime, body) = data_url_base64(src).ok_or_else(|| {
+        Error::Engine("Image object does not contain supported embedded image bytes".into())
+    })?;
+    let bytes = node_base64(body);
+    Ok(Asset {
+        sha256: sha256_hex(&bytes),
+        bytes,
+        mime_type: mime.to_owned(),
+    })
+}
+
+/// An image data URL's type and its base64 without the padding, when both
+/// are well formed.
+pub(crate) fn data_url_base64(src: &str) -> Option<(&str, &str)> {
+    let rest = src.strip_prefix("data:")?;
+    let (mime, data) = rest.split_once(";base64,")?;
+    let subtype = mime.strip_prefix("image/")?;
     let mime_ok = !subtype.is_empty()
         && subtype
             .bytes()
@@ -55,20 +67,17 @@ pub(crate) fn asset_from_data_url(src: &str) -> Result<Asset> {
         && body
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/');
-    if !mime_ok || !data_ok {
-        return Err(unsupported());
-    }
-    let bytes = node_base64(body);
-    Ok(Asset {
-        sha256: sha256_hex(&bytes),
-        bytes,
-        mime_type: mime.to_owned(),
-    })
+    (mime_ok && data_ok).then_some((mime, body))
+}
+
+/// The bytes [`node_base64`] makes of `chars` characters of base64.
+pub(crate) fn node_base64_len(chars: usize) -> usize {
+    chars / 4 * 3 + [0, 0, 1, 2][chars % 4]
 }
 
 /// `Buffer.from(text, "base64")` on validated base64 without its padding:
 /// trailing bits that do not make a byte are dropped, as Node does.
-fn node_base64(body: &str) -> Vec<u8> {
+pub(crate) fn node_base64(body: &str) -> Vec<u8> {
     let usable = body.len() - body.len() % 4;
     let mut bytes = base64::engine::general_purpose::STANDARD_NO_PAD
         .decode(&body[..usable])
@@ -181,6 +190,74 @@ pub(crate) fn check_replacement(
     Ok((span, after))
 }
 
+/// Characters a new paragraph holds (the engine survey's bound for DOCX,
+/// Epo 2026-10-21; PPTX takes the same).
+const MAX_PARAGRAPH_CHARS: usize = 5_000;
+
+/// A new paragraph's text: one paragraph of at most [`MAX_PARAGRAPH_CHARS`]
+/// characters.
+pub(crate) fn check_paragraph_text(text: &str) -> Result<()> {
+    if text.contains(['\n', '\r', '\u{b}', '\u{2028}', '\u{2029}']) {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            "text must be one paragraph without line breaks; insert one paragraph a command",
+        ));
+    }
+    let chars = text.chars().count();
+    if chars > MAX_PARAGRAPH_CHARS {
+        return Err(Error::edit(
+            EditCode::InvalidInput,
+            format!(
+                "text holds {chars} characters; a paragraph holds at most {MAX_PARAGRAPH_CHARS}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal of an id without the form of the `kind` ids a read lists,
+/// `shown` giving one as the read shows it; only an id of the right form
+/// that names nothing is no longer in the file (Epo 2026-10-24, Q223).
+pub(crate) fn malformed_id(id: &str, kind: &str, shown: &str) -> Error {
+    Error::edit(
+        EditCode::InvalidInput,
+        format!(
+            "{id:?} is a malformed {kind} id; {shown}: copy each id whole from inspect_office_document, reading the file first"
+        ),
+    )
+}
+
+/// `delete_paragraph`'s check: the paragraph reads `expected` whole, else a
+/// `stale_target` carrying it as it reads now.
+pub(crate) fn check_expected_paragraph(id: &str, current: &str, expected: &str) -> Result<()> {
+    if current == expected {
+        return Ok(());
+    }
+    Err(Error::Edit {
+        code: EditCode::StaleTarget,
+        message: "the paragraph's text differs from expected_text".into(),
+        details: Some(serde_json::json!({
+            "block": { "id": id, "type": "paragraph", "text": current }
+        })),
+    })
+}
+
+/// `insert_paragraph`'s anchor: exactly one of `after_id` and `before_id`,
+/// as (id, after).
+pub(crate) fn insert_anchor<'a>(
+    after_id: Option<&'a str>,
+    before_id: Option<&'a str>,
+) -> Result<(&'a str, bool)> {
+    match (after_id, before_id) {
+        (Some(id), None) => Ok((id, true)),
+        (None, Some(id)) => Ok((id, false)),
+        _ => Err(Error::edit(
+            EditCode::InvalidInput,
+            "insert_paragraph names exactly one of after_id and before_id",
+        )),
+    }
+}
+
 /// Whether an Office file can store `ch`: XML 1.0's `Char` (no control
 /// character but tab, line feed and carriage return; no U+FFFE or U+FFFF).
 fn storable(ch: char) -> bool {
@@ -200,11 +277,37 @@ pub(crate) fn storable_text(text: &str) -> String {
 /// as an Office file can store it, each dropped character added to `removed`.
 pub(crate) fn storable_command(command: &Command, removed: &mut Vec<char>) -> Command {
     let mut command = command.clone();
-    let (Command::ReplaceText { text, .. } | Command::SetCell { value: text, .. }) = &mut command;
-    let before = removed.len();
-    removed.extend(text.chars().filter(|&ch| !storable(ch)));
-    if removed.len() > before {
-        *text = storable_text(text);
+    let mut keep = |text: &mut String| {
+        let before = removed.len();
+        removed.extend(text.chars().filter(|&ch| !storable(ch)));
+        if removed.len() > before {
+            *text = storable_text(text);
+        }
+    };
+    match &mut command {
+        Command::ReplaceText { text, .. }
+        | Command::SetCell { value: text, .. }
+        | Command::AddSheet { name: text, .. }
+        | Command::RenameSheet { name: text, .. }
+        | Command::InsertParagraph { text, .. } => keep(text),
+        Command::SetRange { values, .. } | Command::InsertTable { rows: values, .. } => {
+            values.iter_mut().flatten().for_each(keep)
+        }
+        Command::SetShapeText { paragraphs, .. } | Command::AddTextBox { paragraphs, .. } => {
+            paragraphs.iter_mut().for_each(keep)
+        }
+        Command::AddSlide { .. } | Command::DeleteSlide { .. } | Command::MoveSlide { .. } => {}
+        Command::DeleteParagraph { .. }
+        | Command::SetList { .. }
+        | Command::DeleteTable { .. }
+        | Command::FormatText { .. }
+        | Command::SetAlignment { .. }
+        | Command::FormatCells { .. }
+        | Command::DeleteSheet { .. }
+        | Command::InsertRows { .. }
+        | Command::DeleteRows { .. }
+        | Command::InsertColumns { .. }
+        | Command::DeleteColumns { .. } => {}
     }
     command
 }

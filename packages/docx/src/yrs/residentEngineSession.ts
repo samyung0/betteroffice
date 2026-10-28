@@ -43,9 +43,11 @@ export type ResidentEngineSession = Pick<
   relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number): Uint8Array;
 };
 
-export async function createResidentEngineSession(): Promise<ResidentEngineSession> {
+export async function createResidentEngineSession(
+  clientId?: number
+): Promise<ResidentEngineSession> {
   await preloadEditWasm();
-  const session = createEditSession(randomClientId());
+  const session = createEditSession(clientId ?? randomClientId());
   const listeners = new Set<
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
   >();

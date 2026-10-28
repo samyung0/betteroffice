@@ -10,6 +10,7 @@ import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
+import { refusalOf } from './refusals';
 import { StaleProposalError } from './staleProposal';
 
 /**
@@ -48,6 +49,8 @@ export interface SheetInfo {
   frozenCols: number;
   initialScrollX: number;
   initialScrollY: number;
+  /** The active sheet's used range (its cells and hyperlinks), `null` when it is empty. */
+  usedRange: { start: CellPoint; end: CellPoint } | null;
 }
 
 export interface CellPosition {
@@ -354,13 +357,25 @@ export interface WorkbookHandle extends CollaborationReplica {
   /**
    * apply one user input to a cell (parses number/bool/formula/text) and
    * recalc its transitive dependents. one undo step; moved dependents come back
-   * in `EditResult.changed`.
+   * in `EditResult.changed`. A formula that does not parse is stored as text,
+   * or refused with an {@link UnparsedFormulaError} when the user `typed` it.
    */
-  editCell(sheet: number, row: number, col: number, input: string): EditResult;
+  editCell(sheet: number, row: number, col: number, input: string, typed?: boolean): EditResult;
   /** `editCell` with the facade's stage timings attached. */
   editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult;
   /** apply a batch of inputs (paste path) as one undo step; dependents recalc. */
   editCells(sheet: number, edits: CellInputEdit[]): EditResult;
+  /**
+   * clear the content of the cells in `range` (A1) that hold a value or a
+   * formula, keeping formats, as one undo step: empty cells cost nothing. Throws
+   * {@link EditTooLargeError}, changing nothing, past the engine's update cap.
+   */
+  clearContents(sheet: number, range: string): EditResult;
+  /**
+   * throws the {@link EditTooLargeError} `clearContents` would over `range`,
+   * from the count of its filled cells; changes nothing.
+   */
+  checkClearContents(sheet: number, range: string): void;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -567,7 +582,11 @@ export function openWorkbook(
           }
         }
       }
-      if (failed) throw toError(failure);
+      if (failed) {
+        // an engine refusal reaches the caller typed, as through the worker.
+        const error = toError(failure);
+        throw refusalOf(error.message) ?? error;
+      }
       return result as T;
     } finally {
       wasmCallDepth -= 1;
@@ -662,8 +681,11 @@ export function openWorkbook(
     setActiveSheet(index: number): void {
       mutatingWasmCall(() => doc.setActiveSheet(index));
     },
-    editCell(sheet: number, row: number, col: number, input: string): EditResult {
-      return parseJson(() => doc.editCellJson(JSON.stringify({ sheet, row, col, input })), true);
+    editCell(sheet: number, row: number, col: number, input: string, typed?: boolean): EditResult {
+      return parseJson(
+        () => doc.editCellJson(JSON.stringify({ sheet, row, col, input, typed })),
+        true
+      );
     },
     editCellProfiled(sheet: number, row: number, col: number, input: string): ProfiledEditResult {
       return parseJson(
@@ -673,6 +695,12 @@ export function openWorkbook(
     },
     editCells(sheet: number, edits: CellInputEdit[]): EditResult {
       return parseJson(() => doc.editCellsJson(JSON.stringify({ sheet, edits })), true);
+    },
+    clearContents(sheet: number, range: string): EditResult {
+      return parseJson(() => doc.clearContentsJson(JSON.stringify({ sheet, range })), true);
+    },
+    checkClearContents(sheet: number, range: string): void {
+      wasmCall(() => doc.checkClearContentsJson(JSON.stringify({ sheet, range })));
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

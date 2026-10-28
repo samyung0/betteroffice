@@ -113,7 +113,10 @@ pub struct BaselineEntry {
     pub image_sha256: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// An agent edit. XLSX `sheet` is a sheet id from inspect (`sheet:0`) or a
+/// sheet name; cell values are inputs as typed in the editor (`=` formulas,
+/// `""` empty).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     #[serde(rename_all = "camelCase")]
@@ -129,6 +132,249 @@ pub enum Command {
         expected_value: String,
         value: String,
     },
+    /// `range` is `A1` or `A1:C3`; both grids have its shape, row by row.
+    #[serde(rename_all = "camelCase")]
+    SetRange {
+        sheet: String,
+        range: String,
+        expected: Vec<Vec<String>>,
+        values: Vec<Vec<String>>,
+    },
+    #[serde(rename_all = "camelCase")]
+    FormatCells {
+        sheet: String,
+        range: String,
+        style: CellStyle,
+    },
+    /// Placed after the sheet `after` names, else last.
+    #[serde(rename_all = "camelCase")]
+    AddSheet {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RenameSheet {
+        sheet: String,
+        expected_name: String,
+        name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    DeleteSheet {
+        sheet: String,
+        expected_name: String,
+    },
+    /// `at` is the 1-based row the first new row takes.
+    #[serde(rename_all = "camelCase")]
+    InsertRows { sheet: String, at: u32, count: u32 },
+    /// `expected` is the band's inputs as rows of cells (rows from `at`,
+    /// cells from column A), required; trailing empty cells and rows may be
+    /// left out, so `[]` expects an empty band.
+    #[serde(rename_all = "camelCase")]
+    DeleteRows {
+        sheet: String,
+        at: u32,
+        count: u32,
+        expected: Vec<Vec<String>>,
+    },
+    /// `at` is the column letter the first new column takes.
+    #[serde(rename_all = "camelCase")]
+    InsertColumns {
+        sheet: String,
+        at: String,
+        count: u32,
+    },
+    /// `expected` is the band's inputs as rows of cells (rows from row 1,
+    /// cells from column `at`), required; trailing empty cells and rows may
+    /// be left out, so `[]` expects an empty band.
+    #[serde(rename_all = "camelCase")]
+    DeleteColumns {
+        sheet: String,
+        at: String,
+        count: u32,
+        expected: Vec<Vec<String>>,
+    },
+    /// DOCX, PPTX: a new paragraph right after `after_id` or right before
+    /// `before_id` (at most one), in the DOCX body or the PPTX paragraph's
+    /// text; inserts after one paragraph land in call order. DOCX without
+    /// either: at the body's end (into its only paragraph when that is
+    /// empty, as in a new file). DOCX `style` is a paragraph style id of the
+    /// file and `list` sets or ends the paragraph's list; without them the
+    /// paragraph continues the one before it as Enter does.
+    #[serde(rename_all = "camelCase")]
+    InsertParagraph {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_id: Option<String>,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<ListKind>,
+    },
+    /// DOCX, PPTX: removes a paragraph whose whole text is `expected_text`.
+    #[serde(rename_all = "camelCase")]
+    DeleteParagraph {
+        target_id: String,
+        expected_text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetList { ids: Vec<String>, list: ListKind },
+    /// DOCX: a table of `rows` placed as [`Command::InsertParagraph`] places
+    /// a paragraph, followed by an empty paragraph of its own.
+    #[serde(rename_all = "camelCase")]
+    InsertTable {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_id: Option<String>,
+        rows: Vec<Vec<String>>,
+    },
+    /// DOCX: the table holding paragraph `id`, its cells' text as `expected`
+    /// (a cell's paragraphs joined by line breaks).
+    #[serde(rename_all = "camelCase")]
+    DeleteTable {
+        id: String,
+        expected: Vec<Vec<String>>,
+    },
+    /// DOCX, PPTX: formats the one occurrence of `text` in a paragraph
+    /// (`highlight` DOCX only).
+    #[serde(rename_all = "camelCase")]
+    FormatText {
+        target_id: String,
+        text: String,
+        #[serde(flatten)]
+        format: TextFormat,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetAlignment {
+        target_id: String,
+        alignment: Alignment,
+    },
+    /// PPTX: a shape's whole text, now `expected_text` (its paragraphs
+    /// joined by line breaks), becomes `paragraphs`.
+    #[serde(rename_all = "camelCase")]
+    SetShapeText {
+        shape_id: String,
+        expected_text: String,
+        paragraphs: Vec<String>,
+    },
+    /// PPTX: a slide right after `after_slide` or right before
+    /// `before_slide` (at most one; neither: last) with `layout`'s text
+    /// placeholders, `layout` defaulting to the slide it follows (else the
+    /// one it precedes).
+    #[serde(rename_all = "camelCase")]
+    AddSlide {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layout: Option<String>,
+    },
+    /// PPTX: removes a slide whose text is `expected_text` (its shapes'
+    /// paragraphs, one a line, as the slide read shows them).
+    #[serde(rename_all = "camelCase")]
+    DeleteSlide {
+        slide_id: String,
+        expected_text: String,
+    },
+    /// PPTX: moves a slide right after `after_slide` or right before
+    /// `before_slide` (exactly one).
+    #[serde(rename_all = "camelCase")]
+    MoveSlide {
+        slide_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_slide: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_slide: Option<String>,
+    },
+    /// PPTX: a text box of `paragraphs` on a slide, its box in points from
+    /// the slide's top left corner.
+    #[serde(rename_all = "camelCase")]
+    AddTextBox {
+        slide_id: String,
+        paragraphs: Vec<String>,
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+    },
+}
+
+/// A DOCX paragraph's list: the document's one bullet or one numbered list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListKind {
+    Bullet,
+    Numbered,
+    None,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Alignment {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+
+/// What `format_text` sets; fields left out stay as they are. `color` is a
+/// hex colour, `highlight` one of Word's highlight colours or `none`,
+/// `font_size` in points.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextFormat {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bold: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub italic: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub underline: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strikethrough: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub highlight: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_size: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_family: Option<String>,
+}
+
+/// What `format_cells` sets: the editor's style patch and a number format.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CellStyle {
+    #[serde(flatten)]
+    pub patch: betteroffice_xlsx::StylePatch,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format: Option<betteroffice_xlsx::NumberFormatMutation>,
+}
+
+/// A scoped read. XLSX: no `range` lists the sheets; `sheet` and `range`
+/// read that range's cells. DOCX: `count` (1 to 200) paragraphs from
+/// `start`. PPTX: no `slide` lists `count` slides from `start`; `slide`
+/// (its number, from 1) reads that slide's shapes and `count` of its
+/// paragraphs from `start`. `ids` (any format, in place of the rest):
+/// pictures and charts an earlier read listed, each picture's stored bytes
+/// and each chart's whole series (Epo 2026-10-24, Q278, Q284).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slide: Option<u32>,
 }
 
 /// Yrs location of an edited target: root map name, nested keys, and the
@@ -141,13 +387,28 @@ pub struct Target {
     pub range: Option<[u32; 2]>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CommandResult {
     pub state: Vec<u8>,
-    pub inverse: Vec<Command>,
+    /// In undo order; `None` when a command has no inverse, so the edit has
+    /// no Undo.
+    pub inverse: Option<Vec<Command>>,
     pub targets: Vec<Target>,
     /// For the edit's tool result: the characters an Office file cannot store
     /// that the agent's text lost before the edit applied (Epo 2026-10-15).
+    pub notice: Option<String>,
+    /// For each applied command, what its Undo re-creates: its target's
+    /// Yjs items before it applied ([`crate::Touched`]); a PPTX `add_slide`
+    /// adds the slide it wrote and a `set_shape_text` the story it wrote,
+    /// read after it applied, which their Redo re-creates. Capy
+    /// sizes an edit's Undo with it (`sources::undo_cost::office`).
+    pub touched: Vec<crate::Touched>,
+}
+
+/// A file [`crate::create`] built from a starter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Created {
+    pub bytes: Vec<u8>,
     pub notice: Option<String>,
 }
 

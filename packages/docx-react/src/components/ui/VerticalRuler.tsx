@@ -191,24 +191,24 @@ export function VerticalRuler({
       <VerticalMarginMarker
         type="topMargin"
         position={topMarginPx}
-        editable={editable}
+        editable={editable && !!onTopMarginChange}
         isDragging={dragging === 'topMargin'}
         isHovered={hoveredMarker === 'topMargin'}
         onMouseEnter={() => setHoveredMarker('topMargin')}
         onMouseLeave={() => setHoveredMarker(null)}
-        onMouseDown={(e) => handleDragStart(e, 'topMargin')}
+        onMouseDown={(e) => onTopMarginChange && handleDragStart(e, 'topMargin')}
       />
 
       {/* Bottom margin marker */}
       <VerticalMarginMarker
         type="bottomMargin"
         position={pageHeightPx - bottomMarginPx}
-        editable={editable}
+        editable={editable && !!onBottomMarginChange}
         isDragging={dragging === 'bottomMargin'}
         isHovered={hoveredMarker === 'bottomMargin'}
         onMouseEnter={() => setHoveredMarker('bottomMargin')}
         onMouseLeave={() => setHoveredMarker(null)}
-        onMouseDown={(e) => handleDragStart(e, 'bottomMargin')}
+        onMouseDown={(e) => onBottomMarginChange && handleDragStart(e, 'bottomMargin')}
       />
     </div>
   );
@@ -303,6 +303,8 @@ function VerticalMarginMarker({
   return (
     <div
       className={`docx-ruler-marker docx-ruler-marker-${type}`}
+      data-ruler-margin={type === 'topMargin' ? 'top' : 'bottom'}
+      data-draggable={editable}
       style={markerStyle}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}

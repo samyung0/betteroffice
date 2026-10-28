@@ -172,7 +172,8 @@
     "panelLabel": "Speaker notes",
     "placeholder": "Add speaker notes…",
     "toggle": "Notes",
-    "showSpeakerNotes": "Show speaker notes"
+    "showSpeakerNotes": "Show speaker notes",
+    "tooLong": "Speaker notes hold at most 4,000 characters per slide."
   },
   "errors": {
     "decodeSlideImage": "could not decode slide image"

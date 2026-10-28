@@ -172,7 +172,8 @@
     "panelLabel": "Sprechernotizen",
     "placeholder": "Sprechernotizen hinzufügen…",
     "toggle": "Notizen",
-    "showSpeakerNotes": "Sprechernotizen anzeigen"
+    "showSpeakerNotes": "Sprechernotizen anzeigen",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

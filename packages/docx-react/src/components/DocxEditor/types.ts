@@ -11,6 +11,10 @@ import type {
 
 export interface DocxEditorCollaborationOptions {
   clientId?: number;
+  /** The client id the resident layout worker writes under; omitted, each
+   * worker draws a random one. A host whose server admits writes only under
+   * ids it assigned passes one. */
+  workerClientId?: number;
   user?: CollaborationUser;
   /** Shared Yrs state used instead of importing the source DOCX. */
   initialUpdate?: Uint8Array;

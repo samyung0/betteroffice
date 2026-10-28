@@ -191,8 +191,26 @@ fn layout_request(package: &S9PackageWire) -> Value {
     if let Some(id) = default_paragraph_style_id {
         render_env["defaultParagraphStyleId"] = json!(id);
     }
+    // The default paragraph style's size, else the document default, else
+    // Word's own 10pt: what a reading layout eases sizes around.
+    let body_half_points = default_paragraph_style_id
+        .and_then(|id| styles.iter().find(|style| style.style_id == id))
+        .and_then(|style| style.r_pr.as_ref()?.font_size)
+        .or_else(|| {
+            package
+                .styles
+                .as_ref()?
+                .doc_defaults
+                .as_ref()?
+                .r_pr
+                .as_ref()?
+                .font_size
+        })
+        .filter(|size| *size > 0.0)
+        .unwrap_or(20.0);
     json!({
         "bodyStory": "body",
+        "bodyFontSize": body_half_points / 2.0,
         "options": { "pageGap": DEFAULT_PAGE_GAP },
         "regions": {
             "sections": sections,

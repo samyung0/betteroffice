@@ -226,8 +226,9 @@ deck.redo()
 ```
 
 Undo covers this replica's own local edits. Updates applied from a peer are not
-in local history, so undo will not revert someone else's work. Consecutive edits
-inside half a second coalesce into one step; `add_undo_barrier()` splits them.
+in local history, so undo will not revert someone else's work. Typing into one
+text story inside half a second coalesces into one step, every other edit is its
+own step; `add_undo_barrier()` splits a typing run.
 
 Setting `origin` to `"agent"`, `"remote"`, or `"system"` tags edits for
 attribution — and takes them out of the local undo stack, which is the point:

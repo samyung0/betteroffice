@@ -191,13 +191,8 @@ impl InlineFormatDelta {
         match &self.highlight {
             Patch::Keep => {}
             Patch::Clear => put("highlight", Any::Null),
-            Patch::Set(color) => put(
-                "highlight",
-                Any::Map(Arc::new(HashMap::from([(
-                    "color".into(),
-                    Any::from(highlight_color_name(color)),
-                )]))),
-            ),
+            // A plain colour name, as the seed stores it and the save reads it.
+            Patch::Set(color) => put("highlight", Any::from(highlight_color_name(color))),
         }
         match &self.font_size {
             Patch::Keep => {}
@@ -343,33 +338,43 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
-        if !attrs.is_empty() {
-            story.format(&mut txn, range.start, len, attrs);
-        }
-        if let Patch::Set(patch) = &delta.font_family {
-            // Each run keeps what its own fonts hold beyond the picked slots;
-            // one pass over the range, one retain per stretch of equal fonts.
+        // Each run keeps what its own fonts hold beyond the picked slots; one
+        // retain per stretch of equal fonts. The runs' fonts are read before
+        // the other attributes are set, which leave them as they are.
+        let font_runs = |chunks: Vec<crate::ops::Chunk>, patch| {
             let mut stretches: Vec<(u32, Any)> = Vec::new();
-            let mut offset = 0;
-            for diff in story.diff(&txn, YChange::identity) {
-                let chunk_end = offset + out_len(&diff.insert);
-                let (from, to) = (offset.max(range.start), chunk_end.min(range.end));
+            for chunk in chunks {
+                let (from, to) = (chunk.start.max(range.start), chunk.end().min(range.end));
                 if from < to {
-                    let own = diff
-                        .attributes
-                        .as_deref()
-                        .and_then(|attrs| attrs.get("fontFamily"));
-                    let font = picked_font(own, patch);
+                    let font = picked_font(chunk.attrs.get("fontFamily"), patch);
                     match stretches.last_mut() {
                         Some((len, last)) if *last == font => *len += to - from,
                         _ => stretches.push((to - from, font)),
                     }
                 }
-                offset = chunk_end;
-                if offset >= range.end {
-                    break;
-                }
             }
+            stretches
+        };
+        let fonts_first = !attrs.contains_key("fontFamily");
+        // A format changes nothing before its range's slot.
+        let from = self.slot_mark_in(&range.story, &story, &txn, range.start);
+        let mut stretches = match &delta.font_family {
+            Patch::Set(patch) if fonts_first => Some(font_runs(
+                self.snapshot_range_in(&range.story, &story, &txn, range.start, range.end),
+                patch,
+            )),
+            _ => None,
+        };
+        if !attrs.is_empty() {
+            story.format(&mut txn, range.start, len, attrs);
+        }
+        if let Patch::Set(patch) = &delta.font_family {
+            let stretches = stretches.take().unwrap_or_else(|| {
+                font_runs(
+                    crate::ops::snapshot_range(&story, &txn, range.start, range.end),
+                    patch,
+                )
+            });
             let deltas = std::iter::once(Delta::<In>::Retain(range.start, None)).chain(
                 stretches.into_iter().map(|(len, font)| {
                     Delta::Retain(
@@ -381,7 +386,7 @@ impl EditingDoc {
             story.apply_delta(&mut txn, deltas);
         }
         let loc_range =
-            crate::op::loc_range_in_txn(&range.story, &story, &txn, range.start, range.end)?;
+            crate::op::loc_range_from(&range.story, &story, &txn, from, range.start, range.end)?;
         Ok(Receipt {
             range: Some(loc_range),
             ..Receipt::default()

@@ -135,11 +135,10 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
-      const undoneText =
-        format === 'pptx'
-          ? edited.text.replace(marker, marker.slice(0, -1))
-          : original.text;
-      expect((await save(page, format, info, 'undone')).text).toBe(undoneText);
+      // One undo takes back the whole marker: PPTX typing runs are one step.
+      expect((await save(page, format, info, 'undone')).text).toBe(
+        original.text
+      );
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();
@@ -180,3 +179,35 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
     }
   );
 }
+
+// Capy's speaker notes cap: the panel's height sets the slide's fit, so the
+// limit line and the x/4,000 counter, which appear with a cut paste, must not
+// change it, even at a phone's width where the line would wrap.
+test('pptx: the notes limit line and counter leave the slide its size at 360px', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await open(page, 'pptx');
+  await page.getByTestId('pptx-notes-toggle').click();
+  const notes = page.getByRole('textbox', { name: 'Speaker notes' });
+  await notes.fill('n'.repeat(100));
+  const slide = page.getByTestId('pptx-slide-canvas');
+  const settled = async () => {
+    await page.evaluate(
+      () =>
+        new Promise((done) =>
+          requestAnimationFrame(() => requestAnimationFrame(done))
+        )
+    );
+    return slide.boundingBox();
+  };
+  const before = await settled();
+  expect(before).not.toBeNull();
+  await expect(page.getByTestId('pptx-notes-count')).toHaveCount(0);
+
+  await notes.fill('n'.repeat(4100));
+  await expect(page.getByTestId('pptx-notes-limit')).toBeVisible();
+  await expect(page.getByTestId('pptx-notes-count')).toHaveText('4000/4000');
+  await expect(notes).toHaveValue('n'.repeat(4000));
+  expect(await settled()).toEqual(before);
+});

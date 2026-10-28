@@ -1,4 +1,10 @@
-import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import type {
+  YrsCellLoc,
+  YrsLoc,
+  YrsPlainInsert,
+  YrsSession,
+  YrsStorySegment,
+} from '@betteroffice/docx/yrs';
 
 export interface YrsProjectedNode {
   kind: string;
@@ -59,20 +65,107 @@ export function createYrsPositionProjection(
   session: YrsSession,
   rootStory: string
 ): YrsPositionProjection | null {
-  if (!session.storyIds().includes(rootStory)) return null;
+  if (!session.hasStory(rootStory)) return null;
   return new YrsPositionProjection(session, rootStory);
 }
 
+/**
+ * Document positions of a story tree, read from the session's story segments
+ * once and then kept up to date in place: text typed into one story moves the
+ * positions after it ({@link sync}) instead of rereading the tree.
+ */
 export class YrsPositionProjection {
   private readonly stories = new Map<string, StoryProjection>();
-  private readonly nodes = new Map<number, YrsProjectedNode>();
+  private nodes = new Map<number, YrsProjectedNode>();
   private readonly tables: YrsProjectedTable[] = [];
+  /** Block content controls by their child story. */
+  private readonly blockSdts = new Map<string, YrsProjectedNode>();
+  /** The session's {@link YrsSession.docEpoch} these positions reflect. */
+  private epoch: number;
 
   constructor(
     private readonly session: YrsSession,
     readonly rootStory: string
   ) {
+    this.epoch = session.docEpoch();
     this.buildStory(rootStory, 0, 0);
+  }
+
+  /**
+   * Brings the positions up to the session's document. One transaction that
+   * inserted text alone into one story moves the positions after it; anything
+   * else returns false, and the caller builds a new projection.
+   */
+  sync(): boolean {
+    const epoch = this.session.docEpoch();
+    if (epoch === this.epoch) return true;
+    if (epoch !== this.epoch + 1) return false;
+    const insert = this.session.lastPlainInsert();
+    if (insert?.epoch !== epoch || !this.applyInsert(insert)) return false;
+    this.epoch = epoch;
+    return true;
+  }
+
+  private applyInsert({ story, at, len }: YrsPlainInsert): boolean {
+    const edited = this.stories.get(story);
+    // a story outside this tree moves none of its positions
+    if (!edited) return true;
+    // the paragraph whose inline content holds story index `at`
+    let index = 0;
+    let target = -1;
+    let offset = 0;
+    for (let i = 0; i < edited.paragraphs.length; i++) {
+      const paragraph = edited.paragraphs[i]!;
+      const inlineStart = index + paragraph.leading;
+      if (at >= inlineStart && at <= inlineStart + paragraph.length) {
+        target = i;
+        offset = at - inlineStart;
+        break;
+      }
+      index = inlineStart + paragraph.length + 1;
+    }
+    if (target < 0) return false;
+    const paragraph = edited.paragraphs[target]!;
+    const position = edited.contentStart + paragraph.displayStart + 1 + offset;
+    // what starts at or after the insert moves; what spans it grows
+    const nodes = new Map<number, YrsProjectedNode>();
+    for (const node of this.nodes.values()) {
+      if (node.start >= position) node.start += len;
+      else if (node.start + node.nodeSize > position) node.nodeSize += len;
+      if (node.kind === 'table') {
+        for (const cell of (node as YrsProjectedTable).cells) {
+          if (cell.start >= position) {
+            cell.start += len;
+            cell.contentStart += len;
+          } else if (cell.start + cell.nodeSize > position) {
+            cell.nodeSize += len;
+          }
+        }
+      }
+      nodes.set(node.start, node);
+    }
+    this.nodes = nodes;
+    for (const each of this.stories.values()) {
+      if (each.contentStart > position) {
+        each.contentStart += len;
+        continue;
+      }
+      if (each.contentStart + each.size < position) continue;
+      each.size += len;
+      if (each === edited) continue;
+      // a story holding the edited one in a table or content control: its
+      // paragraphs after that block move (their input offsets count the block
+      // as one unit, so those stay)
+      for (const later of each.paragraphs) {
+        if (each.contentStart + later.displayStart >= position) later.displayStart += len;
+      }
+    }
+    paragraph.length += len;
+    for (let i = target + 1; i < edited.paragraphs.length; i++) {
+      edited.paragraphs[i]!.displayStart += len;
+      edited.paragraphs[i]!.inputStart += len;
+    }
+    return true;
   }
 
   get size(): number {
@@ -81,6 +174,11 @@ export class YrsPositionProjection {
 
   nodeAt(position: number): YrsProjectedNode | null {
     return this.nodes.get(position) ?? null;
+  }
+
+  /** The block content control owning `story`. */
+  blockSdtForStory(story: string): YrsProjectedNode | null {
+    return this.blockSdts.get(story) ?? null;
   }
 
   tableAtPosition(position: number): YrsProjectedTable | null {
@@ -248,6 +346,7 @@ export class YrsPositionProjection {
           story: storyId,
         };
         this.nodes.set(start, node);
+        this.blockSdts.set(childStory, node);
         cursor += node.nodeSize;
         paragraphStart = cursor;
         leading += 1;

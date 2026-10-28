@@ -16,6 +16,7 @@ import {
   openWorkbook,
   wasmVersion,
 } from './loader';
+import { EditTooLargeError, UnparsedFormulaError } from './refusals';
 
 // png files start with this 8-byte signature.
 const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -303,6 +304,18 @@ describe('wasm loader', () => {
       expect(() => handle.moveChart(0, 'xl/drawings/drawing1.xml#9', 1, 0)).toThrow(
         /drawing1\.xml#9/
       );
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it("throws the engine's refusals as their typed errors on a direct handle", () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      // 80,000 formulas may take 896 bytes each: over 64 MiB.
+      const edits = Array.from({ length: 80_000 }, (_, row) => ({ row, col: 0, input: '=B1' }));
+      expect(() => handle.editCells(0, edits)).toThrow(EditTooLargeError);
+      expect(() => handle.editCell(0, 10, 1, '=B3*/2', true)).toThrow(UnparsedFormulaError);
     } finally {
       handle.dispose();
     }

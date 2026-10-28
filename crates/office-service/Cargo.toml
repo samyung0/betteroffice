@@ -29,8 +29,16 @@ icu_locale_core = "2"
 indexmap = "2"
 ooxml-opc.workspace = true
 pptx-edit.workspace = true
+pptx-parse.workspace = true
 ryu-js = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Agent formulas are checked against the engine's parser and function list,
+# and inputs classified and cells shown as the editor does.
+xlsx-calc.workspace = true
+xlsx-ops.workspace = true
+# A sheet's drawing parts, for its pictures and charts.
+xlsx-parse.workspace = true
+xlsx-render.workspace = true
 yrs = "0.27.3"

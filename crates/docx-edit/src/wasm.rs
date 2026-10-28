@@ -3692,6 +3692,26 @@ impl EditSession {
         ids
     }
 
+    /// Whether the document holds `story`, without listing every story.
+    pub fn has_story(&self, story: &str) -> bool {
+        let txn = self.engine.doc().yrs_doc().transact();
+        txn.get_map(STORIES)
+            .is_some_and(|stories| stories.contains_key(&txn, story))
+    }
+
+    /// Counts committed transactions: it moves on with every document change.
+    pub fn doc_epoch(&self) -> f64 {
+        self.engine.doc_epoch() as f64
+    }
+
+    /// `{"epoch","story","at","len"}` when the last committed transaction
+    /// inserted text alone into one story (`at` and `len` in story units), so
+    /// a host index can follow it instead of rereading the story.
+    pub fn last_plain_insert(&self) -> Option<String> {
+        let (epoch, story, at, len) = self.engine.last_plain_insert()?;
+        Some(json!({ "epoch": epoch, "story": story, "at": at, "len": len }).to_string())
+    }
+
     /// Story length in UTF-16 units, every embed (pilcrows included) counting
     /// as one. Errors on an unknown story.
     pub fn story_len(&self, story: &str) -> Result<u32, JsValue> {

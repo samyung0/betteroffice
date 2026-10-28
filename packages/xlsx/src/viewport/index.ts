@@ -13,4 +13,5 @@ export {
   clampScroll,
   uniformOffsets,
   zoomedViewport,
+  MAX_SCROLL_EXTENT_PX,
 } from './math';

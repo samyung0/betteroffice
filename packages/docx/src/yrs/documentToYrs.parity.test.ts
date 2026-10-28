@@ -66,6 +66,18 @@ describe('DOCX engine seeding', () => {
     }
   });
 
+  it('fails on a story the document names twice, as the engine seed does', async () => {
+    const parsed = await parseDocx(Uint8Array.from(readFileSync(FIXTURE)).buffer);
+    const note = { type: 'footnote' as const, id: 1, content: [] };
+    parsed.package.footnotes = [note, { ...note }];
+    const session = await createYrsSession({ clientId: 0 });
+    try {
+      expect(() => documentToYrs(session, parsed)).toThrow('story "fn:1" already exists');
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('returns thin host metadata and materializes the canonical package on demand', async () => {
     const bytes = Uint8Array.from(readFileSync(FIXTURE));
     const parsed = await parseDocx(bytes.buffer);

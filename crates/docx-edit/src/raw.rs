@@ -6,8 +6,8 @@ use std::sync::Arc;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
-    TransactionMut,
+    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextPrelim,
+    TextRef, TransactionMut,
 };
 
 use crate::op::{OpError, OpResult};
@@ -84,13 +84,21 @@ impl EditingDoc {
         apply_raw_ops_to_story(&mut txn, story_id, ops, false)
     }
 
+    /// A story a batch names that does not exist yet starts empty: a seed
+    /// creates every story with an empty batch first, then fills them.
     pub(crate) fn apply_raw_story_batches(
         &self,
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
         let mut txn = self.transact_for(ctx);
+        let stories = txn
+            .get_map(crate::STORIES)
+            .expect("stories root is declared by EditingDoc::new");
         for (story_id, ops) in batches {
+            if !stories.contains_key(&txn, &story_id) {
+                stories.insert(&mut txn, story_id.clone(), TextPrelim::new(""));
+            }
             apply_raw_ops_to_story(&mut txn, &story_id, ops, true)?;
         }
         Ok(())
@@ -315,7 +323,17 @@ pub(crate) fn apply_raw_ops_to_story(
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
+    // Consecutive boundaries (a seed's come last) are placed in one batch.
+    let mut boundaries: Vec<(u32, Any)> = Vec::new();
     for op in ops {
+        if let RawOp::SetBookmark { index, data } = op {
+            run.flush(&story, txn)?;
+            boundaries.push((index, data));
+            continue;
+        }
+        if !boundaries.is_empty() {
+            crate::bookmarks::set_batch(txn, &story, story_id, std::mem::take(&mut boundaries))?;
+        }
         match op {
             RawOp::Insert { index, text, attrs }
                 if run.is_contiguous(index)
@@ -350,6 +368,9 @@ pub(crate) fn apply_raw_ops_to_story(
         }
     }
     run.flush(&story, txn)?;
+    if !boundaries.is_empty() {
+        crate::bookmarks::set_batch(txn, &story, story_id, boundaries)?;
+    }
     Ok(())
 }
 
@@ -792,7 +813,7 @@ mod tests {
         ops
     }
 
-    /// What `seed_parsed_docx` emits: placeholder delete, appending inserts, trailing comment.
+    /// What `seed_parsed_docx` emits: appending inserts, trailing comment.
     fn seed_shaped_ops() -> Vec<RawOp> {
         let font = attrs(&[(
             "fontFamily",
@@ -824,7 +845,7 @@ mod tests {
             }
         }
         let mut builder = Builder {
-            ops: vec![RawOp::Delete { index: 0, len: 1 }],
+            ops: Vec::new(),
             index: 0,
         };
         builder.text("Heading with stars ★★", &bold);
@@ -1101,11 +1122,15 @@ mod tests {
     fn insert_batch_matches_legacy_for_seed_shaped_ops() {
         let ctx = EditCtx::local(String::new(), String::new());
         let legacy = EditingDoc::new(7);
-        legacy.create_empty_stories(&["body".into()]).unwrap();
+        legacy
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         apply_raw_ops_legacy_to_doc(&legacy, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let batched = EditingDoc::new(7);
-        batched.create_empty_stories(&["body".into()]).unwrap();
+        batched
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         batched
             .apply_raw_ops("body", seed_shaped_ops(), &ctx)
             .unwrap();
@@ -1215,6 +1240,37 @@ mod tests {
 
         assert_eq!(legacy_err, batched_err);
         assert_stories_equivalent(&legacy, &batched, "body");
+    }
+
+    /// Consecutive bookmark boundaries go in one batch, which still refuses a
+    /// boundary past the story's end as the per-op path did, leaving the
+    /// boundaries before it set.
+    #[test]
+    fn a_boundary_past_the_end_is_refused_after_the_ones_before_it() {
+        let boundary = |index, id: f64, kind: &str| RawOp::SetBookmark {
+            index,
+            data: Any::Map(Arc::new(
+                [
+                    ("id".to_owned(), Any::Number(id)),
+                    ("kind".to_owned(), Any::from(kind)),
+                ]
+                .into(),
+            )),
+        };
+        let (_, _, result) = assert_raw_ops_equivalent(
+            "AB",
+            vec![
+                boundary(0, 5.0, "start"),
+                boundary(1, 5.0, "end"),
+                boundary(4, 6.0, "end"),
+                RawOp::Insert {
+                    index: 0,
+                    text: "unreachable".into(),
+                    attrs: Attrs::new(),
+                },
+            ],
+        );
+        assert_eq!(result, Err(OpError::OutOfBounds { index: 4, len: 3 }));
     }
 
     #[test]
@@ -1423,7 +1479,9 @@ mod tests {
     fn legacy_seeded_state_loads_and_merges_under_the_batched_applier() {
         let ctx = EditCtx::local(String::new(), String::new());
         let original = EditingDoc::new(1);
-        original.create_empty_stories(&["body".into()]).unwrap();
+        original
+            .apply_raw_story_batches(vec![("body".into(), Vec::new())], &ctx)
+            .unwrap();
         apply_raw_ops_legacy_to_doc(&original, "body", seed_shaped_ops(), &ctx).unwrap();
 
         let restored = EditingDoc::new(2);

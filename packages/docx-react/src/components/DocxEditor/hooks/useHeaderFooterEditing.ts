@@ -23,20 +23,34 @@ import type { PartEditTarget } from '../partEdit';
  * user can start typing — the helper writes the new HeaderFooter into
  * `package.headers` / `package.footers` and registers the relationship
  * so the serializer picks it up (#274).
+ *
+ * A header or footer save is the reader's own action: it schedules a local
+ * layout pass first, so the caret stays in view, while a peer's header edit
+ * keeps the reader's view (Epo 2026-10-23).
  */
 export function useHeaderFooterEditing({
   document,
   pushDocument,
+  scheduleLocalLayout,
   partEditTarget,
   setPartEditTarget,
 }: {
   document: Document | null;
   pushDocument: (doc: Document) => void;
+  scheduleLocalLayout: () => void;
   // State + setter live in the parent so selection and canvas overlays can
   // route to the open part's story.
   partEditTarget: PartEditTarget | null;
   setPartEditTarget: React.Dispatch<React.SetStateAction<PartEditTarget | null>>;
 }) {
+  const save = useCallback(
+    (doc: Document) => {
+      scheduleLocalLayout();
+      pushDocument(doc);
+    },
+    [pushDocument, scheduleLocalLayout]
+  );
+
   const finalSectionProperties = useMemo(
     () => resolvedFinalSectionProperties(document?.package.document),
     [document]
@@ -130,7 +144,7 @@ export function useHeaderFooterEditing({
           })),
         },
       };
-      pushDocument(newDoc);
+      save(newDoc);
       setPartEditTarget(opened);
     },
     [
@@ -140,7 +154,7 @@ export function useHeaderFooterEditing({
       firstPageFooterContent,
       finalSectionProperties,
       document,
-      pushDocument,
+      save,
       setPartEditTarget,
     ]
   );
@@ -188,11 +202,11 @@ export function useHeaderFooterEditing({
           }),
         },
       };
-      pushDocument(newDoc);
+      save(newDoc);
     }
 
     setPartEditTarget(null);
-  }, [partEditTarget, document, finalSectionProperties, pushDocument, setPartEditTarget]);
+  }, [partEditTarget, document, finalSectionProperties, save, setPartEditTarget]);
 
   return {
     headerContent,

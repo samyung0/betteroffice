@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::block::transparent_children;
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
-    ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
-    unmodeled_paragraph_children,
+    ParagraphFormatting, ParagraphFrame, ParagraphFrameFields, SpacingExplicit,
+    parse_paragraph_properties, unmodeled_paragraph_children,
 };
 use crate::image::{is_text_box_drawing, parse_drawing};
 use crate::inline::{
@@ -362,7 +362,10 @@ pub fn parse_document_paragraph_properties(
             paragraph_ordinal: None,
             para_id_attribute: None,
         };
-        value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
+        value.run_properties = parse_run(&shell, theme, styles, None)
+            .run
+            .formatting
+            .map(Box::new);
     }
     let creates_empty_bag = properties.child("w", "shd").is_some()
         || properties.child("w", "tabs").is_some()
@@ -372,7 +375,7 @@ pub fn parse_document_paragraph_properties(
 }
 
 fn parse_frame(element: &XmlElement) -> Option<ParagraphFrame> {
-    let value = ParagraphFrame {
+    let value = ParagraphFrame::from(ParagraphFrameFields {
         width: element.parse_numeric_attribute(Some("w"), "w", 1.0),
         height: element.parse_numeric_attribute(Some("w"), "h", 1.0),
         h_anchor: enum_attribute(element, "hAnchor", &["text", "margin", "page"]),
@@ -388,7 +391,7 @@ fn parse_frame(element: &XmlElement) -> Option<ParagraphFrame> {
         v_space: element.parse_numeric_attribute(Some("w"), "vSpace", 1.0),
         h_rule: nonempty_attribute(element, "hRule"),
         anchor_lock: nonempty_attribute(element, "anchorLock"),
-    };
+    });
     (value != ParagraphFrame::default()).then_some(value)
 }
 

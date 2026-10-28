@@ -13,6 +13,17 @@ export interface DocxViewerHandle {
   dispose(): void;
 }
 
+/** A reading layout: the text reflowed into one column `width` CSS px wide,
+ * `padding` from each side, with no page furniture. */
+export interface DocxReadingLayout {
+  width: number;
+  padding: number;
+}
+
+export interface DocxViewerOptions {
+  reading?: DocxReadingLayout;
+}
+
 export interface DocxViewerAnalysis {
   format: 'docx';
   pageCount: number;
@@ -37,22 +48,94 @@ export function initWasm(
 /** Pages per `displayPagesJson` call: the list is never built in one piece. */
 const PAGE_BATCH = 8;
 
+const TWIPS_PER_PX = 15;
+/** A reading layout's page: tall, so few lines meet a page join, but well
+ * inside what a canvas can hold. */
+const READING_PAGE_HEIGHT_PX = 2400;
+/** The body's reading size in pt: 16px at 100%. */
+const READING_TEXT_SIZE = 12;
+
+interface ViewRequest {
+  /** The document's body size in pt. */
+  bodyFontSize: number;
+  renderEnv: Record<string, unknown>;
+  options: { pageGap: number; continuousFlow?: boolean };
+  regions: {
+    sections: { properties?: Record<string, unknown> }[];
+    settings?: { compatibilityFlags?: CompatibilityFlags };
+  };
+}
+
+/** Section properties a reading layout has no use for: orientation, the
+ * authored columns, headers and footers, line numbers, borders, centring. */
+const READING_DROPPED_KEYS = [
+  'orientation',
+  'columns',
+  'headerReferences',
+  'footerReferences',
+  'titlePg',
+  'evenAndOddHeaders',
+  'lineNumbers',
+  'pageBorders',
+  'verticalAlign',
+];
+
+/** Every section as one column of the reading width, its pages abutting and
+ * no break starting one; lowering eases sizes and indents and fits tables and
+ * pictures to it. */
+function readingRequest(request: ViewRequest, { width, padding }: DocxReadingLayout): ViewRequest {
+  const sections = request.regions.sections.map((section) => {
+    const properties: Record<string, unknown> = { ...section.properties };
+    for (const key of READING_DROPPED_KEYS) delete properties[key];
+    return {
+      ...section,
+      properties: {
+        ...properties,
+        pageWidth: width * TWIPS_PER_PX,
+        pageHeight: READING_PAGE_HEIGHT_PX * TWIPS_PER_PX,
+        marginTop: 0,
+        marginBottom: 0,
+        marginLeft: padding * TWIPS_PER_PX,
+        marginRight: padding * TWIPS_PER_PX,
+        headerDistance: 0,
+        footerDistance: 0,
+        gutter: 0,
+        columnCount: 1,
+      },
+    };
+  });
+  return {
+    ...request,
+    options: { ...request.options, pageGap: 0, continuousFlow: true },
+    regions: { ...request.regions, sections },
+    renderEnv: {
+      ...request.renderEnv,
+      reading: {
+        bodySize: request.bodyFontSize,
+        textSize: READING_TEXT_SIZE,
+        contentWidth: width - 2 * padding,
+      },
+    },
+  };
+}
+
 /**
  * Measures with the faces `configureDefaultFonts` provides; without them text
  * gets synthetic metrics and paragraphs do not wrap.
  */
-export async function openDocumentViewer(bytes: Uint8Array): Promise<DocxViewerHandle> {
+export async function openDocumentViewer(
+  bytes: Uint8Array,
+  options: DocxViewerOptions = {}
+): Promise<DocxViewerHandle> {
   await initWasm();
   const module = await loadModule();
   const document = module.openViewDocument(bytes);
   let pageGap: number;
   let list: DisplayList | null;
   try {
-    const requestJson = document.layoutRequestJson();
-    const request = JSON.parse(requestJson) as {
-      options: { pageGap: number };
-      regions: { settings?: { compatibilityFlags?: CompatibilityFlags } };
-    };
+    const parsed = JSON.parse(document.layoutRequestJson()) as ViewRequest;
+    const request = options.reading ? readingRequest(parsed, options.reading) : parsed;
+    const requestJson = JSON.stringify(request);
     pageGap = request.options.pageGap;
     const requirements = JSON.parse(
       document.fontRequirementsJson(requestJson)

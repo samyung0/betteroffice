@@ -1,0 +1,61 @@
+{
+  "commands": 50,
+  "shapeText": { "paragraphs": 50, "characters": 5000 },
+  "slideNotes": { "characters": 2000 },
+  "inspectIds": { "perCall": 4, "answerBytes": 8384512, "pictureSide": 2400 },
+  "formats": {
+    "xlsx": [
+      {
+        "count": "cells written",
+        "limit": 10000,
+        "commands": ["set_cell", "set_range", "format_cells", "delete_rows", "delete_columns"]
+      },
+      {
+        "count": "inserted rows and columns",
+        "limit": 1000,
+        "commands": ["insert_rows", "insert_columns"]
+      },
+      {
+        "count": "sheets added, renamed or deleted",
+        "limit": 5,
+        "commands": ["add_sheet", "rename_sheet", "delete_sheet"]
+      }
+    ],
+    "docx": [
+      { "count": "text replacements", "limit": 20, "commands": ["replace_text"] },
+      { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
+      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
+      { "count": "table cells inserted", "limit": 400, "commands": ["insert_table"] },
+      { "count": "tables deleted", "limit": 5, "commands": ["delete_table"] },
+      { "count": "formatted spans", "limit": 30, "commands": ["format_text"] },
+      {
+        "count": "paragraphs given a list or an alignment",
+        "limit": 200,
+        "commands": ["set_list", "set_alignment"]
+      }
+    ],
+    "pptx": [
+      { "count": "text replacements", "limit": 20, "commands": ["replace_text"] },
+      { "count": "inserted paragraphs", "limit": 20, "commands": ["insert_paragraph"] },
+      { "count": "deleted paragraphs", "limit": 20, "commands": ["delete_paragraph"] },
+      { "count": "formatted spans", "limit": 30, "commands": ["format_text"] },
+      { "count": "paragraphs given an alignment", "limit": 200, "commands": ["set_alignment"] },
+      {
+        "count": "paragraphs of shape and text box text",
+        "limit": 500,
+        "commands": ["set_shape_text", "add_text_box"],
+        "text": "paragraphs"
+      },
+      {
+        "count": "characters of shape and text box text",
+        "limit": 50000,
+        "commands": ["set_shape_text", "add_text_box"],
+        "text": "characters"
+      },
+      { "count": "slides added", "limit": 20, "commands": ["add_slide"] },
+      { "count": "slides deleted", "limit": 20, "commands": ["delete_slide"] },
+      { "count": "slides moved", "limit": 50, "commands": ["move_slide"] },
+      { "count": "text boxes added", "limit": 20, "commands": ["add_text_box"] }
+    ]
+  }
+}

@@ -275,14 +275,26 @@ function paintRun(
 // often not installed on the host (Calibri on macOS); without a fallback the
 // browser's unknown-family default is serif.
 function fontString(cmd: TextCmd): string {
+  if (!cmd.chart || !cmd.fontFamily) return cellFont(cmd);
   const style = cmd.italic ? 'italic ' : '';
   const weight = cmd.bold ? 'bold ' : '';
-  const family = cmd.fontFamily
-    ? cmd.chart
-      ? cmd.fontFamily
-      : `"${cmd.fontFamily.replace(/"/g, '\\"')}", sans-serif`
+  return `${style}${weight}${fontSizePx(cmd)}px ${cmd.fontFamily}`;
+}
+
+/**
+ * The CSS font a cell's text is painted with, `scale` times its size: DOM text
+ * over the grid (the in-cell editor) passes the zoom to match the canvas.
+ */
+export function cellFont(
+  font: Pick<TextCmd, 'fontFamily' | 'fontSize' | 'bold' | 'italic'>,
+  scale = 1
+): string {
+  const style = font.italic ? 'italic ' : '';
+  const weight = font.bold ? 'bold ' : '';
+  const family = font.fontFamily
+    ? `"${font.fontFamily.replace(/"/g, '\\"')}", sans-serif`
     : 'sans-serif';
-  return `${style}${weight}${fontSizePx(cmd)}px ${family}`;
+  return `${style}${weight}${font.fontSize * PX_PER_PT * scale}px ${family}`;
 }
 
 function fontSizePx(cmd: TextCmd): number {

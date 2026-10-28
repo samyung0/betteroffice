@@ -5,7 +5,9 @@
  * painted. The mirror is invisible (opacity 0) and inert to the pointer
  * (pointer-events none) but deliberately NOT aria-hidden — it is the
  * accessible content of the canvas. Rebuilt whenever the page's display list
- * changes — the same trigger that re-rasters the canvas.
+ * changes — the same trigger that re-rasters the canvas. A position shift
+ * (same page object, new revision) rewrites the existing nodes' positions
+ * instead.
  *
  * Pages away from the viewport (`full` false) mount the plain-text form
  * (`buildMirrorTextPage`): the same accessible text without positioned runs,
@@ -26,6 +28,7 @@ import { useEffect, useRef } from 'react';
 import {
   buildMirrorPage,
   buildMirrorTextPage,
+  syncMirrorPositions,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
@@ -63,7 +66,15 @@ export function CanvasPageMirror({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const built = builtForRef.current;
+    let built = builtForRef.current;
+    // A shift moved the page's positions in place: the mirror keeps its nodes.
+    if (built?.page === page && built.t === t && built.revision !== revision) {
+      const mirror = host.firstElementChild;
+      if (mirror instanceof HTMLElement && syncMirrorPositions(mirror)) {
+        built = { ...built, revision };
+        builtForRef.current = built;
+      }
+    }
     if (
       built?.page === page &&
       built.revision === revision &&

@@ -57,6 +57,37 @@ const MAX_COL_WIDTH: f64 = 255.0;
 const MAX_ROW_HEIGHT: f64 = 409.5;
 /// Maximum accepted encoded update or state-vector size: 64 MiB.
 pub const MAX_COLLABORATION_BYTES: usize = 64 * 1024 * 1024;
+/// What one cell edit can add to the collaboration update at most, before its input:
+/// the cell's content record (about 112 to 135 bytes measured for an empty, numeric
+/// or short text value, the most at the sheet's far corner).
+pub const EDITED_CELL_UPDATE_BYTES: usize = 160;
+/// A formula's record also holds its parsed references, about 330 bytes each (a
+/// reference takes at least 3 characters): 512 bytes plus 128 per input byte covers
+/// it (`=A201*2` measured 492 bytes, eight references in 46 characters 2,856).
+const FORMULA_CELL_UPDATE_BYTES: usize = 512;
+const FORMULA_UPDATE_BYTES_PER_INPUT_BYTE: usize = 128;
+
+/// The most a batch of cell inputs can add to the collaboration update.
+fn edit_update_bytes(edits: &[CellInput]) -> usize {
+    edits
+        .iter()
+        .map(|edit| {
+            if edit.input.starts_with('=') {
+                FORMULA_CELL_UPDATE_BYTES.saturating_add(
+                    edit.input
+                        .len()
+                        .saturating_mul(FORMULA_UPDATE_BYTES_PER_INPUT_BYTE),
+                )
+            } else {
+                EDITED_CELL_UPDATE_BYTES.saturating_add(edit.input.len().saturating_mul(2))
+            }
+        })
+        .fold(0, usize::saturating_add)
+}
+/// Whether a stored cell lies in `range` and holds a value or a formula.
+fn holds_content(range: CellRange, (at, cell): &(CellRef, &xlsx_model::Cell)) -> bool {
+    range.contains(*at) && (cell.formula.is_some() || cell.value != CellValue::Empty)
+}
 /// Largest browser-safe collaboration client identifier.
 pub const MAX_COLLABORATION_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 /// Maximum client entries accepted in a collaboration state vector.
@@ -215,6 +246,7 @@ impl SheetInfoCache {
         self.info.frozen_cols = content.frozen_cols;
         self.info.initial_scroll_x = content.initial_scroll_x;
         self.info.initial_scroll_y = content.initial_scroll_y;
+        self.info.used_range = self.bounds;
     }
 }
 
@@ -1204,6 +1236,27 @@ impl Workbook {
         }
     }
 
+    /// Where each sheet's source rows and columns sit after the row and
+    /// column edits made since the package was read, as a save moves the
+    /// drawing anchors the model does not hold; none for a sheet without
+    /// them.
+    pub fn source_axes(&self) -> Result<Vec<Option<xlsx_parse::SheetAxes>>> {
+        self.authority.source_axes().map_err(authority_error)
+    }
+
+    /// The source package and the part path of the sheet `sheet` came from,
+    /// none for a sheet added since.
+    pub fn source_sheet(&self, sheet: SheetId) -> Option<(&xlsx_parse::PreservedPackage, &str)> {
+        let package = self.source_package.as_ref()?;
+        let index = self
+            .preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten()?;
+        Some((package, package.sheet_path(index)?))
+    }
+
     pub fn cell_identity(&self, sheet: SheetId, at: CellRef) -> Result<String> {
         self.authority
             .cell_identity(sheet, at)
@@ -1338,6 +1391,7 @@ impl Workbook {
             frozen_cols: content.frozen_cols,
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
+            used_range: bounds,
         };
         *slot = Some(SheetInfoCache {
             info: info.clone(),
@@ -1653,7 +1707,20 @@ impl Workbook {
         input: &str,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.edit_cell_marked(sheet, cell, input, options, &mut |_| {})
+        self.edit_cell_marked(sheet, cell, input, false, options, &mut |_| {})
+    }
+
+    /// [`Workbook::edit_cell`] for input a user typed into the cell: a formula
+    /// that does not parse, even with its open parentheses closed, is refused
+    /// with [`Error::UnparsedFormula`] instead of stored as text.
+    pub fn edit_typed_cell(
+        &mut self,
+        sheet: SheetId,
+        cell: CellRef,
+        input: &str,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        self.edit_cell_marked(sheet, cell, input, true, options, &mut |_| {})
     }
 
     /// [`Workbook::edit_cell`] with its stages timed by `now`, a millisecond
@@ -1667,7 +1734,7 @@ impl Workbook {
         now: &mut impl FnMut() -> f64,
     ) -> Result<(MutationResult, EditProfile)> {
         profiled(now, |mark| {
-            self.edit_cell_marked(sheet, cell, input, options, mark)
+            self.edit_cell_marked(sheet, cell, input, false, options, mark)
         })
     }
 
@@ -1676,11 +1743,19 @@ impl Workbook {
         sheet: SheetId,
         cell: CellRef,
         input: &str,
+        typed: bool,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
         let state = edit_cell_state(&self.model, sheet, cell, input);
+        if typed
+            && state.formula.is_none()
+            && input.starts_with('=')
+            && !text_formatted(&self.model, state.style)
+        {
+            return Err(Error::UnparsedFormula);
+        }
         validate_cell_state(&state)?;
         if cell_states_semantically_equal(&current_cell_state(&self.model, sheet, cell), &state) {
             return Ok(MutationResult::default());
@@ -1713,6 +1788,53 @@ impl Workbook {
         Ok(self.mutation_result(true, result, &seeds))
     }
 
+    /// Clears the content of the cells in `range` that hold a value or a formula,
+    /// keeping their formats, as one undo step; empty cells cost nothing, so a
+    /// sparse range costs only its stored cells. Refused like any edit when its
+    /// update could exceed [`MAX_COLLABORATION_BYTES`].
+    pub fn clear_contents(
+        &mut self,
+        sheet: SheetId,
+        range: CellRange,
+        options: CalculationOptions,
+    ) -> Result<MutationResult> {
+        // counted first, so a refused clear builds no edit per cell.
+        self.check_clear_contents(sheet, range)?;
+        let edits = self
+            .sheet(sheet)?
+            .iter_cells()
+            .filter(|entry| holds_content(range, entry))
+            .map(|(cell, _)| CellInput {
+                cell,
+                input: String::new(),
+            })
+            .collect::<Vec<_>>();
+        self.edit_cells(sheet, &edits, options)
+    }
+
+    /// Refuses, as [`Self::clear_contents`] would, a clear of `range` whose update
+    /// could exceed [`MAX_COLLABORATION_BYTES`], from the count of its filled cells;
+    /// changes nothing (a cut asks before it copies).
+    pub fn check_clear_contents(&self, sheet: SheetId, range: CellRange) -> Result<()> {
+        let cells = self
+            .sheet(sheet)?
+            .iter_cells()
+            .filter(|entry| holds_content(range, entry))
+            .count();
+        let bytes = cells.saturating_mul(EDITED_CELL_UPDATE_BYTES);
+        if bytes > MAX_COLLABORATION_BYTES {
+            return Err(Error::EditTooLarge {
+                cells: cells as u64,
+                bytes: bytes as u64,
+                max: MAX_COLLABORATION_BYTES as u64,
+            });
+        }
+        Ok(())
+    }
+
+    /// Enters a batch of cell inputs as one undo step. Refused with nothing changed
+    /// when its collaboration update could exceed [`MAX_COLLABORATION_BYTES`] (one
+    /// action's most, about 500,000 filled cells; see [`EDITED_CELL_UPDATE_BYTES`]).
     pub fn edit_cells(
         &mut self,
         sheet: SheetId,
@@ -1721,6 +1843,14 @@ impl Workbook {
     ) -> Result<MutationResult> {
         if edits.is_empty() {
             return Ok(MutationResult::default());
+        }
+        let bytes = edit_update_bytes(edits);
+        if bytes > MAX_COLLABORATION_BYTES {
+            return Err(Error::EditTooLarge {
+                cells: edits.len() as u64,
+                bytes: bytes as u64,
+                max: MAX_COLLABORATION_BYTES as u64,
+            });
         }
         self.ensure_worksheet_sheet(sheet)?;
         let mut touched = Vec::with_capacity(edits.len());
@@ -1843,6 +1973,15 @@ impl Workbook {
         for chunk in per_op.into_iter().rev() {
             inverse.extend(chunk);
         }
+        let formats_only = ops.iter().all(|op| {
+            matches!(
+                op,
+                Op::PatchRangeStyle { .. }
+                    | Op::SetRangeNumberFormat { .. }
+                    | Op::ApplyRangeFormat { .. }
+            )
+        });
+        let exact = self.is_exact();
         let active_name = self.active_sheet_name();
         self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         self.restore_active_sheet(active_name.as_deref());
@@ -1850,6 +1989,15 @@ impl Workbook {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
+        // A format changes no value, so an exact calculation stands, as in Excel.
+        if formats_only && exact {
+            self.exact_epoch = Some(self.model_epoch);
+            mark(EditStage::Recalculated);
+            return Ok(MutationResult {
+                applied: true,
+                ..MutationResult::default()
+            });
+        }
         let result = self.rebuild_and_recalculate(options);
         mark(EditStage::Recalculated);
         Ok(MutationResult {
@@ -4278,15 +4426,7 @@ fn edit_cell_state(
     let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.effective_style(cell));
-    let number_format = workbook
-        .styles
-        .resolved_format(Some(style.unwrap_or(0)))
-        .number_format;
-    let mut state = if !input.is_empty()
-        && matches!(
-            number_format,
-            FormatCode::Builtin(49) | FormatCode::Custom("@")
-        ) {
+    let mut state = if !input.is_empty() && text_formatted(workbook, style) {
         CellState {
             value: CellValue::Text {
                 value: input.strip_prefix('\'').unwrap_or(input).to_string(),
@@ -4298,6 +4438,17 @@ fn edit_cell_state(
     };
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     state
+}
+
+/// Whether a cell in `style` (none means xf 0) takes typed input as text (the Text number format).
+fn text_formatted(workbook: &WorkbookModel, style: Option<u32>) -> bool {
+    matches!(
+        workbook
+            .styles
+            .resolved_format(Some(style.unwrap_or(0)))
+            .number_format,
+        FormatCode::Builtin(49) | FormatCode::Custom("@")
+    )
 }
 
 fn current_cell_state(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> CellState {
@@ -4689,6 +4840,115 @@ fn invalidates_proposals(op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A clear past the update cap is refused before it builds an edit per cell.
+    #[test]
+    fn a_clear_past_the_update_cap_is_refused_before_it_collects_its_cells() {
+        use xlsx_model::Cell;
+        let cells = MAX_COLLABORATION_BYTES / EDITED_CELL_UPDATE_BYTES + 1;
+        let mut sheet = Sheet::new("Data");
+        for index in 0..cells as u32 {
+            sheet.set_cell(
+                CellRef::new(index / 100, index % 100),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    ..Cell::default()
+                },
+            );
+        }
+        let mut workbook = Workbook::from_model(WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        })
+        .unwrap();
+        let range = CellRange::new(CellRef::new(0, 0), CellRef::new(cells as u32 / 100, 99));
+        let mut refused = None;
+        let peak = crate::sheet_json::tests::peak_bytes(|| {
+            refused =
+                Some(workbook.clear_contents(SheetId(0), range, CalculationOptions::default()));
+        });
+        assert!(matches!(
+            refused,
+            Some(Err(Error::EditTooLarge { cells: counted, .. })) if counted == cells as u64
+        ));
+        // an edit per cell would hold at least `cells` CellInputs (32 bytes each).
+        assert!(peak < cells, "a refused clear allocated {peak} bytes");
+        // a cut asks first, from the same count, and nothing changes.
+        assert!(matches!(
+            workbook.check_clear_contents(SheetId(0), range),
+            Err(Error::EditTooLarge { cells: counted, .. }) if counted == cells as u64
+        ));
+        let first_row = CellRange::new(CellRef::new(0, 0), CellRef::new(0, 99));
+        assert!(workbook.check_clear_contents(SheetId(0), first_row).is_ok());
+    }
+
+    /// The edit bound covers what the edit adds to the update, for the values,
+    /// texts and formulas the bound's constants were measured on.
+    #[test]
+    fn the_edit_bound_covers_each_edits_update() {
+        use xlsx_model::Cell;
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        let model = WorkbookModel {
+            sheets: vec![sheet],
+            ..Default::default()
+        };
+        type Shape = (&'static str, fn(u32) -> String);
+        let shapes: [Shape; 7] = [
+            ("number", |row| (f64::from(row) * 1.25).to_string()),
+            ("text", |row| format!("{}{}", "x".repeat(39), row % 10)),
+            ("one reference", |row| format!("=A{}*2", row + 1)),
+            ("short references", |_| "=A1+B1+C1+D1+E1+F1".to_owned()),
+            ("eight references", |row| {
+                (0..8)
+                    .map(|col| format!("{}{}", (b'A' + col) as char, row + 1))
+                    .collect::<Vec<_>>()
+                    .join("+")
+            }),
+            ("lookup", |row| {
+                format!("=VLOOKUP(A{},Data!A1:C50,3,FALSE)", row + 1)
+            }),
+            ("far corner", |row| row.to_string()),
+        ];
+        for (name, input) in shapes {
+            let mut workbook = Workbook::from_model_collaborative(model.clone(), 7201).unwrap();
+            let sink = Arc::new(Mutex::new(0_usize));
+            let total = sink.clone();
+            let _subscription = workbook
+                .observe_update_v1(move |event| *total.lock().unwrap() += event.update.len())
+                .unwrap();
+            let (first_row, col) = if name == "far corner" {
+                (1_040_000, 16_000)
+            } else {
+                (200, 6)
+            };
+            let edits = (0..2_000)
+                .map(|offset| {
+                    let raw = input(first_row + offset);
+                    CellInput {
+                        cell: CellRef::new(first_row + offset, col),
+                        input: if name == "eight references" {
+                            format!("={raw}")
+                        } else {
+                            raw
+                        },
+                    }
+                })
+                .collect::<Vec<_>>();
+            workbook
+                .edit_cells(SheetId(0), &edits, CalculationOptions::default())
+                .unwrap();
+            let sent = *sink.lock().unwrap();
+            let bound = edit_update_bytes(&edits);
+            assert!(sent <= bound, "{name}: {sent} bytes sent, bound {bound}");
+        }
+    }
 
     #[test]
     fn contains_lowercased_matches_std_lowercase_semantics() {

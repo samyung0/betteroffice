@@ -13,7 +13,8 @@ use crate::PptxError;
 use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
 use crate::drawing::parse_run_properties;
 use crate::model::{
-    Bullet, BulletFont, LineSpacing, PptxPackage, RunProperties, ShapeElements, SlideReference,
+    Bullet, BulletFont, LineSpacing, Placeholder, PptxPackage, RunProperties, ShapeElements,
+    SlideReference,
 };
 use crate::xml::{
     DRAWINGML_NS, PRESENTATIONML_NS, ParseBudget, ParseLimits, XmlElement, XmlNode,
@@ -169,6 +170,9 @@ pub struct ShapeAdd {
     pub text_anchor: Option<String>,
     /// A picture instead of an autoshape; mints its own media part and relationship.
     pub picture: Option<PictureAdd>,
+    /// `p:nvPr/p:ph`: the layout placeholder the shape is (a slide's added
+    /// layout placeholder); never with `picture`.
+    pub placeholder: Option<Placeholder>,
 }
 
 pub struct PictureAdd {
@@ -3845,7 +3849,7 @@ fn shape_element(
                 .with_attribute("name", add.name.clone()),
         )
         .with_child(XmlElement::new(prefixes.presentation("cNvSpPr")))
-        .with_child(XmlElement::new(prefixes.presentation("nvPr")));
+        .with_child(non_visual_properties(add.placeholder.as_ref(), prefixes));
     let transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
             XmlElement::new(prefixes.drawing("off"))
@@ -3897,6 +3901,26 @@ fn shape_element(
         shape = shape.with_child(body);
     }
     Ok(shape)
+}
+
+/// `p:nvPr`, holding `p:ph` with the attributes `placeholder` names.
+fn non_visual_properties(placeholder: Option<&Placeholder>, prefixes: &Prefixes) -> XmlElement {
+    let properties = XmlElement::new(prefixes.presentation("nvPr"));
+    let Some(placeholder) = placeholder else {
+        return properties;
+    };
+    let mut ph = XmlElement::new(prefixes.presentation("ph"));
+    for (name, value) in [
+        ("type", placeholder.placeholder_type.clone()),
+        ("orient", placeholder.orientation.clone()),
+        ("sz", placeholder.size.clone()),
+        ("idx", placeholder.index.map(|index| index.to_string())),
+    ] {
+        if let Some(value) = value {
+            ph.set_attribute(name, value);
+        }
+    }
+    properties.with_child(ph)
 }
 
 /// A new shape, or a picture that also needs a media part and relationship.

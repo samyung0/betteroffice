@@ -378,6 +378,14 @@ export interface YrsInsertReceipt extends YrsRevisionReceipt {
   range: YrsStoryRange;
 }
 
+/** Text inserted alone into one story by one transaction ({@link YrsSession.lastPlainInsert}). */
+export interface YrsPlainInsert {
+  epoch: number;
+  story: string;
+  at: number;
+  len: number;
+}
+
 /** Receipt of a Backspace, Delete or paragraph merge: `caret` is where it leaves the caret. */
 export interface YrsCaretReceipt extends YrsRevisionReceipt {
   caret: YrsLoc;
@@ -556,6 +564,8 @@ export type YrsResidentFontRegistration =
 
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
+  /** The id the worker's replica writes under; absent, it draws a random one. */
+  workerClientId?: number;
   /** Full document state, or a state-vector diff when the caller supplied
    * the worker's known vector — both apply through the same merge path. */
   state: Uint8Array;
@@ -1074,7 +1084,10 @@ export interface YrsSession extends CollaborationReplica {
   tableOfContentsCount(): number;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
-  /** Applies seed raw operations with deterministic item ordering. */
+  /**
+   * Applies seed raw operations with deterministic item ordering; a story
+   * that does not exist yet starts empty.
+   */
   applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Unions seeded opaque SEQ sequence names into document state (byte seeder parity). */
   seedOpaqueSequences(names: readonly string[]): void;
@@ -1118,6 +1131,15 @@ export interface YrsSession extends CollaborationReplica {
   listComments(): YrsCommentInfo[];
   /** Story ids in the document, sorted. */
   storyIds(): string[];
+  /** Whether the document holds `story`, without listing every story. */
+  hasStory(story: string): boolean;
+  /** Moves on with every committed document change. */
+  docEpoch(): number;
+  /**
+   * The last committed transaction when it inserted text alone into one story
+   * (`at` and `len` in story units), with the {@link docEpoch} it made.
+   */
+  lastPlainInsert(): YrsPlainInsert | null;
   /** Story length in UTF-16 units (every embed, pilcrows included, counts 1). */
   storyLength(story: string): number;
   /** Returns the story's canonical-stream checksum. */
@@ -1153,6 +1175,11 @@ export interface CreateYrsSessionOptions {
    * 32-bit id, yjs-style.
    */
   clientId?: number;
+  /**
+   * The client id the resident layout worker writes under (non-negative safe
+   * integer). Omit to give each worker a random one.
+   */
+  workerClientId?: number;
 }
 
 function randomClientId(): number {
@@ -1226,7 +1253,11 @@ function decodeDocxHost(json: string, source: Uint8Array): YrsDocxHost {
   };
 }
 
-function wrapSession(session: EditSession, clientId: number): YrsSession {
+function wrapSession(
+  session: EditSession,
+  clientId: number,
+  workerClientId?: number
+): YrsSession {
   const listeners = new Map<
     number,
     (update: Uint8Array, origin: CollaborationUpdateOrigin) => void
@@ -1471,6 +1502,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       }
       return {
         clientId,
+        workerClientId,
         state: state ?? session.encode_state(),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
         fonts: fontsCurrent
@@ -2127,6 +2159,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     resolveComment: (commentId) =>
       JSON.parse(session.resolve_comment(commentId)) as YrsResolvedCommentAnchor[],
     storyIds: () => session.story_ids(),
+    hasStory: (story) => session.has_story(story),
+    docEpoch: () => session.doc_epoch(),
+    lastPlainInsert: () => {
+      const json = session.last_plain_insert();
+      return json === undefined ? null : (JSON.parse(json) as YrsPlainInsert);
+    },
     storyLength: (story) => session.story_len(story),
     storyChecksum: (story) => BigInt(session.story_checksum(story)),
     yrsBlocksForStory: (story, env = {}) => {
@@ -2184,5 +2222,5 @@ export async function createYrsSession(options?: CreateYrsSessionOptions): Promi
   const clientId = options?.clientId ?? randomClientId();
   const wasm = await import('./wasm/index');
   await wasm.preloadEditWasm();
-  return wrapSession(wasm.createEditSession(clientId), clientId);
+  return wrapSession(wasm.createEditSession(clientId), clientId, options?.workerClientId);
 }

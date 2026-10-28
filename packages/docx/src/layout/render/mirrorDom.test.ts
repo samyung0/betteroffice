@@ -11,7 +11,12 @@ import { createYrsSession } from '../../yrs';
 import type { ResidentFontRequirement } from '../measure';
 import type { DisplayList, DisplayPage, DisplayPrimitive } from './displayList';
 import { applyFrameDelta, decodeFrameDelta } from './frameDelta';
-import { buildMirrorPage, buildMirrorTextPage, MIRROR_TEXT_PAGE_CLASS } from './mirrorDom';
+import {
+  buildMirrorPage,
+  buildMirrorTextPage,
+  MIRROR_TEXT_PAGE_CLASS,
+  syncMirrorPositions,
+} from './mirrorDom';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -328,5 +333,107 @@ describe('buildMirrorTextPage on laid-out documents', () => {
     const full = list.pages.flatMap((page) => [...buildMirrorPage(page).querySelectorAll('a[data-href]')]);
     expect(text).toHaveLength(links.length);
     expect(full.length).toBeGreaterThan(text.length);
+  });
+
+  // every field the owned frame delta moves (applyFrameDeltaOwned)
+  const shiftPrimitive = (p: DisplayPrimitive, delta: number) => {
+    for (const field of ['docStart', 'docEnd', 'fragmentDocStart', 'fragmentDocEnd'] as const) {
+      const value = p[field];
+      if (value !== undefined) p[field] = value + delta;
+    }
+    if (p.inlineSdtWidget) p.inlineSdtWidget.pos += delta;
+  };
+  const stamps = (root: Element): string[] =>
+    [...root.querySelectorAll<HTMLElement>('[data-doc-start], [data-doc-end], [data-sdt-pos]')].map(
+      (el) => `${el.className}|${el.dataset.docStart}|${el.dataset.docEnd}|${el.dataset.sdtPos}`
+    );
+
+  test('moves table cells, structural anchors, joined runs and controls in place', async () => {
+    const seen = { cells: 0, anchors: 0, joined: 0, controls: 0 };
+    for (const fixture of ['wordprocessingml-comprehensive.docx', 'exchange-plan.docx']) {
+      for (const page of (await laidOut(fixture)).pages) {
+        // a check box on the page's first body run, so the mirror stamps data-sdt-pos
+        const first = page.primitives.find((p) => p.kind === 'glyphRun' && p.docStart !== undefined);
+        if (first) first.inlineSdtWidget = { kind: 'checkbox', groupId: 'sdt:1:1', pos: first.docStart! };
+        seen.joined += page.primitives.filter((p) => p.kind === 'glyphRun' && p.clusterRuns).length;
+        for (const build of [buildMirrorPage, buildMirrorTextPage]) {
+          const mirror = build(page);
+          if (build === buildMirrorPage) {
+            seen.cells += mirror.querySelectorAll('.layout-table-cell[data-doc-start]').length;
+            seen.anchors += mirror.querySelectorAll('.layout-mirror-structural-anchor').length;
+            seen.controls += mirror.querySelectorAll('[data-sdt-pos]').length;
+          }
+          const nodes = [...mirror.querySelectorAll('*')];
+          for (const p of page.primitives) shiftPrimitive(p, 5);
+          expect(syncMirrorPositions(mirror)).toBe(true);
+          expect(stamps(mirror)).toEqual(stamps(build(page)));
+          expect([...mirror.querySelectorAll('*')].every((node, i) => node === nodes[i])).toBe(true);
+          for (const p of page.primitives) shiftPrimitive(p, -5);
+        }
+      }
+    }
+    for (const count of Object.values(seen)) expect(count).toBeGreaterThan(0);
+  });
+});
+
+describe('syncMirrorPositions', () => {
+  const positions = (root: Element): string[] =>
+    [...root.querySelectorAll<HTMLElement>('[data-doc-start], [data-doc-end]')].map(
+      (el) => `${el.dataset.docStart}-${el.dataset.docEnd}`
+    );
+  const shiftedPage = () =>
+    ({
+      ...structuredClone(paragraphPage),
+      header: {
+        kind: 'header',
+        rId: 'rId1',
+        y: 0,
+        height: 40,
+        primitives: [run('Head', 0, { blockId: 9 })],
+      },
+    }) as unknown as DisplayPage;
+  const shiftBody = (page: DisplayPage, delta: number, fields = ['docStart', 'docEnd']) => {
+    for (const primitive of page.primitives) {
+      const record = primitive as unknown as Record<string, number>;
+      for (const field of fields) if (record[field] !== undefined) record[field] += delta;
+    }
+  };
+
+  for (const [name, build] of [
+    ['positioned', buildMirrorPage],
+    ['plain-text', buildMirrorTextPage],
+  ] as const) {
+    test(`moves a ${name} mirror's body positions in place and leaves the header's`, () => {
+      const page = shiftedPage();
+      const mirror = build(page);
+      const nodes = [...mirror.querySelectorAll('*')];
+      shiftBody(page, 3);
+      expect(syncMirrorPositions(mirror)).toBe(true);
+      expect(positions(mirror)).toEqual(positions(build(page)));
+      expect([...mirror.querySelectorAll('*')].every((node, index) => node === nodes[index])).toBe(
+        true
+      );
+    });
+  }
+
+  test('refuses a shift that moves one primitive by two amounts', () => {
+    const page = shiftedPage();
+    const mirror = buildMirrorPage(page);
+    shiftBody(page, 3, ['docStart']);
+    expect(syncMirrorPositions(mirror)).toBe(false);
+  });
+
+  test('writes nothing when a later element gives up', () => {
+    const page = shiftedPage();
+    const mirror = buildMirrorPage(page);
+    const before = positions(mirror);
+    // each run moves as one, but the last by more: the runs' own elements
+    // could move, the paragraph around them (bound after them) cannot
+    shiftBody(page, 3);
+    const last = page.primitives.at(-1) as unknown as { docStart: number; docEnd: number };
+    last.docStart += 1;
+    last.docEnd += 1;
+    expect(syncMirrorPositions(mirror)).toBe(false);
+    expect(positions(mirror)).toEqual(before);
   });
 });

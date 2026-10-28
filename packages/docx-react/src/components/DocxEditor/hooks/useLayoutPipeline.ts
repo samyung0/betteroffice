@@ -38,6 +38,7 @@ import {
   type DisplayListViewportAnchor,
 } from '../internals/scrollRestore';
 import {
+  layoutPassOrigin,
   mergeLayoutUpdateOrigin,
   PendingScrollRestoreController,
   rescaleScrollTop,
@@ -238,7 +239,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const runLayoutPipeline = useCallback(
     () => {
-      const layoutUpdateOrigin = pendingLayoutOriginRef.current ?? 'local';
+      const layoutUpdateOrigin = layoutPassOrigin(pendingLayoutOriginRef.current);
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
       const pipelineStart = performance.now();

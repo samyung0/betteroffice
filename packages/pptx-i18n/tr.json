@@ -172,7 +172,8 @@
     "panelLabel": "Konuşmacı notları",
     "placeholder": "Konuşmacı notu ekle…",
     "toggle": "Notlar",
-    "showSpeakerNotes": "Konuşmacı notlarını göster"
+    "showSpeakerNotes": "Konuşmacı notlarını göster",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

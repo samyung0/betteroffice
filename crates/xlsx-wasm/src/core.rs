@@ -95,6 +95,7 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+    used_range: Option<CellRange>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +104,9 @@ struct EditArgs {
     row: u32,
     col: u32,
     input: String,
+    /// typed by the user: a formula that does not parse is refused.
+    #[serde(default)]
+    typed: bool,
 }
 
 #[derive(Deserialize)]
@@ -161,6 +165,13 @@ struct CellPosition {
 
 #[derive(Deserialize)]
 struct RangeArgs {
+    sheet: u32,
+    range: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClearArgs {
     sheet: u32,
     range: String,
 }
@@ -592,15 +603,15 @@ impl Session {
     ) -> Result<String, String> {
         let args: EditArgs =
             serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
-        let result = self
-            .workbook
-            .edit_cell(
-                SheetId(args.sheet),
-                CellRef::new(args.row, args.col),
-                &args.input,
-                calculation_options(now_serial),
-            )
-            .map_err(|error| error.to_string())?;
+        let (sheet, cell) = (SheetId(args.sheet), CellRef::new(args.row, args.col));
+        let options = calculation_options(now_serial);
+        let result = if args.typed {
+            self.workbook
+                .edit_typed_cell(sheet, cell, &args.input, options)
+        } else {
+            self.workbook.edit_cell(sheet, cell, &args.input, options)
+        }
+        .map_err(|error| error.to_string())?;
         self.edit_result(result)
     }
 
@@ -646,6 +657,32 @@ impl Session {
             .edit_cells(SheetId(args.sheet), &edits, calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
+    }
+
+    pub fn clear_contents_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: ClearArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad clear args: {error}"))?;
+        let result = self
+            .workbook
+            .clear_contents(
+                SheetId(args.sheet),
+                parse_range(&args.range)?,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
+    }
+
+    pub fn check_clear_contents_json(&self, args: &str) -> Result<(), String> {
+        let args: ClearArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad clear args: {error}"))?;
+        self.workbook
+            .check_clear_contents(SheetId(args.sheet), parse_range(&args.range)?)
+            .map_err(|error| error.to_string())
     }
 
     pub fn apply_ops_json(
@@ -957,6 +994,7 @@ impl Session {
                 frozen_cols: info.frozen_cols,
                 initial_scroll_x: info.initial_scroll_x,
                 initial_scroll_y: info.initial_scroll_y,
+                used_range: info.used_range,
             })
             .map_err(|error| error.to_string())
     }

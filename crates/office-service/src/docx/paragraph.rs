@@ -13,6 +13,7 @@ use super::item::{
     formatting_attrs, is, is_kind, is_unit_break, o, run_content_for_text, st, stable_stringify,
     tracked_content_for_item, tracked_info, ty,
 };
+use super::styles::same_json;
 
 fn marks_key_to_yrs_attrs(marks_key: &V) -> Option<V> {
     let Some(key) = marks_key.as_str().filter(|key| !key.is_empty()) else {
@@ -892,12 +893,254 @@ pub(crate) fn items_with_markers(properties: &V, items: Vec<V>) -> Vec<V> {
     insert_bookmark_items(items, markers)
 }
 
+/// Every run among `nodes`, those inside links, tracked changes, fields and
+/// content controls included.
+pub(crate) fn nested_runs(nodes: &[V], runs: &mut Vec<V>) {
+    for node in nodes {
+        if is(node, "run") {
+            runs.push(node.clone());
+            continue;
+        }
+        for key in ["children", "content"] {
+            if node.get(key).arr().is_some() {
+                nested_runs(&node.get(key).items(), runs);
+            }
+        }
+    }
+}
+
+/// A source run's formatting as its file wrote it: a font slot with a theme
+/// font keeps no name, which parsing resolves from the theme (as
+/// `attrs_to_text_formatting` writes it).
+fn as_written(formatting: &V) -> V {
+    let copy = formatting.deep_copy();
+    if let Some(family) = o(&copy.get("fontFamily")) {
+        for slot in ["ascii", "hAnsi", "eastAsia", "cs"] {
+            if family.get(&format!("{slot}Theme")).truthy() {
+                family.delete(slot);
+            }
+        }
+    }
+    copy
+}
+
+/// A run of a source paragraph: the text attributes the seed resolves for it
+/// under the paragraph's current style (and those as `key`, compared with a
+/// live item's), those as formatting, its own rPr (`source`), whether that
+/// rPr is `faithful` to them (see `faithful_to`) and, when it holds only
+/// text, that text.
+pub(crate) struct SourceRun {
+    pub attrs: V,
+    pub key: std::rc::Rc<str>,
+    pub formatting: V,
+    pub source: V,
+    pub faithful: bool,
+    pub text: Option<String>,
+}
+
+/// Whether a source run's rPr writes only what the seed resolved for it
+/// (`seeded`): every property but its run style, and every font name but one
+/// a theme slot resolved, with the seeded value. An rPr writing something the
+/// seed dropped or overrode (a pattern `w:shd`, `w:color auto` under a
+/// coloured style, a lone `w:cs`) is never copied onto other text. Keys
+/// holding null count as absent (the seed writes `themeColor: null`), and an
+/// explicit off of a toggle the seed models matches no seeded value (the
+/// seeded formatting holds only what is on).
+pub(crate) fn faithful_to(source: &V, seeded: &V) -> bool {
+    let Some(source) = o(source) else {
+        return true;
+    };
+    source.entries().iter().all(|(key, value)| match &**key {
+        "styleId" => true,
+        "fontFamily" => {
+            let fonts = seeded.get("fontFamily");
+            o(value).map_or_else(
+                || same_set(&fonts, value),
+                |family| {
+                    family.entries().iter().all(|(slot, name)| {
+                        slot.ends_with("Theme")
+                            || family.get(&format!("{slot}Theme")).truthy()
+                            || same_set(&fonts.get(slot), name)
+                    })
+                },
+            )
+        }
+        _ => {
+            let resolved = seeded.get(key);
+            same_set(&resolved, value) || (resolved.nullish() && modelled_off(key, value))
+        }
+    })
+}
+
+/// An explicit off (`w:b w:val="0"`, `w:u w:val="none"`, ...) of a toggle the
+/// seed models, where no seeded value means off. Not `snapToGrid` or `cs`,
+/// which the seed does not model.
+fn modelled_off(key: &str, value: &V) -> bool {
+    match key {
+        "bold" | "boldCs" | "italic" | "italicCs" | "strike" | "doubleStrike" | "allCaps"
+        | "smallCaps" | "hidden" | "emboss" | "imprint" | "outline" | "shadow" => {
+            value.as_bool() == Some(false)
+        }
+        "underline" => value.get("style").as_str().as_deref() == Some("none"),
+        "highlight" => value.as_str().as_deref() == Some("none"),
+        "vertAlign" => value.as_str().as_deref() == Some("baseline"),
+        _ => false,
+    }
+}
+
+/// `same_json` with object keys holding null or undefined counted as absent.
+fn same_set(a: &V, b: &V) -> bool {
+    match (o(a), o(b)) {
+        (Some(left), Some(right)) => left
+            .keys()
+            .iter()
+            .chain(right.keys().iter())
+            .all(|key| same_set(&left.get(key), &right.get(key))),
+        _ => (a.nullish() && b.nullish()) || same_json(a, b),
+    }
+}
+
+/// A paragraph whose text and runs are as its source had them, each run with
+/// the attributes the seed resolved for it, saves its source runs, each with
+/// its own rPr: runs the seed resolved alike (an explicit `w:color auto` under
+/// a red heading, character shading, `w:cs`) are neither merged nor given each
+/// other's properties. Adjacent runs with the same rPr (Word's rsid splits)
+/// save as one. Returns whether it did.
+fn restore_source_runs(
+    content: Vec<V>,
+    items: &[V],
+    base: Option<&V>,
+    source_runs: &[SourceRun],
+) -> (Vec<V>, bool) {
+    let base_content = base
+        .map(|base| base.get("content").items())
+        .unwrap_or_default();
+    if base_content.is_empty()
+        || base_content.len() != source_runs.len()
+        || !base_content.iter().all(|child| is(child, "run"))
+        || source_runs
+            .iter()
+            .any(|run| run.text.as_deref().is_none_or(str::is_empty))
+        || !content.iter().all(|child| {
+            is(child, "run")
+                && child
+                    .get("content")
+                    .items()
+                    .iter()
+                    .all(|entry| is(entry, "text"))
+        })
+        || items
+            .iter()
+            .any(|item| !is_kind(item, "text") || item.get("attributes").get("hyperlink").truthy())
+    {
+        return (content, false);
+    }
+    let full: String = items
+        .iter()
+        .map(|item| joined_text(&item.get("text")))
+        .collect();
+    let joined: String = source_runs
+        .iter()
+        .filter_map(|run| run.text.as_deref())
+        .collect();
+    if full != joined {
+        return (content, false);
+    }
+    let keys: Vec<String> = items
+        .iter()
+        .map(|item| stable_stringify(&formatting_attrs(&item.get("attributes"))))
+        .collect();
+    let (mut item_index, mut item_offset) = (0, 0);
+    for run in source_runs {
+        let mut remaining = text::len(run.text.as_deref().unwrap_or_default());
+        while remaining > 0 {
+            let Some(item) = items.get(item_index) else {
+                return (content, false);
+            };
+            if keys[item_index] != *run.key {
+                return (content, false);
+            }
+            let length = text::len(&item.get("text").to_js_string());
+            let consumed = remaining.min(length - item_offset);
+            remaining -= consumed;
+            item_offset += consumed;
+            if item_offset == length {
+                item_index += 1;
+                item_offset = 0;
+            }
+        }
+    }
+    let mut merged: Vec<(&SourceRun, String)> = Vec::new();
+    for run in source_runs {
+        let text = run.text.as_deref().unwrap_or_default();
+        match merged.last_mut() {
+            Some((last, joined)) if same_source(&last.source, &run.source) => joined.push_str(text),
+            _ => merged.push((run, text.to_owned())),
+        }
+    }
+    let runs = merged
+        .into_iter()
+        .map(|(run, text)| {
+            let resolved = attrs_to_text_formatting(&run.attrs);
+            let saved =
+                obj! { "type": "run", "content": V::array(run_content_for_text(&text, &resolved)) };
+            if let Some(object) = saved.obj()
+                && o(&run.source).is_some_and(|source| !source.is_empty())
+            {
+                object.set("formatting", as_written(&run.source));
+            }
+            saved
+        })
+        .collect();
+    (runs, true)
+}
+
+/// Whether two source runs carry the same rPr (none and an empty one alike).
+fn same_source(a: &V, b: &V) -> bool {
+    let empty = |value: &V| o(value).is_none_or(|object| object.is_empty());
+    (empty(a) && empty(b)) || same_json(a, b)
+}
+
+/// A run whose formatting is what the seed resolved for its source
+/// paragraph's runs saves their own rPr when they all have the same one and
+/// it writes nothing the seed did not resolve (`faithful_to`), so what it
+/// inherited from styles keeps following them in Word (Epo 2026-10-21); a
+/// run whose formatting changed, or that matches runs with different or
+/// unfaithful rPr, saves it resolved.
+fn with_source_run_formatting(content: Vec<V>, source_runs: &[SourceRun]) -> Vec<V> {
+    if source_runs.is_empty() {
+        return content;
+    }
+    let mut runs = Vec::new();
+    nested_runs(&content, &mut runs);
+    for run in runs {
+        let Some(object) = run.obj() else { continue };
+        let live = run.get("formatting").or_else(|| V::Obj(Obj::new()));
+        let mut matching = source_runs
+            .iter()
+            .filter(|source| same_json(&source.formatting, &live));
+        let Some(first) = matching.next() else {
+            continue;
+        };
+        if !first.faithful || !matching.all(|other| same_source(&other.source, &first.source)) {
+            continue;
+        }
+        if o(&first.source).is_some_and(|source| !source.is_empty()) {
+            object.set("formatting", as_written(&first.source));
+        } else {
+            object.delete("formatting");
+        }
+    }
+    content
+}
+
 pub(crate) fn paragraph_from_story(
     para_id: &str,
     properties: &V,
     items: Vec<V>,
     comment_boundaries: &[V],
     base_paragraph: Option<&V>,
+    source_runs: &[SourceRun],
     seeded: &mut dyn FnMut(&V) -> Result<V>,
 ) -> Result<V> {
     let attrs = paragraph_attrs(properties);
@@ -911,6 +1154,12 @@ pub(crate) fn paragraph_from_story(
             .map(|runs| runs.items()),
     );
     content = restore_raw_inlines(content, base_paragraph);
+    let (restored, whole) = restore_source_runs(content, &items, base_paragraph, source_runs);
+    content = if whole {
+        restored
+    } else {
+        with_source_run_formatting(restored, source_runs)
+    };
     content = insert_boundaries(
         content,
         comment_boundaries,

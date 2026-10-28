@@ -26,6 +26,8 @@ export const WORKBOOK_METHODS = [
   'setActiveSheet',
   'editCell',
   'editCells',
+  'clearContents',
+  'checkClearContents',
   'applyOps',
   'undo',
   'redo',
@@ -58,6 +60,7 @@ export const MUTATING_METHODS: ReadonlySet<WorkbookMethod> = new Set([
   'setActiveSheet',
   'editCell',
   'editCells',
+  'clearContents',
   'applyOps',
   'undo',
   'redo',
@@ -96,9 +99,11 @@ export interface WorkbookFrame {
    * `row:col`; a drawn cell left out is empty.
    */
   cells: Record<string, CellEdit>;
-  /** The selection's focus cell, drawn or not. */
-  focus: CellEdit | null;
+  /** The selection's active cell, drawn or not. */
+  active: CellEdit | null;
   formatting: SelectionFormatting;
+  /** The active cell's own formatting: the cell editor draws with its font. */
+  activeFormatting: SelectionFormatting;
   /** Merged ranges inside the selection and inside the drawn window, at most 1,024 each. */
   selectionMerged: MergedRange[];
   visibleMerged: MergedRange[];
@@ -126,6 +131,8 @@ export interface WorkbookCallRequest {
    * otherwise it fails with {@link SHEET_GONE}.
    */
   sheetId?: string;
+  /** With `sheetId`: the call runs on that sheet, shown or not, until it is removed. */
+  ownSheet?: boolean;
 }
 
 export interface WorkbookToggleRequest {

@@ -9,7 +9,7 @@ import {
 } from './index';
 import type { Selection, SelectionLimits } from './index';
 
-const limits: SelectionLimits = { rows: 100, cols: 26, rowsPerPage: 20 };
+const limits: SelectionLimits = { rows: 100, cols: 26, usedRows: 100, usedCols: 26, rowsPerPage: 20 };
 
 describe('selectionAt', () => {
   it('collapses anchor and focus onto one cell', () => {
@@ -78,6 +78,15 @@ describe('moveFocus', () => {
   it('collapses onto the new cell when not extending', () => {
     const out = moveFocus(sel, 'down', { limits });
     expect(out).toEqual({ anchor: { row: 5, col: 4 }, focus: { row: 5, col: 4 } });
+  });
+
+  it('collapses next to the anchor, the active cell, when a range is selected', () => {
+    const range: Selection = { anchor: { row: 4, col: 4 }, focus: { row: 9, col: 6 } };
+    expect(moveFocus(range, 'down', { limits })).toEqual(selectionAt({ row: 5, col: 4 }));
+    expect(moveFocus(range, 'down', { extend: true, limits })).toEqual({
+      anchor: { row: 4, col: 4 },
+      focus: { row: 10, col: 6 },
+    });
   });
 
   it('holds the anchor when extending', () => {

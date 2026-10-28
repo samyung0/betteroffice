@@ -2,6 +2,7 @@
 //! drives the docx-edit WASM session, with the save projection
 //! (yrsToDocument.ts) ported in `project`.
 
+mod agent;
 mod comments;
 mod format;
 mod item;
@@ -12,6 +13,7 @@ pub(crate) mod read;
 mod sdt;
 mod styles;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use docx_edit::{EditCtx, EngineSession, OpError, StoryRange, UndoSession};
@@ -39,6 +41,12 @@ pub(crate) struct DocxSession {
     /// The materialized source package (`materializeDocx`), read on first use.
     document: Option<V>,
     projected: Option<Projected>,
+    /// For each paragraph an insert went after, the paraId of the last
+    /// paragraph this session put there, so the next lands after it.
+    after: HashMap<String, String>,
+    /// The call's paragraphs by story, shared by touched, apply and locate
+    /// (review r2 L9).
+    index: RefCell<agent::ParaIndex>,
 }
 
 struct Projected {
@@ -73,16 +81,22 @@ fn open_engine(
     Ok((engine, Some(envelope)))
 }
 
-/// `seedOffice` for DOCX.
+/// `seedOffice` for DOCX: seeded straight into one document under the seed
+/// client, the bytes `seed_parsed_docx` gives an engine session.
 pub(crate) fn seed(base: &[u8]) -> Result<Vec<u8>> {
-    let (engine, _) = open_engine(base, true)?;
-    Ok(engine.doc().encode_state_as_update_v1())
+    let envelope = docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?;
+    let doc = docx_edit::EditingDoc::new(docx_edit::SEED_CLIENT_ID);
+    docx_edit::seed_parsed_docx_in_place(&doc, envelope).map_err(Error::Engine)?;
+    Ok(doc.encode_state_as_update_v1())
 }
 
 /// The materialized source as decodeS9Envelope gives the TS its `Document`.
-fn decode_document(envelope: &docx_parse::S9WireEnvelope) -> Result<V> {
-    let json = serde_json::to_string(envelope).map_err(Error::engine)?;
+/// Each form is freed once the next exists.
+fn decode_document(envelope: docx_parse::S9WireEnvelope) -> Result<V> {
+    let json = serde_json::to_string(&envelope).map_err(Error::engine)?;
+    drop(envelope);
     let wire = V::parse(&json).map_err(Error::Engine)?;
+    drop(json);
     let document = wire.get("document");
     let package = document.get("package");
     let body = package.get("document");
@@ -158,7 +172,7 @@ fn decode_document(envelope: &docx_parse::S9WireEnvelope) -> Result<V> {
 }
 
 /// `authoredText`: the text a projected node shows.
-fn authored_text(value: &V) -> String {
+pub(super) fn authored_text(value: &V) -> String {
     if let Some(items) = value.arr() {
         return items.items().iter().map(authored_text).collect();
     }
@@ -231,11 +245,13 @@ impl DocxSession {
             None => docx_edit::parse_docx_for_edit(base).map_err(Error::Engine)?,
         };
         Ok(Self {
-            document: Some(decode_document(&envelope)?),
+            document: Some(decode_document(envelope)?),
             engine,
             undo: UndoSession::new(),
             base: base.to_vec(),
             projected: None,
+            after: HashMap::new(),
+            index: RefCell::default(),
         })
     }
 
@@ -504,28 +520,10 @@ impl DocxSession {
     }
 
     fn paragraph(&self, id: &str) -> Result<(String, Paragraph)> {
-        let marker = id
-            .rfind(":paragraph:")
-            .filter(|marker| *marker > 0)
-            .ok_or_else(|| {
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    "target_id is not a DOCX paragraph",
-                )
-            })?;
-        let story = &id[..marker];
-        let para_id = &id[marker + ":paragraph:".len()..];
-        let paragraph = self
-            .paragraphs(story)?
-            .into_iter()
-            .find(|paragraph| paragraph.para_id == para_id)
-            .ok_or_else(|| {
-                Error::edit(
-                    EditCode::UnavailableTarget,
-                    "the paragraph is no longer in the document",
-                )
-            })?;
-        Ok((story.to_owned(), paragraph))
+        let (story, para_id) = self.split(id, false)?;
+        // The call's index: no story read again per lookup (review r2 L9).
+        let paragraph = self.indexed_paragraph(&story, &para_id)?;
+        Ok((story.into_owned(), paragraph))
     }
 
     pub fn editable(&mut self) -> Result<Vec<Entry>> {
@@ -552,10 +550,7 @@ impl DocxSession {
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {
         let Command::ReplaceText { target_id, .. } = command else {
-            return Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "DOCX sources support replace_text only",
-            ));
+            return self.apply_agent(command);
         };
         let (story, paragraph) = self.paragraph(target_id)?;
         if !paragraph.plain {
@@ -567,6 +562,7 @@ impl DocxSession {
         let (span, text) = check_replacement(&paragraph.text, command, "DOCX")?;
         self.undo.track(self.engine.doc());
         self.undo.select_story(&story);
+        let before = self.index_mark();
         if span.start < span.end || !span.text.is_empty() {
             let range = StoryRange::new(
                 story.as_str(),
@@ -588,14 +584,17 @@ impl DocxSession {
                     error => Error::engine(error),
                 })?;
         }
+        self.keep_index(before, |stories| {
+            agent::replaced_in_index(stories, &story, &paragraph.para_id, text.clone());
+        });
         self.projected = None;
         Ok(Applied {
-            id: target_id.clone(),
-            inverse: Command::ReplaceText {
+            ids: vec![target_id.clone()],
+            inverse: Some(Command::ReplaceText {
                 target_id: target_id.clone(),
                 expected_text: text,
                 text: storable_text(&paragraph.text),
-            },
+            }),
         })
     }
 
@@ -611,9 +610,14 @@ impl DocxSession {
         })
     }
 
-    pub fn export(&mut self, determinism: Determinism) -> Result<Vec<u8>> {
-        let document = self.project()?.document.clone();
-        save(&document, &self.base, determinism)
+    /// Ends the session: the save reads only the projection, so the engine
+    /// and the source tree are freed before the save request is built.
+    pub fn export(mut self, determinism: Determinism) -> Result<Vec<u8>> {
+        self.project()?;
+        let projected = self.projected.take().expect("projected above");
+        let base = std::mem::take(&mut self.base);
+        drop(self);
+        save(projected.document, &base, determinism)
     }
 
     /// The projected document with `onParagraph` (office-checkpoint.ts `docxRawInlines`).
@@ -684,8 +688,10 @@ fn docx_image_asset(src: &V, media: &HashMap<String, String>) -> Result<Option<A
 }
 
 /// rustSaveFacade.ts `writeDocumentWithRust` with `updateModifiedDate: false`.
-fn save(document: &V, original: &[u8], determinism: Determinism) -> Result<Vec<u8>> {
+/// Each form of the request is freed once the next exists.
+fn save(document: V, original: &[u8], determinism: Determinism) -> Result<Vec<u8>> {
     let package = document.get("package");
+    drop(document);
     let entries = |key: &str| package.get(key).or_else(|| V::array(Vec::new()));
     let request = obj! {
         "determinism": obj! { "seed": determinism.seed, "now": determinism.now },
@@ -705,7 +711,28 @@ fn save(document: &V, original: &[u8], determinism: Determinism) -> Result<Vec<u
         object.set("options", obj! { "updateModifiedDate": false });
     }
     let json = serde_json::to_string(&request).map_err(Error::engine)?;
+    drop((request, package));
     let request: docx_parse::serializer::S13SaveRequest =
         serde_json::from_str(&json).map_err(Error::engine)?;
+    drop(json);
     docx_parse::serializer::write_docx_s13(request, original).map_err(Error::engine)
+}
+
+#[cfg(test)]
+mod tests {
+    /// `seed` writes straight into one document under the seed client: the
+    /// bytes an engine session's seed (a second document and a copy) gives.
+    #[test]
+    fn seed_has_the_bytes_of_an_engine_session_seed() {
+        for base in [
+            &include_bytes!("../../tests/fixtures/stories.docx")[..],
+            include_bytes!(
+                "../../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+            ),
+            include_bytes!("../../../docx-edit/tests/fixtures/footnote-anchor.docx"),
+        ] {
+            let (engine, _) = super::open_engine(base, true).unwrap();
+            assert!(super::seed(base).unwrap() == engine.doc().encode_state_as_update_v1());
+        }
+    }
 }

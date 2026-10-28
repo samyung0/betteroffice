@@ -172,7 +172,8 @@
     "panelLabel": "Notes du présentateur",
     "placeholder": "Ajouter des notes du présentateur…",
     "toggle": "Notes",
-    "showSpeakerNotes": "Afficher les notes du présentateur"
+    "showSpeakerNotes": "Afficher les notes du présentateur",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

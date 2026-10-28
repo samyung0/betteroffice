@@ -77,4 +77,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<ooxml_opc::PartError> for Error {
+    fn from(error: ooxml_opc::PartError) -> Self {
+        Error::engine(error)
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

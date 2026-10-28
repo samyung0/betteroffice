@@ -21,7 +21,8 @@ mod xml;
 
 pub use axis::{AxisMap, SheetAxes};
 pub use chart::{
-    ChartRefresh, ChartRefreshPlan, EmbeddedImage, chart_space, preserved_chart_space,
+    ChartRefresh, ChartRefreshPlan, EmbeddedImage, chart_reference_area, chart_space,
+    preserved_chart_space, with_chart_refs,
 };
 #[cfg(feature = "test-counters")]
 pub use chart::{chart_counters, reset_chart_counters};

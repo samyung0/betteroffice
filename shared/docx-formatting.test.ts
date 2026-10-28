@@ -95,7 +95,7 @@ test("a zero first line on a numbered paragraph seeds as itself in both seeders"
   );
   const seed = await seedOffice("docx", bytes);
   expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
-    "69c97e8f51eeec42126dd0e481fda525c904e9d53d61a3543f6b4d3c3d26003f"
+    "c6f8be672f25732f05f07006d40d3902013aa38ca2e2a9a2b2bef677b9b59142"
   );
   const indents = (session: YrsSession) =>
     session.paragraphs("body").map(({ properties }) => [
@@ -139,7 +139,7 @@ test("unmodeled pPr children seed into the source formatting in both seeders", a
   );
   const seed = await seedOffice("docx", bytes);
   expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
-    "bb7c8b97ecdac25570f815056924f7114d10a90d75bfcbb74c31cd7505677781"
+    "e4e91291f3487b6286b07bcf45ed93c96597f7c4cc9ff4c659340d91db540ebe"
   );
   const kept = (session: YrsSession) =>
     session.storyIds().flatMap((story) =>

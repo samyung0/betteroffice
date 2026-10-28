@@ -10,6 +10,7 @@ import type {
   WorkbookHandle,
   WorkbookUpdateListener,
 } from '../wasm/loader';
+import { refusalOf } from '../wasm/refusals';
 import { StaleProposalError } from '../wasm/staleProposal';
 import {
   MUTATING_METHODS,
@@ -45,6 +46,16 @@ export interface WorkbookProxy extends WorkbookCalls {
    * a peer's change may run first and remove or move it.
    */
   onSheet<K extends WorkbookMethod>(
+    sheetId: string,
+    method: K,
+    ...args: Parameters<WorkbookHandle[K]>
+  ): Promise<ReturnType<WorkbookHandle[K]>>;
+  /**
+   * `method` on the sheet `sheetId` names, active or not (a copy or cut reads
+   * and clears its own sheet whichever is shown), else a {@link SheetGoneError}
+   * once it is removed.
+   */
+  inSheet<K extends WorkbookMethod>(
     sheetId: string,
     method: K,
     ...args: Parameters<WorkbookHandle[K]>
@@ -139,7 +150,7 @@ export async function openWorkbookWorker(
     if (message.ok) request.resolve(message.value);
     else if (message.stale) request.reject(new StaleProposalError(message.stale));
     else if (message.error === SHEET_GONE) request.reject(new SheetGoneError(message.error));
-    else request.reject(new Error(message.error));
+    else request.reject(refusalOf(message.error) ?? new Error(message.error));
   };
   worker.onerror = (event) => fail(new Error(`workbook worker failed: ${event.message}`));
   worker.onmessageerror = () => fail(new Error('workbook worker sent an unreadable message'));
@@ -158,11 +169,17 @@ export async function openWorkbookWorker(
     });
   };
 
-  const call = (method: WorkbookMethod, args: unknown[], sheetId?: string) => {
+  const call = (method: WorkbookMethod, args: unknown[], sheetId?: string, ownSheet = false) => {
     const owned = args.map((arg) => (arg instanceof Uint8Array ? arg.slice() : arg));
     const transfer = owned.flatMap((arg) => (arg instanceof Uint8Array ? [arg.buffer] : []));
     return send(
-      { type: 'call', method, args: owned, ...(sheetId === undefined ? {} : { sheetId }) },
+      {
+        type: 'call',
+        method,
+        args: owned,
+        ...(sheetId === undefined ? {} : { sheetId }),
+        ...(ownSheet ? { ownSheet } : {}),
+      },
       transfer,
       MUTATING_METHODS.has(method)
     );
@@ -212,6 +229,11 @@ export async function openWorkbookWorker(
       method: K,
       ...args: Parameters<WorkbookHandle[K]>
     ) => call(method, args, sheetId) as Promise<ReturnType<WorkbookHandle[K]>>,
+    inSheet: <K extends WorkbookMethod>(
+      sheetId: string,
+      method: K,
+      ...args: Parameters<WorkbookHandle[K]>
+    ) => call(method, args, sheetId, true) as Promise<ReturnType<WorkbookHandle[K]>>,
     toggle: (sheetId, range, property) =>
       send<EditResult>({ type: 'toggle', sheetId, range, property }, [], true),
     onUpdate(listener) {

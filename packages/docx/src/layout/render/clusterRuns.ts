@@ -1,16 +1,10 @@
-import type { DisplayPrimitive, GlyphRunPrimitive } from './displayList';
+import type { GlyphRunPrimitive } from './displayList';
 
 /**
- * Splits joined glyph runs (`clusterRuns`) back into one run per glyph
- * cluster, so each cluster keeps its own positioned mirror element and
+ * One run per glyph cluster of a joined run (`clusterRuns`), as the line
+ * emitted them, so each cluster keeps its own positioned mirror element and
  * selection and find highlights sit on the painted glyphs.
  */
-export function splitClusterRuns(primitives: DisplayPrimitive[]): DisplayPrimitive[] {
-  if (!primitives.some((p) => p.kind === 'glyphRun' && p.clusterRuns)) return primitives;
-  return primitives.flatMap((p) => (p.kind === 'glyphRun' && p.clusterRuns ? clusterPieces(p) : [p]));
-}
-
-/** One run per glyph cluster of a joined run, as the line emitted them. */
 export function clusterPieces(run: GlyphRunPrimitive): GlyphRunPrimitive[] {
   // glyph clusters are UTF-8 byte offsets into the Rust-side text
   const utf16At = new Map<number, number>();

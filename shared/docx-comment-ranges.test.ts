@@ -497,7 +497,7 @@ test("Word's comment layouts seed exactly", async () => {
   session.destroy();
   // A changed hash means the seed changed: the pin bump needs a maintenance window.
   expect(createHash("sha256").update(seed.state).digest("hex")).toBe(
-    "bfffae2178380812a1df8c546b15b85d731c7e8d7827c16724b182658e9eb572"
+    "567790ef12cfd3366572f87f3dc532897072dd6313e7bde99f5bfb7b679b3062"
   );
 });
 

@@ -205,6 +205,11 @@ impl PreservedPackage {
         crate::chart::sheet_images(&self.parts, &sheet.path)
     }
 
+    /// The part path of source sheet `index`.
+    pub fn sheet_path(&self, index: usize) -> Option<&str> {
+        self.sheets.get(index).map(|sheet| sheet.path.as_str())
+    }
+
     /// Returns retained bytes for a package part.
     pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
         find_part(&self.parts, path)

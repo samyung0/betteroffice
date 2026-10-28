@@ -91,9 +91,11 @@ pub struct PageNumberingProperties {
     pub chapter_separator: Option<String>,
 }
 
+crate::boxed!(SectionProperties(SectionPropertiesFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SectionProperties {
+pub struct SectionPropertiesFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -267,7 +269,7 @@ pub fn parse_section_properties(element: Option<&XmlElement>) -> SectionProperti
 }
 
 pub fn default_section_properties() -> SectionProperties {
-    SectionProperties {
+    SectionProperties::from(SectionPropertiesFields {
         page_width: Some(12_240.0),
         page_height: Some(15_840.0),
         orientation: Some("portrait".to_owned()),
@@ -283,8 +285,8 @@ pub fn default_section_properties() -> SectionProperties {
         equal_width: Some(true),
         section_start: Some("nextPage".to_owned()),
         vertical_align: Some("top".to_owned()),
-        ..SectionProperties::default()
-    }
+        ..SectionPropertiesFields::default()
+    })
 }
 
 pub fn apply_section_inheritance(sections: &mut [SectionProperties]) {
@@ -491,14 +493,14 @@ mod tests {
         let properties = parse_section_properties(document.root());
         assert_eq!(
             properties,
-            SectionProperties {
+            SectionProperties::from(SectionPropertiesFields {
                 column_count: Some(2.0),
                 doc_grid: Some(DocumentGrid {
                     line_pitch: Some(360.0),
                     ..Default::default()
                 }),
                 ..Default::default()
-            }
+            })
         );
     }
 

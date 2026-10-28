@@ -309,7 +309,37 @@ fn cell_margins(margins: &V) -> V {
     V::Obj(result)
 }
 
-pub(crate) fn table_cell_attrs_to_formatting(attrs: &V) -> V {
+/// The sides of a cell's resolved borders or margins it saves: for a source
+/// cell only those that differ from what the seed resolved (`seeded`), the
+/// cell's own tcPr keeping the rest, so a table style or table-wide margins
+/// keep applying in Word (Epo 2026-10-21); all of them for any other cell.
+fn changed_sides(live: &V, seeded: Option<&V>) -> V {
+    let Some(seeded) = seeded else {
+        return live.clone();
+    };
+    let changed = Obj::new();
+    for (side, value) in o(live).map(|live| live.entries()).unwrap_or_default() {
+        if canonical(&value) != canonical(&seeded.get(&side)) {
+            changed.set(&side, value);
+        }
+    }
+    if changed.is_empty() {
+        V::Undef
+    } else {
+        V::Obj(changed)
+    }
+}
+
+/// `sides` written over the source cell's own `borders` or `margins`.
+fn over_source(source: &V, sides: V) -> V {
+    let merged = o(source).map(|source| source.spread()).unwrap_or_default();
+    if let Some(sides) = o(&sides) {
+        merged.assign(&sides);
+    }
+    V::Obj(merged)
+}
+
+pub(crate) fn table_cell_attrs_to_formatting(attrs: &V, seeded: Option<&(V, V)>) -> V {
     let cell_width = |attrs: &V| {
         obj! {
             "value": attrs.get("width"),
@@ -317,6 +347,8 @@ pub(crate) fn table_cell_attrs_to_formatting(attrs: &V) -> V {
         }
     };
     let colspan = attrs.get("colspan").to_number();
+    let borders = changed_sides(&attrs.get("borders"), seeded.map(|(borders, _)| borders));
+    let margins = changed_sides(&attrs.get("margins"), seeded.map(|(_, margins)| margins));
     let orig = attrs.get("_originalFormatting");
     if orig.truthy() {
         let result = o(&orig).map(|orig| orig.spread()).unwrap_or_default();
@@ -341,11 +373,26 @@ pub(crate) fn table_cell_attrs_to_formatting(attrs: &V) -> V {
         } else if orig.get("shading").truthy() {
             result.set("shading", V::Undef);
         }
-        if attrs.get("borders").truthy() {
-            result.set("borders", attrs.get("borders"));
+        if borders.truthy() {
+            result.set(
+                "borders",
+                if seeded.is_some() {
+                    over_source(&orig.get("borders"), borders)
+                } else {
+                    borders
+                },
+            );
         }
-        if attrs.get("margins").truthy() {
-            result.set("margins", cell_margins(&attrs.get("margins")));
+        if margins.truthy() {
+            let sides = cell_margins(&margins);
+            result.set(
+                "margins",
+                if seeded.is_some() {
+                    over_source(&orig.get("margins"), sides)
+                } else {
+                    sides
+                },
+            );
         }
         changed_to(&result, attrs, &orig, "textDirection", "textDirection");
         if attrs.get("noWrap").truthy() != orig.get("noWrap").truthy() {
@@ -356,11 +403,11 @@ pub(crate) fn table_cell_attrs_to_formatting(attrs: &V) -> V {
     let has_formatting = colspan > 1.0
         || attrs.get("rowspan").to_number() > 1.0
         || !attrs.get("width").nullish()
+        || borders.truthy()
+        || margins.truthy()
         || [
             "verticalAlign",
             "backgroundColor",
-            "borders",
-            "margins",
             "textDirection",
             "noWrap",
         ]
@@ -379,8 +426,8 @@ pub(crate) fn table_cell_attrs_to_formatting(attrs: &V) -> V {
         } else {
             V::Undef
         },
-        "borders": attrs.get("borders"),
-        "margins": if attrs.get("margins").truthy() { cell_margins(&attrs.get("margins")) } else { V::Undef },
+        "borders": borders,
+        "margins": if margins.truthy() { cell_margins(&margins) } else { V::Undef },
         "noWrap": attrs.get("noWrap").or(|| V::Undef),
     }
 }

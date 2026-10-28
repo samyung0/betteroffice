@@ -487,6 +487,20 @@ impl Update {
                     .map(|slice| store.materialize(slice));
             }
 
+            // Patched for BetterOffice, as Yjs 13.6.31's Item.getMissing: an item
+            // next to a collected unit is collected; with no parent it
+            // integrates as GC over its length.
+            let next_to_gc = [item.origin, item.right_origin].iter().flatten().any(|id| {
+                store
+                    .blocks
+                    .get_block(id)
+                    .is_some_and(|b| b.as_ref().is_gc())
+            });
+            if next_to_gc {
+                item.parent = TypePtr::Unknown;
+                return Ok(None);
+            }
+
             // We have all missing ids, now find the items
 
             // In the original Y.js algorithm we decoded items as we go and attached them to client

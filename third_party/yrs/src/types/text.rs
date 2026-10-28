@@ -781,7 +781,14 @@ fn find_position(this: BranchPtr, txn: &mut TransactionMut, index: u32) -> Optio
                 }
                 _ => {
                     let mut block_len = right.len();
-                    let content_len = right.content_len(encoding);
+                    // Patched for BetterOffice: a live item's length is its
+                    // content's UTF-16 length, so a UTF-16 walk takes it
+                    // instead of counting each string's characters again.
+                    let content_len = if encoding == OffsetKind::Utf16 {
+                        block_len
+                    } else {
+                        right.content_len(encoding)
+                    };
                     if remaining < content_len {
                         // split right item
                         let offset = if let ItemContent::String(str) = &right.content {

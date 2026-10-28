@@ -172,7 +172,8 @@
     "panelLabel": "वक्ता नोट्स",
     "placeholder": "वक्ता नोट्स जोड़ें…",
     "toggle": "नोट्स",
-    "showSpeakerNotes": "वक्ता नोट्स दिखाएँ"
+    "showSpeakerNotes": "वक्ता नोट्स दिखाएँ",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

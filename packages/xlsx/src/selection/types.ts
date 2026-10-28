@@ -14,12 +14,16 @@ export interface CellAddr {
 
 /**
  * An active selection as an anchor/focus pair. `anchor` is the fixed corner
- * (where the selection started); `focus` is the moving corner. A collapsed
- * selection has `anchor` equal to `focus`.
+ * where the selection started and the active cell (the name box, the formula
+ * bar and typing go there, as in Excel); `focus` is the moving corner a drag,
+ * Shift+click or Shift+arrow moves. A collapsed selection has `anchor` equal to
+ * `focus`.
  */
 export interface Selection {
   anchor: CellAddr;
   focus: CellAddr;
+  /** The active cell when it is not the anchor: select all keeps it where it was. */
+  active?: CellAddr;
 }
 
 /**
@@ -40,13 +44,16 @@ export interface CellRange {
 export type Direction = 'up' | 'down' | 'left' | 'right';
 
 /**
- * Grid bounds a move must stay inside: the used range is `[0, rows)` × `[0,
- * cols)`, and `rowsPerPage` is the viewport height in whole rows for
- * PageUp/PageDown steps.
+ * Grid bounds: a move stays inside `[0, rows)` × `[0, cols)` (the whole sheet in
+ * the editor, as in Excel), Ctrl/Cmd+arrows, End, Ctrl/Cmd+End and select all
+ * stop at the used range `[0, usedRows)` × `[0, usedCols)`, and `rowsPerPage`
+ * is the viewport height in whole rows for PageUp/PageDown steps.
  */
 export interface SelectionLimits {
   rows: number;
   cols: number;
+  usedRows: number;
+  usedCols: number;
   rowsPerPage: number;
 }
 

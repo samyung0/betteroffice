@@ -172,7 +172,8 @@
     "panelLabel": "Notatki prelegenta",
     "placeholder": "Dodaj notatki prelegenta…",
     "toggle": "Notatki",
-    "showSpeakerNotes": "Pokaż notatki prelegenta"
+    "showSpeakerNotes": "Pokaż notatki prelegenta",
+    "tooLong": null
   },
   "errors": {
     "decodeSlideImage": null

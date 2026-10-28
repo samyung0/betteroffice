@@ -116,7 +116,7 @@ fn set_cell_drops_what_an_office_file_cannot_store_and_refuses_what_the_workbook
     );
     assert_eq!(
         set("ZZ300", &"x".repeat(32_768)).unwrap_err(),
-        invalid("cell text exceeds Excel's length limit")
+        invalid("ZZ300: the text is 32768 characters long; a cell holds at most 32767")
     );
 }
 
@@ -166,7 +166,12 @@ fn undo_restores_a_cell_without_a_character_the_file_cannot_store() {
         }],
     )
     .unwrap();
-    let undone = apply_commands(&base, checkpoint(&edit.state), &edit.inverse).unwrap();
+    let undone = apply_commands(
+        &base,
+        checkpoint(&edit.state),
+        edit.inverse.as_deref().unwrap(),
+    )
+    .unwrap();
     let restored = inspect(&base, checkpoint(&undone.state))
         .unwrap()
         .into_iter()

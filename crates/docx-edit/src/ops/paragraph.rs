@@ -29,7 +29,7 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::Patch;
-use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
+use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt};
 use crate::ops::text::suggest_delete;
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
@@ -38,8 +38,7 @@ use crate::ops::{
 use crate::segments::is_block_embed;
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
-    Position, StoryRange, check_position, insertion_attrs, map_string, next_pilcrow,
-    revision_value, story_ref,
+    Position, StoryRange, check_position, insertion_attrs, map_string, revision_value, story_ref,
 };
 
 /// The paragraph attributes a style definition owns: every pPr property the
@@ -189,30 +188,158 @@ struct TargetPara {
     map: MapRef,
 }
 
-fn all_targets<T: ReadTxn>(txn: &T) -> Vec<TargetPara> {
+/// Each story in its id's order, with its text.
+fn sorted_stories<T: ReadTxn>(txn: &T) -> Vec<(String, TextRef)> {
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return Vec::new();
     };
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
-    story_ids.sort();
-    let mut result = Vec::new();
-    for story_id in story_ids {
-        let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
-            continue;
+    let mut sorted: Vec<(String, TextRef)> = stories
+        .iter(txn)
+        .filter_map(|(id, value)| match value {
+            Out::YText(story) => Some((id.to_string(), story)),
+            _ => None,
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    sorted
+}
+
+impl EditingDoc {
+    /// The paragraphs of story `story_id` that `keep` takes (by para id,
+    /// start and pilcrow) as targets, in order: from its segment index where
+    /// that is in step with `txn`, else read item by item.
+    fn story_targets(
+        &self,
+        txn: &TransactionMut,
+        story_id: &str,
+        story: &TextRef,
+        keep: impl Fn(&str, u32, u32) -> bool,
+    ) -> Vec<TargetPara> {
+        let target = |para_id: &str, start, pilcrow, map| TargetPara {
+            story_id: story_id.to_owned(),
+            story: story.clone(),
+            bounds: ParaBounds {
+                para_id: para_id.to_owned(),
+                start,
+                pilcrow,
+            },
+            map,
         };
-        let pilcrow_maps: HashMap<u32, MapRef> = crate::pilcrows(&story, txn).into_iter().collect();
-        for bounds in para_bounds(&story, txn) {
-            if let Some(map) = pilcrow_maps.get(&bounds.pilcrow) {
-                result.push(TargetPara {
-                    story_id: story_id.clone(),
-                    story: story.clone(),
-                    bounds,
-                    map: map.clone(),
-                });
+        if let Some(index) = self.segment_index_txn(story_id, story, txn) {
+            let targets: Option<Vec<TargetPara>> = index
+                .paras()
+                .iter()
+                .filter(|para| keep(&para.para_id, para.start, para.pilcrow))
+                .map(|para| {
+                    let map = crate::mark_map(txn, &para.mark)?;
+                    Some(target(&para.para_id, para.start, para.pilcrow, map))
+                })
+                .collect();
+            if let Some(targets) = targets {
+                return targets;
+            }
+        }
+        let mut start = 0;
+        let mut targets = Vec::new();
+        for (pilcrow, map) in crate::pilcrows(story, txn) {
+            let para_id = map_string(&map, txn, PARA_ID).unwrap_or_default();
+            if keep(&para_id, start, pilcrow) {
+                targets.push(target(&para_id, start, pilcrow, map));
+            }
+            start = pilcrow + 1;
+        }
+        targets
+    }
+
+    /// Resolves a selector to pilcrow targets, validating BEFORE any
+    /// mutation: a paragraph id in the stories' id order, the first
+    /// paragraph with it (each of `Many` the last).
+    fn resolve_selector(
+        &self,
+        txn: &TransactionMut,
+        selector: &ParaSelector,
+    ) -> OpResult<Vec<TargetPara>> {
+        match selector {
+            ParaSelector::One(id) => {
+                for (story_id, story) in sorted_stories(txn) {
+                    if let Some(target) = self
+                        .story_targets(txn, &story_id, &story, |para, _, _| para == id)
+                        .into_iter()
+                        .next()
+                    {
+                        return Ok(vec![target]);
+                    }
+                }
+                Err(OpError::UnknownPara(id.clone()))
+            }
+            ParaSelector::Many(ids) => {
+                let mut by_id: HashMap<String, TargetPara> = HashMap::new();
+                for (story_id, story) in sorted_stories(txn) {
+                    for target in self.story_targets(txn, &story_id, &story, |para, _, _| {
+                        ids.iter().any(|id| id == para)
+                    }) {
+                        by_id.insert(target.bounds.para_id.clone(), target);
+                    }
+                }
+                ids.iter()
+                    .map(|id| {
+                        by_id
+                            .remove(id)
+                            .ok_or_else(|| OpError::UnknownPara(id.clone()))
+                    })
+                    .collect()
+            }
+            ParaSelector::Range(range) => {
+                if range.end < range.start {
+                    return Err(OpError::InvalidRange {
+                        start: range.start,
+                        end: range.end,
+                    });
+                }
+                let targets = match story_ref(txn, &range.story) {
+                    Ok(story) => {
+                        self.story_targets(txn, &range.story, &story, |_, start, pilcrow| {
+                            start <= range.end && pilcrow >= range.start
+                        })
+                    }
+                    Err(_) => Vec::new(),
+                };
+                if targets.is_empty() {
+                    return Err(OpError::UnknownStory(range.story.clone()));
+                }
+                Ok(targets)
             }
         }
     }
-    result
+
+    /// Paragraph `para` (the first with that id, in the stories' id order)
+    /// with the paragraphs before and after it in its story, as targets, and
+    /// its place among them.
+    fn paragraph_and_neighbours(
+        &self,
+        txn: &TransactionMut,
+        para: &str,
+    ) -> OpResult<(Vec<TargetPara>, usize)> {
+        for (story_id, story) in sorted_stories(txn) {
+            let Some(found) = self
+                .story_targets(txn, &story_id, &story, |id, _, _| id == para)
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            let (start, pilcrow) = (found.bounds.start, found.bounds.pilcrow);
+            let targets = self.story_targets(txn, &story_id, &story, |_, at, mark| {
+                mark + 1 == start || at == pilcrow + 1 || (at == start && mark == pilcrow)
+            });
+            let index = targets
+                .iter()
+                .position(|target| target.bounds.pilcrow == pilcrow)
+                .ok_or_else(|| OpError::UnknownPara(para.to_owned()))?;
+            return Ok((targets, index));
+        }
+        Err(OpError::UnknownPara(para.to_owned()))
+    }
 }
 
 /// Moves the bookmarks of paragraph mark `from` onto `to`, at the start of its
@@ -250,53 +377,6 @@ fn move_bookmarks(txn: &mut TransactionMut, from: &MapRef, to: &MapRef, breaks: 
     }
     bookmarks.extend(kept);
     to.insert(txn, "bookmarks", Any::Array(bookmarks.into()));
-}
-
-/// Resolves a selector to pilcrow targets, validating BEFORE any mutation.
-fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Vec<TargetPara>> {
-    let all = all_targets(txn);
-    match selector {
-        ParaSelector::One(id) => {
-            let target = all
-                .into_iter()
-                .find(|target| target.bounds.para_id == *id)
-                .ok_or_else(|| OpError::UnknownPara(id.clone()))?;
-            Ok(vec![target])
-        }
-        ParaSelector::Many(ids) => {
-            let mut by_id: HashMap<String, TargetPara> = all
-                .into_iter()
-                .map(|target| (target.bounds.para_id.clone(), target))
-                .collect();
-            ids.iter()
-                .map(|id| {
-                    by_id
-                        .remove(id)
-                        .ok_or_else(|| OpError::UnknownPara(id.clone()))
-                })
-                .collect()
-        }
-        ParaSelector::Range(range) => {
-            if range.end < range.start {
-                return Err(OpError::InvalidRange {
-                    start: range.start,
-                    end: range.end,
-                });
-            }
-            let targets: Vec<TargetPara> = all
-                .into_iter()
-                .filter(|target| {
-                    target.story_id == range.story
-                        && target.bounds.start <= range.end
-                        && target.bounds.pilcrow >= range.start
-                })
-                .collect();
-            if targets.is_empty() {
-                return Err(OpError::UnknownStory(range.story.clone()));
-            }
-            Ok(targets)
-        }
-    }
 }
 
 fn set_or_remove(txn: &mut TransactionMut<'_>, map: &MapRef, key: &str, value: Option<Any>) {
@@ -369,22 +449,45 @@ impl EditingDoc {
     /// new paragraph restores the document.
     ///
     /// Errors when `at` does not address a position inside a story.
-    pub fn split_paragraph(&self, ctx: &EditCtx, mut at: Position) -> OpResult<SplitReceipt> {
+    pub fn split_paragraph(&self, ctx: &EditCtx, at: Position) -> OpResult<SplitReceipt> {
+        self.split_at(ctx, at, false)
+    }
+
+    /// An empty paragraph right before `para_id` of `story`, as the split
+    /// puts one before a slot that opens with a block: the new mark takes a
+    /// fresh paraId and that paragraph's properties but its section, and the
+    /// paragraph keeps its own. Its receipt's `first_para_id` is the new
+    /// paragraph's. Errors when the story has no such paragraph.
+    pub fn insert_paragraph_before(
+        &self,
+        ctx: &EditCtx,
+        story: &str,
+        para_id: &str,
+    ) -> OpResult<SplitReceipt> {
+        let (start, _) = self
+            .segment_index(story)?
+            .para_span(para_id)
+            .ok_or_else(|| OpError::UnknownPara(para_id.to_owned()))?;
+        self.split_at(ctx, Position::new(story, start), true)
+    }
+
+    fn split_at(&self, ctx: &EditCtx, mut at: Position, before: bool) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
         let slot = self
             .segment_index(&at.story)?
             .para_at(at.index)
             .filter(|para| para.start == at.index && para.node_start > at.index)
             .map(|para| (para.node_start, para.pilcrow));
-        let mut before_block = slot.is_some();
+        let mut before_block = before || slot.is_some();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
         if let Some((text_start, end)) = slot
+            && !before
             && at.index > 0
             && text_start < end
         {
-            let prefix = snapshot_range(&story, &txn, at.index, text_start);
+            let prefix = self.snapshot_range_in(&at.story, &story, &txn, at.index, text_start);
             if prefix.iter().all(|chunk| {
                 matches!(&chunk.kind, ChunkKind::Embed(Some(map))
                 if map_string(map, &txn, KIND_KEY).as_deref() == Some("columnBreak")
@@ -394,18 +497,22 @@ impl EditingDoc {
                 before_block = false;
             }
         }
-        let (orig_index, orig_map) =
-            next_pilcrow(&story, &txn, at.index).ok_or(OpError::ExpectedPilcrow {
+        let (orig_index, orig_map) = self
+            .next_pilcrow_in(&at.story, &story, &txn, at.index)
+            .ok_or(OpError::ExpectedPilcrow {
                 story: at.story.clone(),
                 index: at.index,
             })?;
-        if snapshot_range(&story, &txn, at.index, orig_index)
-            .iter()
-            .all(|chunk| is_comment_reference(chunk, &txn))
+        if !before
+            && self
+                .snapshot_range_in(&at.story, &story, &txn, at.index, orig_index)
+                .iter()
+                .all(|chunk| is_comment_reference(chunk, &txn))
         {
             at.index = orig_index;
         }
-        let chunks = snapshot_range(
+        let chunks = self.snapshot_range_in(
+            &at.story,
             &story,
             &txn,
             at.index.saturating_sub(1),
@@ -435,6 +542,12 @@ impl EditingDoc {
         let ins = revision_id
             .as_ref()
             .map(|id| revision_value(id, &ctx.revision_author()));
+        // Where split_field reads from: the slot holding the unit before the
+        // split, whose start is before the new mark and stays in place.
+        let field_from = (at.index > 0)
+            .then(|| self.segment_index_txn(&at.story, &story, &txn))
+            .flatten()
+            .and_then(|index| index.slot_start(story.as_ref(), &txn, index.slot_at(at.index - 1)));
         let new_pilcrow = story.insert_embed_with_attributes(
             &mut txn,
             if after { orig_index + 1 } else { at.index },
@@ -513,6 +626,7 @@ impl EditingDoc {
                 at.index,
                 &format!("field:{second_para_id}"),
                 self.package().as_deref(),
+                field_from,
             )?;
         }
         Ok(SplitReceipt {
@@ -554,11 +668,7 @@ impl EditingDoc {
         direction: MergeDirection,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = all_targets(&txn);
-        let index = targets
-            .iter()
-            .position(|target| target.bounds.para_id == para)
-            .ok_or_else(|| OpError::UnknownPara(para.to_owned()))?;
+        let (targets, index) = self.paragraph_and_neighbours(&txn, para)?;
         let boundary_index = match direction {
             MergeDirection::Forward => {
                 let is_last_in_story = targets
@@ -586,7 +696,14 @@ impl EditingDoc {
             .is_suggesting()
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
             .flatten();
-        let lead = snapshot_range(&story, &txn, pilcrow_index + 1, pilcrow_index + 2)
+        let lead = self
+            .snapshot_range_in(
+                &boundary.story_id,
+                &story,
+                &txn,
+                pilcrow_index + 1,
+                pilcrow_index + 2,
+            )
             .first()
             .and_then(|chunk| match &chunk.kind {
                 ChunkKind::Embed(Some(map)) => {
@@ -598,7 +715,8 @@ impl EditingDoc {
             // Text never goes ahead of a block in one slot, so as in Word the
             // merge takes out what separates the two paragraphs instead.
             let start = boundary.bounds.start;
-            let chunks = snapshot_range(&story, &txn, start, pilcrow_index + 2);
+            let chunks =
+                self.snapshot_range_in(&boundary.story_id, &story, &txn, start, pilcrow_index + 2);
             let stays = match direction {
                 MergeDirection::Forward => pilcrow_index,
                 MergeDirection::Backward => pilcrow_index + 1,
@@ -629,14 +747,20 @@ impl EditingDoc {
             // column break takes them after its breaks, where its save writes
             // them, so the file does not depend on a publication in between.
             if from == start && from < to && (!ctx.is_suggesting() || own_insert.is_some()) {
-                let kinds: Vec<Option<String>> =
-                    snapshot_range(&story, &txn, survivor.bounds.start, survivor.bounds.pilcrow)
-                        .iter()
-                        .map(|chunk| match &chunk.kind {
-                            ChunkKind::Embed(Some(map)) => map_string(map, &txn, KIND_KEY),
-                            _ => None,
-                        })
-                        .collect();
+                let kinds: Vec<Option<String>> = self
+                    .snapshot_range_in(
+                        &boundary.story_id,
+                        &story,
+                        &txn,
+                        survivor.bounds.start,
+                        survivor.bounds.pilcrow,
+                    )
+                    .iter()
+                    .map(|chunk| match &chunk.kind {
+                        ChunkKind::Embed(Some(map)) => map_string(map, &txn, KIND_KEY),
+                        _ => None,
+                    })
+                    .collect();
                 let breaks = kinds
                     .iter()
                     .map_while(|kind| kind.as_deref().filter(|kind| is_block_embed(kind)))
@@ -681,7 +805,9 @@ impl EditingDoc {
                     story.remove_range(&mut txn, pilcrow_index, 1);
                     end = pilcrow_index;
                 }
-                let outcome = suggest_delete(&mut txn, &story, ctx, &revision, from, end, &chunks);
+                let last = crate::ops::last_pilcrow(&story, &txn).map(|(index, _)| index);
+                let outcome =
+                    suggest_delete(&mut txn, &story, ctx, &revision, from, end, &chunks, last);
                 if from < pilcrow_index {
                     removed = outcome.removed;
                 }
@@ -776,7 +902,7 @@ impl EditingDoc {
         delta_for: impl Fn(&MapRef, &TransactionMut<'_>) -> OpResult<ParaAttrDelta>,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         let deltas = targets
             .iter()
             .map(|target| delta_for(&target.map, &txn))
@@ -841,7 +967,7 @@ impl EditingDoc {
         stop: &TabStop,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         for target in &targets {
             let mut stops = read_tab_stops(&target.map, &txn);
             stops.retain(|existing| existing_pos(existing) != Some(stop.pos));
@@ -867,7 +993,7 @@ impl EditingDoc {
         pos: f64,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         for target in &targets {
             let mut stops = read_tab_stops(&target.map, &txn);
             stops.retain(|existing| existing_pos(existing) != Some(pos));
@@ -892,7 +1018,7 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         let step = step.unwrap_or(INDENT_STEP_TWIPS);
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             target
@@ -913,7 +1039,7 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         let step = step.unwrap_or(INDENT_STEP_TWIPS);
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             let next = (current - step).max(0.0);
@@ -934,7 +1060,7 @@ impl EditingDoc {
         formatting: Option<&BTreeMap<String, Any>>,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let targets = self.resolve_selector(&txn, selector)?;
         for target in &targets {
             match formatting {
                 Some(map) if !map.is_empty() => {

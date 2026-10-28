@@ -49,6 +49,7 @@ import { InputOperationQueue } from './inputOperationQueue';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
   shouldScrollCaretIntoView,
+  type CaretSelectionChange,
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
 
@@ -273,10 +274,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const displayListFrameEpochRef = useRef(displayListFrameEpoch);
   const resolveDisplayListQueriesRef = useRef(resolveDisplayListQueries);
   // Sticky (not display-position) selection the caret-into-view step last acted
-  // on. `undefined` is the pre-mount sentinel; display positions shift under a
-  // remote insert above the caret while sticky locs do not, so comparing locs is
-  // what keeps a viewer's viewport still during someone else's edit.
-  const lastCaretScrollSelectionRef = useRef<YrsSelection | null | undefined>(undefined);
+  // on, with its session; none before a session's first pass. Display
+  // positions shift under a remote insert above the caret while sticky locs do
+  // not, so comparing locs is what keeps a viewer's viewport still during
+  // someone else's edit.
+  // A resident edit runs no layout pass: the caret pass for its frame counts
+  // it as local, so an edit that keeps the caret (forward Delete, a collapsed
+  // Ctrl+B) still brings an off-screen caret into view.
+  const residentEditRef = useRef(false);
+  const lastCaretScrollRef = useRef<{
+    session: YrsSession | null;
+    selection: YrsSelection | null;
+  } | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -367,6 +376,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const finishResidentMutation = useCallback(
     (result: ResidentFrameApplyResult): void => {
+      residentEditRef.current = true;
       if (result.frameEpoch !== null) {
         pendingResidentFrameEpochRef.current = result.frameEpoch;
       }
@@ -1416,15 +1426,20 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         ? current
         : { left: nextLeft, top: nextTop, height: nextHeight }
     );
+    const origin = residentEditRef.current ? 'local' : layoutUpdateOrigin;
+    residentEditRef.current = false;
     const stickySelection = session?.selection() ?? null;
-    const previousStickySelection = lastCaretScrollSelectionRef.current;
-    lastCaretScrollSelectionRef.current = stickySelection;
-    const selectionChanged =
-      previousStickySelection === undefined ||
-      !sameYrsSelection(previousStickySelection, stickySelection);
+    const previous = lastCaretScrollRef.current;
+    lastCaretScrollRef.current = { session: session ?? null, selection: stickySelection };
+    const change: CaretSelectionChange =
+      !previous || previous.session !== (session ?? null)
+        ? 'first'
+        : sameYrsSelection(previous.selection, stickySelection)
+          ? 'same'
+          : 'changed';
     if (
       selection.anchor === selection.head &&
-      shouldScrollCaretIntoView(layoutUpdateOrigin, selectionChanged)
+      shouldScrollCaretIntoView(origin, change)
     ) {
       const scroller = findVerticalScrollParentOrRoot(host);
       const viewport = scroller.getBoundingClientRect();

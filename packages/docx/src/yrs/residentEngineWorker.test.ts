@@ -16,7 +16,7 @@ beforeAll(async () => {
   const frameDelta = resolve(import.meta.dir, '../layout/render/frameDelta.ts');
   const modules: Record<string, string> = {
     './residentEngineSession':
-      'export const createResidentEngineSession = async () => testHarness.session;',
+      'export const createResidentEngineSession = async (clientId) => (testHarness.sessionIds.push(clientId), testHarness.session);',
     '../layout/render/glyphCache': 'export class GlyphCache {}',
     '../layout/render/frameDelta': `
       export { applyFrameDeltaOwned } from ${JSON.stringify(frameDelta)};
@@ -89,6 +89,7 @@ function worker() {
     failPresent: null as number | null,
     relayouts: [] as Array<[string, string, number]>,
     selections: [] as unknown[],
+    sessionIds: [] as Array<number | undefined>,
     session: {
       loadState() {},
       clearFonts() {},
@@ -195,7 +196,7 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3) {
+    async bootstrap(pageCount = 3, workerClientId?: number) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
@@ -203,6 +204,7 @@ function worker() {
         extras: '',
         snapshot: {
           clientId: 1,
+          workerClientId,
           state: new Uint8Array(),
           fontsRevision: 0,
           fonts: [],
@@ -275,6 +277,17 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+describe('resident worker replica', () => {
+  test('writes under the client id its host assigned, else draws its own', async () => {
+    const assigned = worker();
+    await assigned.bootstrap(3, 4242);
+    expect(assigned.harness.sessionIds).toEqual([4242]);
+    const unassigned = worker();
+    await unassigned.bootstrap(3);
+    expect(unassigned.harness.sessionIds).toEqual([undefined]);
+  });
+});
 
 describe('resident worker request timing', () => {
   test('reports each request as started, in order, before answering it', async () => {

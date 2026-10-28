@@ -400,6 +400,9 @@ export interface PagedEditorRef {
   getLayout(): Layout | null;
   /** Force re-layout. */
   relayout(): void;
+  /** Schedule a layout pass; a local one is the reader's action and keeps
+   * the caret in view. */
+  scheduleLayout(origin: LayoutUpdateOrigin): void;
   /** Scroll the visible pages to bring a display position into view. */
   scrollToPosition(position: number): void;
   /**
@@ -774,17 +777,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsInputRef.current?.focus();
     }, []);
 
-    const yrsProjectionVersionRef = useRef(0);
     const lastYrsToolbarSelectionKeyRef = useRef<string | null>(null);
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const publishYrsDirectInput = useCallback((): void => {
       yrsCore.publishDirectInput();
-      // Structural input can mint a paragraph before the existing projection
-      // can map its new sticky caret. Invalidate first so emitSelection can
-      // rebuild the projection and reach the normal layout-refresh callback.
-      yrsProjectionVersionRef.current += 1;
     }, [yrsCore.publishDirectInput]);
     useEffect(
       () => () => {
@@ -796,7 +794,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     );
     const refreshYrsLayout = useCallback(
       (origin: LayoutUpdateOrigin): void => {
-        yrsProjectionVersionRef.current += 1;
         syncCoordinator.incrementStateSeq();
         syncCoordinator.requestRender();
         scheduleLayout(origin);
@@ -1063,7 +1060,12 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             const { range } = session.insertImage(at, command.image, structuralAuthor);
             session.setSelection({ story: range.story, ...range.end });
           } else if (command.type === 'contentControlValue') {
-            const node = positionProjection.nodeAt(command.pmPos);
+            const node =
+              command.story !== undefined
+                ? positionProjection.blockSdtForStory(command.story)
+                : command.pmPos !== undefined
+                  ? positionProjection.nodeAt(command.pmPos)
+                  : null;
             const embedId = command.embedId ?? (node ? yrsEmbedIdForProjectedNode(node) : null);
             if (embedId) {
               session.setContentControlValue(embedId, command.value);
@@ -1418,9 +1420,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
     // Display-list positions retain the document tree's integer coordinate
     // space. Build a lightweight index directly from the authoritative yrs
-    // stories and cache it across gestures until the next mutation.
+    // stories once; typed text moves its positions in place (`sync`), and any
+    // other document change builds it again.
     const yrsPositionProjectionCacheRef = useRef<{
-      version: number;
       session: YrsSession;
       rootStory: string;
       projection: YrsPositionProjection;
@@ -1428,23 +1430,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
-        if (!session || !session.storyIds().includes(rootStory)) return null;
+        if (!session) return null;
         const cached = yrsPositionProjectionCacheRef.current;
         if (
-          cached?.version === yrsProjectionVersionRef.current &&
-          cached.session === session &&
-          cached.rootStory === rootStory
+          cached?.session === session &&
+          cached.rootStory === rootStory &&
+          cached.projection.sync()
         ) {
           return cached.projection;
         }
         const projection = createYrsPositionProjection(session, rootStory);
         if (!projection) return null;
-        yrsPositionProjectionCacheRef.current = {
-          version: yrsProjectionVersionRef.current,
-          session,
-          rootStory,
-          projection,
-        };
+        yrsPositionProjectionCacheRef.current = { session, rootStory, projection };
         return projection;
       },
       [yrsCore.session]
@@ -1826,6 +1823,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       yrsInputRef,
       layout,
       runLayoutPipeline,
+      scheduleLayout,
       scrollToPositionImpl,
       scrollToParaIdImpl,
       scrollToPageImpl,

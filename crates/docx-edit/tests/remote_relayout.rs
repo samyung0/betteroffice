@@ -4,7 +4,7 @@
 //! a burst of updates costs one layout and one frame. Work is counted, never
 //! timed; every frame state is compared with a fresh engine's full layout.
 
-use docx_edit::{EditCtx, EditingDoc, EngineSession, FormatPolicy, Position};
+use docx_edit::{EditCtx, EditingDoc, EngineSession, FormatPolicy, Position, RawOp};
 use serde_json::json;
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -282,5 +282,99 @@ fn a_changed_layout_request_takes_the_full_region_pass() {
         worker.stats().region_fast_path_hits,
         before.region_fast_path_hits
     );
+    fixture.assert_same_as_fresh(&worker);
+}
+
+/// Chart block keys and content-control group ids in the retained display list.
+fn embed_ids(worker: &EngineSession) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::String(key)) = map.get("blockKey")
+                    && key.starts_with("chart:")
+                {
+                    out.push(key.clone());
+                }
+                if let Some(serde_json::Value::String(group)) =
+                    map.get("sdt").and_then(|sdt| sdt.get("groupId"))
+                {
+                    out.push(group.clone());
+                }
+                map.values().for_each(|value| walk(value, out));
+            }
+            serde_json::Value::Array(values) => values.iter().for_each(|value| walk(value, out)),
+            _ => {}
+        }
+    }
+    let list = worker
+        .with_display_list(|list| serde_json::to_value(list).unwrap())
+        .unwrap();
+    let mut out = Vec::new();
+    walk(&list, &mut out);
+    out.dedup();
+    out
+}
+
+/// Charts and block content controls are named by their embed, not their
+/// position: a key typed before them keeps their ids, so layout settles after
+/// the edited page instead of rebuilding every page up to the last of them.
+#[test]
+fn a_key_before_a_chart_and_a_block_control_rebuilds_only_its_page() {
+    let mut fixture = Fixture::new();
+    let doc = fixture.replica(3);
+    let ctx = EditCtx::local("", "");
+    doc.create_story("sdt-late", "Inside the control", "Normal", "left")
+        .unwrap();
+    // the later embed first, so the earlier index still holds
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::InsertEmbed {
+            index: fixture.starts[PARAGRAPHS - 20],
+            kind: "blockSdt".to_owned(),
+            payload: vec![
+                ("story".to_owned(), yrs::Any::String("sdt-late".into())),
+                ("sdtType".to_owned(), yrs::Any::String("checkbox".into())),
+            ],
+            attrs: Default::default(),
+        }],
+        &ctx,
+    )
+    .unwrap();
+    doc.apply_raw_ops(
+        "body",
+        vec![RawOp::InsertEmbed {
+            index: fixture.starts[PARAGRAPHS - 40] + 4,
+            kind: "chart".to_owned(),
+            payload: vec![(
+                "chartJson".to_owned(),
+                yrs::Any::String(r#"{"type":"chart","chartType":"bar"}"#.into()),
+            )],
+            attrs: Default::default(),
+        }],
+        &ctx,
+    )
+    .unwrap();
+    fixture.state = doc.encode_state_as_update_v1();
+    let (worker, _) = fixture.worker();
+    let ids = embed_ids(&worker);
+    assert!(
+        ids.iter().any(|id| id.starts_with("chart:")) && ids.iter().any(|id| id == "sdt:sdt-late"),
+        "{ids:?}"
+    );
+
+    let peer = fixture.replica(2);
+    type_at(&peer, fixture.starts[3] + 4, "x");
+    apply(&worker, &peer);
+    let before = worker.stats();
+    let frame = fixture.relayout(&worker);
+    let after = worker.stats();
+    assert_eq!(embed_ids(&worker), ids);
+    assert_eq!(
+        after.rebuilt_display_pages - before.rebuilt_display_pages,
+        1
+    );
+    let (full, upserts, _) = frame_ops(&frame);
+    assert!(!full);
+    assert_eq!(upserts, 1, "only the edited page is re-sent");
     fixture.assert_same_as_fresh(&worker);
 }

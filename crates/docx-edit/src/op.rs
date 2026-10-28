@@ -4,6 +4,8 @@ use std::fmt;
 
 use yrs::{ReadTxn, TextRef, Transact};
 
+use crate::segments::SlotMark;
+
 use crate::{
     CommentId, EditError, ParagraphId, Position, RevisionId, StoryId, StoryRange, pilcrows,
 };
@@ -257,6 +259,64 @@ pub(crate) fn global_of_loc<T: ReadTxn>(
     Ok(bounds.start + loc.offset)
 }
 
+/// The paragraphs `indices` resolve into, each the first whose pilcrow is
+/// at or after it, else the story's last: read item by item from `from`
+/// ([`SlotMark`]), only as far as the paragraph the last index resolves into.
+fn bounds_at<T: ReadTxn, const N: usize>(
+    story: &TextRef,
+    txn: &T,
+    from: SlotMark,
+    indices: [u32; N],
+) -> Option<[ParaBounds; N]> {
+    let mut found: [Option<(u32, u32, yrs::MapRef)>; N] = std::array::from_fn(|_| None);
+    let mut last = None;
+    let (mut next, mut offset) = match from
+        .and_then(|(mark, at)| Some((txn.store().get_item(&mark)?, at)))
+        .filter(|(mark, _)| !mark.is_deleted())
+    {
+        Some((mark, at)) => (mark.right(), at),
+        None => (AsRef::<yrs::branch::Branch>::as_ref(story).start(), 0),
+    };
+    let mut start = offset;
+    while let Some(item) = next {
+        if let Some(map) = crate::pilcrow_map(&item, txn) {
+            for (slot, index) in found.iter_mut().zip(indices) {
+                if slot.is_none() && index <= offset {
+                    *slot = Some((start, offset, map.clone()));
+                }
+            }
+            if found.iter().all(Option::is_some) {
+                break;
+            }
+            last = Some((start, offset, map));
+            start = offset + 1;
+        }
+        offset += crate::segments::units(&item);
+        next = item.right();
+    }
+    let fallback = last.or_else(|| found.iter().flatten().next().cloned())?;
+    Some(found.map(|bounds| {
+        let (start, pilcrow, map) = bounds.as_ref().unwrap_or(&fallback);
+        ParaBounds {
+            para_id: crate::map_string(map, txn, crate::PARA_ID).unwrap_or_default(),
+            start: *start,
+            pilcrow: *pilcrow,
+        }
+    }))
+}
+
+/// `index` as a [`Loc`] in `bounds`, the paragraph it resolves into.
+fn loc_in(story_id: &str, bounds: &ParaBounds, index: u32) -> Loc {
+    Loc {
+        story: story_id.to_owned(),
+        para: bounds.para_id.clone(),
+        offset: index
+            .min(bounds.pilcrow)
+            .saturating_sub(bounds.start)
+            .min(bounds.len()),
+    }
+}
+
 /// Maps a story-global index back to a [`Loc`]. Indices past the final pilcrow clamp to the final
 /// paragraph mark.
 pub(crate) fn loc_of_global<T: ReadTxn>(
@@ -265,23 +325,9 @@ pub(crate) fn loc_of_global<T: ReadTxn>(
     txn: &T,
     index: u32,
 ) -> Result<Loc, OpError> {
-    let all = para_bounds(story, txn);
-    let last = all
-        .last()
-        .cloned()
+    let [bounds] = bounds_at(story, txn, None, [index])
         .ok_or_else(|| OpError::UnknownStory(story_id.to_owned()))?;
-    let bounds = all
-        .into_iter()
-        .find(|bounds| index <= bounds.pilcrow)
-        .unwrap_or(last);
-    Ok(Loc {
-        story: story_id.to_owned(),
-        para: bounds.para_id.clone(),
-        offset: index
-            .min(bounds.pilcrow)
-            .saturating_sub(bounds.start)
-            .min(bounds.len()),
-    })
+    Ok(loc_in(story_id, &bounds, index))
 }
 
 /// Builds a [`LocRange`] for a story-global span inside an open transaction.
@@ -292,9 +338,23 @@ pub(crate) fn loc_range_in_txn<T: ReadTxn>(
     start: u32,
     end: u32,
 ) -> Result<LocRange, OpError> {
+    loc_range_from(story_id, story, txn, None, start, end)
+}
+
+/// [`loc_range_in_txn`] read from `from` ([`SlotMark`]).
+pub(crate) fn loc_range_from<T: ReadTxn>(
+    story_id: &str,
+    story: &TextRef,
+    txn: &T,
+    from: SlotMark,
+    start: u32,
+    end: u32,
+) -> Result<LocRange, OpError> {
+    let [first, last] = bounds_at(story, txn, from, [start, end])
+        .ok_or_else(|| OpError::UnknownStory(story_id.to_owned()))?;
     Ok(LocRange {
-        start: loc_of_global(story_id, story, txn, start)?,
-        end: loc_of_global(story_id, story, txn, end)?,
+        start: loc_in(story_id, &first, start),
+        end: loc_in(story_id, &last, end),
     })
 }
 

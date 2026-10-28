@@ -49,6 +49,7 @@ use docx_layout::types::{
 };
 use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map as JsonMap, Value};
+use yrs::branch::{Branch, BranchID};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, OffsetKind, Out, ReadTxn, Text, Transact};
@@ -94,6 +95,80 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Lowers for a reading layout; `None` lowers as authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reading: Option<ReadingEnv>,
+}
+
+/// A reading layout (text reflowed into one narrow column): sizes eased around
+/// the body, halved indents, one column, tables and pictures fitted to it.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadingEnv {
+    /// The document's body size in pt, which reads at `text_size`.
+    pub body_size: f64,
+    pub text_size: f64,
+    /// The column's content width in px.
+    pub content_width: f64,
+}
+
+const READING_INDENT_SCALE: f64 = 0.5;
+/// `w:tblW` as a percentage is in fiftieths: 100%.
+const FULL_WIDTH_PCT: f64 = 5000.0;
+/// The smallest size, as a share of the reading size.
+const READING_MIN_SIZE: f64 = 0.875;
+
+impl ReadingEnv {
+    /// Sizes above the body grow by the square root of their ratio to it.
+    pub fn font_size(&self, size: f64) -> f64 {
+        if !(self.body_size > 0.0 && size > 0.0) {
+            return size;
+        }
+        let ratio = size / self.body_size;
+        let eased = if ratio > 1.0 {
+            ratio.sqrt()
+        } else {
+            ratio.max(READING_MIN_SIZE)
+        };
+        self.text_size * eased
+    }
+
+    fn run(&self, formatting: &mut RunFormatting) {
+        formatting.font_size = formatting.font_size.map(|size| self.font_size(size));
+        formatting.font_size_cs = formatting.font_size_cs.map(|size| self.font_size(size));
+    }
+
+    fn paragraph(&self, attrs: &mut ParagraphAttrs) {
+        attrs.default_font_size = attrs.default_font_size.map(|size| self.font_size(size));
+        attrs.list_marker_font_size = attrs.list_marker_font_size.map(|size| self.font_size(size));
+        if let Some(indent) = attrs.indent.as_mut() {
+            for value in [
+                &mut indent.left,
+                &mut indent.right,
+                &mut indent.first_line,
+                &mut indent.hanging,
+            ] {
+                *value = value.map(|px| px * READING_INDENT_SCALE);
+            }
+        }
+        for tab in attrs.tabs.iter_mut().flatten() {
+            tab.pos *= READING_INDENT_SCALE;
+        }
+        attrs.default_tab_stop_twips = attrs
+            .default_tab_stop_twips
+            .map(|twips| twips * READING_INDENT_SCALE);
+    }
+
+    /// Images keep their aspect ratio within the column.
+    fn fit(&self, width: f64, height: f64) -> (f64, f64) {
+        if width <= self.content_width || width <= 0.0 {
+            return (width, height);
+        }
+        (
+            self.content_width,
+            (height * self.content_width / width).round(),
+        )
+    }
 }
 
 impl RenderEnv {
@@ -377,9 +452,9 @@ fn out_width(out: &Out) -> u32 {
 }
 
 /// Moves a block that sits `units` story units later than it was lowered:
-/// every absolute document position, and the ids derived from one (a body
-/// break's story index, `shape:`/`chart:` and `sdt@` positions). Breaks in
-/// other stories (`story_id` `None`, as inside table cells) keep their ids.
+/// every absolute document position, and a body break's id (its story index).
+/// Breaks in other stories (`story_id` `None`, as inside table cells) keep
+/// their ids; shapes, charts and content controls are named by their embed.
 fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
     let delta = f64::from(units);
     let shift = |value: &mut Option<f64>| {
@@ -392,7 +467,6 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
         LayoutBlock::Table(table) => {
             shift(&mut table.pm_start);
             shift(&mut table.pm_end);
-            shift_sdt_groups(&mut table.sdt_groups, units);
             for row in &mut table.rows {
                 for cell in &mut row.cells {
                     for nested in &mut cell.blocks {
@@ -404,7 +478,6 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
         LayoutBlock::Image(image) => {
             shift(&mut image.pm_start);
             shift(&mut image.pm_end);
-            shift_sdt_groups(&mut image.sdt_groups, units);
         }
         LayoutBlock::Shape(shape) => shift_shape(shape, units),
         LayoutBlock::Chart(chart) => {
@@ -412,32 +485,23 @@ fn shift_block(block: &mut LayoutBlock, units: u32, story_id: Option<&str>) {
             shift(&mut chart.pm_end);
             shift(&mut chart.doc_start);
             shift(&mut chart.doc_end);
-            shift_sdt_groups(&mut chart.sdt_groups, units);
-            if let BlockId::Str(id) = &mut chart.id {
-                shift_position_id(id, "chart:", units);
-            }
         }
         LayoutBlock::TextBox(text_box) => {
             shift(&mut text_box.pm_start);
             shift(&mut text_box.pm_end);
-            shift_sdt_groups(&mut text_box.sdt_groups, units);
             for paragraph in &mut text_box.content {
                 shift_paragraph(paragraph, units);
             }
         }
-        LayoutBlock::SectionBreak(section_break) => {
-            shift_sdt_groups(&mut section_break.sdt_groups, units);
-        }
+        LayoutBlock::SectionBreak(_) => {}
         LayoutBlock::PageBreak(page_break) => {
             shift(&mut page_break.pm_start);
             shift(&mut page_break.pm_end);
-            shift_sdt_groups(&mut page_break.sdt_groups, units);
             shift_break_id(&mut page_break.id, story_id, "pageBreak", units);
         }
         LayoutBlock::ColumnBreak(column_break) => {
             shift(&mut column_break.pm_start);
             shift(&mut column_break.pm_end);
-            shift_sdt_groups(&mut column_break.sdt_groups, units);
             shift_break_id(&mut column_break.id, story_id, "columnBreak", units);
         }
         LayoutBlock::Unsupported => {}
@@ -453,7 +517,6 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
     };
     shift(&mut paragraph.pm_start);
     shift(&mut paragraph.pm_end);
-    shift_sdt_groups(&mut paragraph.sdt_groups, units);
     if let Some(attrs) = &mut paragraph.attrs {
         for rule in &mut attrs.horizontal_rules {
             rule.pm_start += delta;
@@ -468,9 +531,6 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
                 if let Some(Value::Object(widget)) = &mut text.inline_sdt_widget {
                     if let Some(pos) = widget.get("pos").and_then(Value::as_i64) {
                         widget.insert("pos".to_owned(), Value::from(pos + i64::from(units)));
-                    }
-                    if let Some(Value::String(group)) = widget.get_mut("groupId") {
-                        shift_position_id(group, "sdt@", units);
                     }
                 }
             }
@@ -511,42 +571,12 @@ fn shift_shape(shape: &mut ShapeBlock, units: u32) {
     {
         *value += delta;
     }
-    shift_sdt_groups(&mut shape.sdt_groups, units);
-    if let BlockId::Str(id) = &mut shape.id {
-        shift_position_id(id, "shape:", units);
-    }
     for paragraph in shape.inner_text.iter_mut().flatten() {
         shift_paragraph(paragraph, units);
-        if let BlockId::Str(id) = &mut paragraph.id {
-            shift_position_id(id, "shape:", units);
-        }
     }
     for child in &mut shape.children {
         shift_shape(child, units);
     }
-}
-
-fn shift_sdt_groups(groups: &mut Option<Vec<SdtGroup>>, units: u32) {
-    for group in groups.iter_mut().flatten() {
-        shift_position_id(&mut group.id, "sdt@", units);
-        if let Some(pos) = &mut group.pos {
-            *pos += i64::from(units);
-        }
-    }
-}
-
-/// `{prefix}{position}{rest}` with the position moved by `units`.
-fn shift_position_id(id: &mut String, prefix: &str, units: u32) {
-    let Some(rest) = id.strip_prefix(prefix) else {
-        return;
-    };
-    let digits = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    let Ok(position) = rest[..digits].parse::<u64>() else {
-        return;
-    };
-    *id = format!("{prefix}{}{}", position + u64::from(units), &rest[digits..]);
 }
 
 /// A body break's `{story}:{kind}:{story index}` id, moved by `units`.
@@ -722,7 +752,12 @@ fn lower_story<T: ReadTxn>(
                     hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
-                    let section_break = section_break_block(&values, &mut section_margins);
+                    let mut section_break = section_break_block(&values, &mut section_margins);
+                    if env.reading.is_some()
+                        && let Some(section_break) = section_break.as_mut()
+                    {
+                        section_break.columns = None;
+                    }
                     if let (Some(list_state), Some(paragraphs)) = (list_before, paragraphs.as_mut())
                         && single
                         && pushed
@@ -891,7 +926,7 @@ fn lower_story<T: ReadTxn>(
                         });
                     };
                     slot.close(&mut blocks, false);
-                    let group = lower_sdt_group(&block_sdt, txn, pm_cursor as i64);
+                    let group = lower_sdt_group(&block_sdt, txn, &child_story);
                     let (mut child_blocks, content_size) = lower_story(
                         txn,
                         &child_story,
@@ -1279,6 +1314,7 @@ fn lower_story<T: ReadTxn>(
                     let pm_offset = paragraph_pm_units;
                     let Some(block) = lower_chart_block(
                         &shared_values(&chart, txn),
+                        format!("chart:{}", embed_item_key(&chart)),
                         Some(paragraph_pm_start + 1 + u64::from(pm_offset)),
                         env,
                     ) else {
@@ -1667,6 +1703,10 @@ fn lower_table<T: ReadTxn>(
             .map(twips_to_pixels)
             .filter(|value| value.is_finite() && *value > 0.0)
     };
+    // A table wider than a reading column scales its grid to the column.
+    let fitted = env.reading.is_some_and(|reading| {
+        column_widths.iter().sum::<f64>() + indent.unwrap_or(0.0) > reading.content_width
+    });
 
     Ok((
         TableBlock {
@@ -1675,8 +1715,16 @@ fn lower_table<T: ReadTxn>(
             rows,
             column_widths: (!column_widths.is_empty()).then_some(column_widths),
             grid_widths: None,
-            width: map_number(tbl_pr, "width"),
-            width_type: map_string(tbl_pr, "widthType"),
+            width: if fitted {
+                Some(FULL_WIDTH_PCT)
+            } else {
+                map_number(tbl_pr, "width")
+            },
+            width_type: if fitted {
+                Some("pct".to_owned())
+            } else {
+                map_string(tbl_pr, "widthType")
+            },
             preferred_width: None,
             // `w:tblLayout` reaches the content-fit and no-wrap passes; the
             // column algorithm stays the grid ("legacy") one.
@@ -1689,7 +1737,7 @@ fn lower_table<T: ReadTxn>(
             background: None,
             justification: map_string(tbl_pr, "justification"),
             bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
-            indent,
+            indent: indent.filter(|_| !fitted),
             floating,
             compatibility_mode,
             cell_margin_left: table_margin("left"),
@@ -1720,6 +1768,15 @@ fn any_json(value: &Any) -> Option<Value> {
     (!value.is_null()).then_some(value)
 }
 
+/// `{client}:{clock}` of the yrs item holding an embed: the same on every
+/// replica, and it does not move when text before the embed changes.
+fn embed_item_key(map: &MapRef) -> String {
+    match AsRef::<Branch>::as_ref(map).id() {
+        BranchID::Nested(id) => format!("{}:{}", id.client.get(), id.clock),
+        BranchID::Root(name) => name.to_string(),
+    }
+}
+
 fn shared_values<T: ReadTxn>(map: &MapRef, txn: &T) -> std::collections::HashMap<String, Any> {
     map.iter(txn)
         .filter_map(|(key, value)| match value {
@@ -1739,6 +1796,10 @@ fn attrs_from_any(value: Option<&Any>) -> Attrs {
 }
 
 fn constrain_to_page(width: f64, height: f64, env: &RenderEnv) -> (f64, f64) {
+    let (width, height) = match &env.reading {
+        Some(reading) => reading.fit(width, height),
+        None => (width, height),
+    };
     let Some(limit) = env.page_content_height.filter(|limit| *limit > 0.0) else {
         return (width, height);
     };
@@ -1862,7 +1923,7 @@ fn lower_image_values(
             serde_json::from_value::<ImageRunPosition>(value).ok()
         });
 
-    ImageRun {
+    let mut image = ImageRun {
         src: map_string(values, "src").unwrap_or_default(),
         width,
         height,
@@ -1904,7 +1965,16 @@ fn lower_image_values(
         change_revision_id: formatting.change_revision_id,
         pm_start: None,
         pm_end: None,
+    };
+    // A reading column has no room to wrap around a picture: it goes in line.
+    // One in front of or behind the text stays where it is.
+    if env.reading.is_some() && !matches!(image.wrap_type.as_deref(), Some("behind" | "inFront")) {
+        image.position = None;
+        image.wrap_type = None;
+        image.css_float = None;
+        image.display_mode = Some("inline".to_owned());
     }
+    image
 }
 
 fn lower_image_run<T: ReadTxn>(
@@ -2045,9 +2115,10 @@ fn lower_shape_block<T: ReadTxn>(
     env: &RenderEnv,
 ) -> Option<ShapeBlock> {
     let values = shared_values(shape, txn);
+    let id = format!("shape:{}", embed_item_key(shape));
     if let Some(block) = map_string(&values, "shapeJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-        .and_then(|value| shapes::lower_shape_json(&value, pm_start, env))
+        .and_then(|value| shapes::lower_shape_json(&value, id.clone(), pm_start, env))
     {
         return Some(block);
     }
@@ -2069,7 +2140,7 @@ fn lower_shape_block<T: ReadTxn>(
     );
     Some(ShapeBlock {
         sdt_groups: None,
-        id: BlockId::Str(format!("shape:{pm_start}")),
+        id: BlockId::Str(id),
         shape_type,
         geometry_path,
         fill: shape_fill(&values),
@@ -2102,10 +2173,11 @@ fn lower_shape_block<T: ReadTxn>(
     })
 }
 
-/// A chart embed's block; one in a text box (`pm_start` none) has no
-/// document positions of its own.
+/// A chart embed's block, named `id`; one in a text box (`pm_start` none)
+/// has no document positions of its own.
 fn lower_chart_block(
     values: &std::collections::HashMap<String, Any>,
+    id: String,
     pm_start: Option<u64>,
     env: &RenderEnv,
 ) -> Option<ChartBlock> {
@@ -2122,11 +2194,7 @@ fn lower_chart_block(
     );
     Some(ChartBlock {
         sdt_groups: None,
-        id: BlockId::Str(
-            pm_start
-                .map(|start| format!("chart:{start}"))
-                .unwrap_or_else(|| "chart:inline".to_owned()),
-        ),
+        id: BlockId::Str(id),
         chart,
         width,
         height,
@@ -2152,9 +2220,12 @@ fn repeating_sdt_item(raw: Option<&str>) -> Option<bool> {
         .then_some(true)
 }
 
-fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, pos: i64) -> SdtGroup {
+/// A block content control's group, named by its child story so the id stays
+/// put when text before the control moves it (the overlay's widget finds the
+/// control through that story).
+fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, story: &str) -> SdtGroup {
     SdtGroup {
-        id: format!("sdt@{pos}"),
+        id: format!("sdt:{story}"),
         sdt_type: map_string(values, "sdtType").unwrap_or_else(|| "richText".to_owned()),
         tag: map_string(values, "tag"),
         alias: map_string(values, "alias"),
@@ -2169,8 +2240,8 @@ fn sdt_group_from_values(values: &std::collections::HashMap<String, Any>, pos: i
     }
 }
 
-fn lower_sdt_group<T: ReadTxn>(sdt: &MapRef, txn: &T, pos: i64) -> SdtGroup {
-    sdt_group_from_values(&shared_values(sdt, txn), pos)
+fn lower_sdt_group<T: ReadTxn>(sdt: &MapRef, txn: &T, story: &str) -> SdtGroup {
+    sdt_group_from_values(&shared_values(sdt, txn), story)
 }
 
 fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
@@ -2193,6 +2264,7 @@ fn stamp_sdt_group(blocks: &mut [LayoutBlock], group: SdtGroup) {
 
 fn inline_checkbox_widget(
     values: &std::collections::HashMap<String, Any>,
+    group_id: &str,
     pos: i64,
 ) -> Option<Value> {
     if map_string(values, "sdtType").as_deref() != Some("checkbox") {
@@ -2207,7 +2279,7 @@ fn inline_checkbox_widget(
     }
     let mut widget = JsonMap::from_iter([
         ("kind".to_owned(), Value::String("checkbox".to_owned())),
-        ("groupId".to_owned(), Value::String(format!("sdt@{pos}"))),
+        ("groupId".to_owned(), Value::String(group_id.to_owned())),
         ("pos".to_owned(), Value::from(pos)),
     ]);
     if let Some(value) = map_string(values, "tag") {
@@ -2245,6 +2317,7 @@ fn lower_inline_sdt<T: ReadTxn>(
 ) -> u32 {
     lower_inline_sdt_values(
         &shared_values(sdt, txn),
+        &format!("sdt:{}", embed_item_key(sdt)),
         env,
         story_index,
         paragraph_pm_start,
@@ -2254,9 +2327,12 @@ fn lower_inline_sdt<T: ReadTxn>(
     )
 }
 
+/// `group_id` names the control without its position: the embed's yrs item,
+/// and a nested control's index path under it.
 #[allow(clippy::too_many_arguments)]
 fn lower_inline_sdt_values(
     values: &std::collections::HashMap<String, Any>,
+    group_id: &str,
     env: &RenderEnv,
     story_index: u32,
     paragraph_pm_start: u64,
@@ -2265,14 +2341,14 @@ fn lower_inline_sdt_values(
     runs: &mut Vec<RawRun>,
 ) -> u32 {
     let absolute_pos = paragraph_pm_start + 1 + u64::from(node_pm_start);
-    let widget = inline_checkbox_widget(values, absolute_pos as i64).or(inherited_widget);
+    let widget = inline_checkbox_widget(values, group_id, absolute_pos as i64).or(inherited_widget);
     let mut content_size = 0_u32;
     let content = match values.get("content") {
         Some(Any::Array(content)) => content,
         _ => return 2,
     };
 
-    for child in content.iter() {
+    for (index, child) in content.iter().enumerate() {
         let Some(child) = any_map(child) else {
             continue;
         };
@@ -2435,6 +2511,7 @@ fn lower_inline_sdt_values(
             "sdt" => payload.map_or(2, |payload| {
                 lower_inline_sdt_values(
                     payload,
+                    &format!("{group_id}/{index}"),
                     env,
                     story_index,
                     paragraph_pm_start,
@@ -3055,9 +3132,15 @@ fn flush_paragraph(
         if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
+        if let Some(reading) = &env.reading {
+            reading.run(&mut run.formatting);
+        }
     }
     let raw_runs = coalesce_runs(raw_runs);
     let mut attrs = lower_paragraph_attrs(values, pilcrow_attributes, env, list_state);
+    if let Some(reading) = &env.reading {
+        reading.paragraph(&mut attrs);
+    }
     for raw in &raw_runs {
         if let RawRunKind::HorizontalRule(rule) = &raw.kind {
             let mut rule = rule.clone();

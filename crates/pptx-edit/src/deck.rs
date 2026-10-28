@@ -400,6 +400,102 @@ impl DeckSession {
         })
     }
 
+    /// Gives a slide its layout's text placeholders, as PowerPoint's New
+    /// Slide does: each title, subtitle, body or content placeholder of the
+    /// layout (not date, footer, slide number, header, picture, chart, table
+    /// or media ones) becomes an empty text shape tied to it by a copy of its
+    /// `p:ph`, at the layout's position, else the master's. A placeholder
+    /// with no size in either is refused. Returns the new shapes' ids.
+    pub fn add_layout_placeholders(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+    ) -> EditResult<Vec<String>> {
+        let layout_path = {
+            let txn = self.doc.transact();
+            map_string(&slide_ref(&txn, slide_id)?, &txn, "layoutPartPath")
+        };
+        let Some(layout) = layout_path.as_deref().and_then(|path| {
+            self.package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        }) else {
+            return Ok(Vec::new());
+        };
+        let master = master_for_layout(&self.package, Some(layout));
+        let mut drafts = Vec::new();
+        for node in &layout.shapes {
+            let ShapeNode::Shape(shape) = node else {
+                continue;
+            };
+            let Some(placeholder) = &shape.base.placeholder else {
+                continue;
+            };
+            if !matches!(
+                placeholder.placeholder_type.as_deref(),
+                None | Some("title" | "ctrTitle" | "subTitle" | "body" | "obj")
+            ) {
+                continue;
+            }
+            let from_master = master
+                .and_then(|master| find_placeholder(&master.shapes, placeholder))
+                .map(|node| &shape_base(node).transform);
+            let transform = [Some(&shape.base.transform), from_master]
+                .into_iter()
+                .flatten()
+                .find(|transform| transform.width > 0 && transform.height > 0)
+                .ok_or_else(|| {
+                    EditError::InvalidGeometry(format!(
+                        "the layout's placeholder {:?} has no size",
+                        shape.base.name
+                    ))
+                })?;
+            drafts.push((&shape.base.name, placeholder, transform));
+        }
+        let mut txn = self.transact_for(context);
+        let slide = slide_ref(&txn, slide_id)?;
+        let order = slide_shape_order(&slide, &txn)?;
+        let shapes = required_map(&txn, SHAPES)?;
+        let stories = required_map(&txn, STORIES)?;
+        let mut ids = Vec::with_capacity(drafts.len());
+        for (name, placeholder, transform) in drafts {
+            let shape_id = self.next_id("shape");
+            let story_id = format!("story:{shape_id}:0");
+            seed_plain_story(
+                &stories,
+                &mut txn,
+                &story_id,
+                &self.next_id("para"),
+                "",
+                &crate::TextStyle::default(),
+            );
+            let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
+            shape.insert(&mut txn, "id", shape_id.as_str());
+            shape.insert(&mut txn, "sourceId", 0_f64);
+            shape.insert(&mut txn, "kind", "shape");
+            shape.insert(&mut txn, "name", name.as_str());
+            shape.insert(&mut txn, "x", transform.x as f64);
+            shape.insert(&mut txn, "y", transform.y as f64);
+            shape.insert(&mut txn, "width", transform.width as f64);
+            shape.insert(&mut txn, "height", transform.height as f64);
+            shape.insert(&mut txn, "rotationDeg", 0_f64);
+            shape.insert(&mut txn, "flipH", false);
+            shape.insert(&mut txn, "flipV", false);
+            shape.insert(&mut txn, "geometry", "rect");
+            insert_json(&shape, &mut txn, "placeholderJson", Some(placeholder))?;
+            shape.insert(
+                &mut txn,
+                "textStories",
+                string_array(std::slice::from_ref(&story_id)),
+            );
+            shape.insert(&mut txn, "children", string_array(&[]));
+            order.push_back(&mut txn, shape_id.as_str());
+            ids.push(shape_id);
+        }
+        Ok(ids)
+    }
+
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
         crate::model::validate_xml_text(text)?;
         self.automatic_undo_barrier();

@@ -325,6 +325,26 @@ impl DeckSession {
     }
 
     pub(crate) fn transact_for(&self, context: &EditCtx) -> yrs::TransactionMut<'_> {
+        if context.origin == EditOrigin::Local {
+            self.undo.borrow_mut().begin_edit();
+        }
+        self.transact_with_origin(context)
+    }
+
+    /// [`Self::transact_for`] for typing into `story_id`: consecutive typing in one
+    /// story groups by the capture window instead of standing alone.
+    pub(crate) fn transact_typing_for(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+    ) -> yrs::TransactionMut<'_> {
+        if context.origin == EditOrigin::Local {
+            self.undo.borrow_mut().begin_typing(story_id);
+        }
+        self.transact_with_origin(context)
+    }
+
+    fn transact_with_origin(&self, context: &EditCtx) -> yrs::TransactionMut<'_> {
         match context.origin {
             EditOrigin::Local => self.doc.transact_mut_with(self.client_id),
             EditOrigin::Agent => self.doc.transact_mut_with("pptx:agent"),

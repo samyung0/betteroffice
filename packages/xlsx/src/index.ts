@@ -38,6 +38,7 @@ export {
   clampScroll,
   uniformOffsets,
   zoomedViewport,
+  MAX_SCROLL_EXTENT_PX,
 } from './viewport/index';
 
 export type {
@@ -52,6 +53,7 @@ export type {
 } from './selection/index';
 
 export {
+  activeCell,
   cellAddress,
   columnLetter,
   selectionAt,
@@ -60,6 +62,7 @@ export {
   cellCount,
   extendTo,
   moveFocus,
+  selectAll,
   selectionKeyReducer,
 } from './selection/index';
 
@@ -73,7 +76,7 @@ export {
 } from './hyperlinks/index';
 
 export type { CellInput } from './clipboard/index';
-export { toTsv, fromTsv } from './clipboard/index';
+export { toTsv, fromTsv, joinTsv } from './clipboard/index';
 
 export type {
   A11yStrings,
@@ -85,7 +88,7 @@ export type {
 } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 
-export { paintDisplayList } from './render/canvas2d';
+export { cellFont, paintDisplayList } from './render/canvas2d';
 export {
   initWasm,
   isWasmAvailable,
@@ -95,6 +98,12 @@ export {
   wasmVersion,
 } from './wasm/loader';
 export { StaleProposalError } from './wasm/staleProposal';
+export {
+  CellTextTooLongError,
+  EditTooLargeError,
+  RangeTooLargeError,
+  UnparsedFormulaError,
+} from './wasm/refusals';
 export {
   openWorkbookWorker,
   SheetGoneError,

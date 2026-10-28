@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::block::BlockContent;
-use crate::borders::{Borders, parse_border_spec};
+use crate::borders::{Borders, BordersFields, parse_border_spec};
 use crate::formatting::{
     CellMargins, ConditionalFormatStyle, FloatingTableProperties, TableCellFormatting,
     TableFormatting, TableLook, TableMeasurement, TableRowFormatting,
@@ -132,7 +132,7 @@ pub fn parse_table_measurement(element: Option<&XmlElement>) -> Option<TableMeas
 
 pub fn parse_document_table_borders(element: Option<&XmlElement>) -> Option<Borders> {
     let element = element?;
-    let borders = Borders {
+    let borders = Borders::from(BordersFields {
         top: parse_border_spec(element.child("w", "top")),
         bottom: parse_border_spec(element.child("w", "bottom")),
         left: parse_border_spec(element.child("w", "left")),
@@ -143,8 +143,8 @@ pub fn parse_document_table_borders(element: Option<&XmlElement>) -> Option<Bord
         end: parse_border_spec(element.child("w", "end")),
         tl2br: parse_border_spec(element.child("w", "tl2br")),
         tr2bl: parse_border_spec(element.child("w", "tr2bl")),
-        ..Borders::default()
-    };
+        ..BordersFields::default()
+    });
     (borders != Borders::default()).then_some(borders)
 }
 
@@ -846,14 +846,14 @@ mod tests {
         let floating = parsed.floating.unwrap();
         assert_eq!(floating.tblp_x, Some(-20.0));
         assert_eq!(floating.tblp_x_spec.as_deref(), Some("outside"));
-        let borders = parsed.borders.unwrap();
+        let borders = *parsed.borders.unwrap().0;
         assert_eq!(borders.left.unwrap().style, "single");
         assert_eq!(borders.start.unwrap().style, "double");
         assert_eq!(borders.tl2br.unwrap().style, "dashed");
         let look = parsed.look.unwrap();
         assert_eq!(look.first_row, Some(false));
         assert_eq!(look.no_v_band, Some(true));
-        let fill = parsed.shading.unwrap().fill.unwrap();
+        let fill = parsed.shading.unwrap().0.fill.unwrap();
         assert_eq!(fill.rgb, None);
         assert_eq!(fill.theme_color.as_deref(), Some("accent1"));
 

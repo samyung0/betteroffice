@@ -469,29 +469,8 @@ impl DeleteSet for IdSet {
         // try to merge deleted / gc'd items
         for (&client, range) in self.0.iter() {
             let (blocks, work) = store.blocks.client_blocks_and_work(client);
-            for (r, _) in range.iter().rev() {
-                // Patched for BetterOffice: past the work budget, merge no more.
-                if work.over() {
-                    break;
-                }
-                // start with merging the item next to the last deleted item
-                let mut si =
-                    (blocks.len() - 1).min(1 + blocks.find_index(r.end - 1).unwrap_or_default());
-                let mut block = &blocks[si];
-
-                let mut valid_range = usize::MAX..usize::MIN;
-
-                while si > 0 && block.clock_start() >= r.start {
-                    valid_range.start = valid_range.start.min(si);
-                    valid_range.end = valid_range.end.max(si);
-                    si -= 1;
-                    block = &blocks[si];
-                }
-
-                if valid_range.start != usize::MAX && valid_range.end != usize::MIN {
-                    blocks.squash_left_range_compaction(valid_range.start..=valid_range.end, work);
-                }
-            }
+            // Patched for BetterOffice: one removal pass for all of the ranges.
+            blocks.squash_deleted_ranges(range.iter().rev().map(|(r, _)| r), work);
         }
     }
 

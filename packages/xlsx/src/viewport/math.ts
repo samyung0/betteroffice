@@ -124,6 +124,15 @@ export interface ScrollBox {
 }
 
 /**
+ * The tallest (and widest) scroll area in CSS pixels, at any zoom: under every
+ * browser's element size limit (Firefox about 17.9M px; Chrome about 33.5M
+ * device px, half of it at 200% page zoom), so a grid stays bounded the same
+ * way everywhere, as Google Sheets' does; cells past it are selectable but
+ * cannot be scrolled to.
+ */
+export const MAX_SCROLL_EXTENT_PX = 15_000_000;
+
+/**
  * The part of the sheet a scroll box shows at `zoom` (1 = 100%), in sheet
  * pixels: the viewport a display list is built for, painted at `dpr * zoom`.
  * Its `x`/`y` stay put across a zoom change when the box scrolls to

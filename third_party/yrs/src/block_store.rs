@@ -6,9 +6,9 @@ use crate::utils::client_hasher::ClientHasher;
 use crate::*;
 use std::cell::UnsafeCell;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::BuildHasherDefault;
-use std::ops::{Index, Range, RangeInclusive};
+use std::ops::{Index, Range};
 use std::vec::Vec;
 
 /// A resizable list of blocks inserted by a single client.
@@ -54,11 +54,6 @@ impl Work {
     }
 }
 
-struct SquashBlockRange {
-    range: Range<usize>,
-    gc_block: bool,
-}
-
 unsafe impl Send for ClientBlockList {}
 unsafe impl Sync for ClientBlockList {}
 
@@ -82,15 +77,23 @@ impl ClientBlockList {
 
     /// Given a block's identifier clock value, return an offset under which this block could be
     /// found using binary search algorithm, or a index under which this block should be inserted.
+    ///
+    /// Patched for BetterOffice: `None` for a clock the list does not hold (an
+    /// empty list, a clock past its last block or before its first) instead
+    /// of a panic.
     pub(crate) fn find_index(&self, clock: u32) -> Option<usize> {
         let mut left = 0;
-        let mut right = self.inner.len() - 1;
+        let mut right = self.inner.len().checked_sub(1)?;
         let mut block = unsafe { &*self.inner[right].get() };
         let (mut start, mut end) = block.clock_range();
         if start == clock {
             // a common case is to just append a block at the end, so check first if we can do that
             Some(right)
+        } else if clock > end {
+            None
         } else {
+            // Here `clock <= end` and `clock != start`, so `end > 0` and the
+            // guess is the first block or the last.
             let mut mid = ((clock / end) * right as u32) as usize;
             while left <= right {
                 block = unsafe { &*self.inner[mid].get() };
@@ -101,7 +104,7 @@ impl ClientBlockList {
                     }
                     left = mid + 1;
                 } else {
-                    right = mid - 1;
+                    right = mid.checked_sub(1)?;
                 }
                 mid = (left + right) / 2;
             }
@@ -139,120 +142,88 @@ impl ClientBlockList {
         ClientBlockListIter(self.inner.iter())
     }
 
-    /// Attempts to squash multiple blocks within the given range of indices.
-    /// For each block in the `indices_range`, it will check if the block can be squashed with its left neighbor.
-    /// If consecutive blocks are squashable, they are tracked in a range and processed in bulk to compact
-    /// the list efficiently. The function supports both GC and Block cells.
-    ///
-    /// - For GC blocks: If blocks are consecutive, the range is extended and squashing is deferred until
-    ///   all squashable blocks are identified.
-    ///
-    /// - For Block cells: The function attempts to squash the contents of the right block into the left block.
-    ///   If successful, it tracks the blocks to be removed and rewires references in the parent node if necessary.
-    ///   Block cells currently don't support range compaction due to the complexity of squashing Blocks.
-    ///
-    /// The function processes all blocks in reverse order (from the end of the range to the start),
-    /// compacts the list by removing squashed blocks, and updates references for any parent-child relationships
-    /// affected by the squashing.
-    ///
-    /// # Arguments
-    /// * `indices_range` - A range of indices, where each index represents a block in the list to be examined
-    ///   for squashing. The range must be non-empty (`start` must be <= `end`).
-    ///
-    /// # Panics
-    /// * Panics if `indices_range.start()` is greater than `indices_range.end()`.
-    ///
-    pub(crate) fn squash_left_range_compaction(
+    /// Patched for BetterOffice: merges the blocks around each of a commit's
+    /// deleted `ranges` (given from the last) with their left neighbours as
+    /// upstream's per-range `squash_left_range_compaction` did, then removes
+    /// every merged block in one pass. Removing them range by range moved the
+    /// list's tail once per range, quadratic in a commit that deletes in many
+    /// places (a DOCX seed deleted a placeholder in each of thousands of
+    /// stories). Each merged block went into the nearest kept block on its
+    /// left, so the indexes a range reads skip merged ones, as they would be
+    /// once removed.
+    pub(crate) fn squash_deleted_ranges<'a>(
         &mut self,
-        indices_range: RangeInclusive<usize>,
+        ranges: impl Iterator<Item = &'a Range<u32>>,
         work: &mut Work,
     ) {
-        assert!(indices_range.start() <= indices_range.end());
-        let mut squash_intervals: Vec<SquashBlockRange> = Vec::new();
-
-        for right_index in indices_range.rev() {
-            let (l, r) = self.inner.split_at_mut(right_index);
-            let left = unsafe { &mut *l[l.len() - 1].get() };
-            let right = unsafe { &mut *r[0].get() };
-
-            match (left, right) {
-                (Block::GC(_), Block::GC(_)) => {
-                    let mut extended = false;
-                    match squash_intervals.last_mut() {
-                        Some(last_range) if last_range.gc_block => {
-                            // Extend if consecutive
-                            if last_range.range.start - 1 == right_index {
-                                last_range.range.start = right_index;
-                                extended = true;
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    if !extended {
-                        // Add new range if no consecutive block found
-                        squash_intervals.push(SquashBlockRange {
-                            range: Range {
-                                start: right_index,
-                                end: right_index,
-                            },
-                            gc_block: true,
-                        });
-                    }
-                }
-                (Block::Item(left), Block::Item(right)) => {
-                    let mut left = ItemPtr::from(left);
-                    let right = ItemPtr::from(right);
-                    if left.try_squash(right) {
-                        // Merge right into left Blocks one by one.
-                        squash_intervals.push(SquashBlockRange {
-                            range: Range {
-                                start: right_index,
-                                end: right_index,
-                            },
-                            gc_block: false,
-                        });
-                    }
-                }
-                _ => { /* cannot squash incompatible types */ }
+        let mut merged: BTreeSet<usize> = BTreeSet::new();
+        let kept_left = |merged: &BTreeSet<usize>, mut at: usize| loop {
+            at -= 1;
+            if !merged.contains(&at) {
+                return at;
             }
-        }
-
-        for squash_range in &squash_intervals {
-            let start_idx = squash_range.range.start;
-            let end_idx = squash_range.range.end;
-            assert!(start_idx <= end_idx);
-
-            let (left_slice, right_slice) = self.inner.split_at_mut(end_idx);
-
-            // The start_idx - 1 element is the one want to squash into.
-            let left = unsafe { &mut *left_slice[start_idx - 1].get() };
-            let right = unsafe { &*right_slice[0].get() };
-
-            match (left, right) {
-                (Block::GC(left), Block::GC(right)) => {
-                    left.len = right.clock - left.clock + right.len;
-                }
-                (Block::Item(left), Block::Item(right)) => {
-                    let left = ItemPtr::from(left);
-                    let right = ItemPtr::from(right.as_ref());
-                    if let Some(key) = right.parent_sub.as_deref() {
-                        if let TypePtr::Branch(mut parent) = right.parent {
-                            if let Some(e) = parent.map.get_mut(key) {
-                                if right == *e {
-                                    *e = ItemPtr::from(left);
+        };
+        for r in ranges {
+            // Past the work budget, merge no more.
+            if work.over() {
+                break;
+            }
+            // Start with the block after the range's last deleted one.
+            let mut found = self.find_index(r.end - 1).unwrap_or_default();
+            while merged.contains(&found) {
+                found -= 1;
+            }
+            let mut si = (found + 1..self.inner.len())
+                .find(|at| !merged.contains(at))
+                .unwrap_or(found);
+            let mut rights = Vec::new();
+            while si > 0 && self[si].clock_start() >= r.start {
+                rights.push(si);
+                si = kept_left(&merged, si);
+            }
+            work.scanned(rights.len());
+            for right_index in rights {
+                let left_index = kept_left(&merged, right_index);
+                let left = unsafe { &mut *self.inner[left_index].get() };
+                let right = unsafe { &mut *self.inner[right_index].get() };
+                match (left, right) {
+                    (Block::GC(left), Block::GC(right)) => {
+                        left.len = right.clock - left.clock + right.len;
+                        merged.insert(right_index);
+                    }
+                    (Block::Item(left), Block::Item(right)) => {
+                        let mut left = ItemPtr::from(left);
+                        let right = ItemPtr::from(right);
+                        if left.try_squash(right) {
+                            if let Some(key) = right.parent_sub.as_deref() {
+                                if let TypePtr::Branch(mut parent) = right.parent {
+                                    if let Some(e) = parent.map.get_mut(key) {
+                                        if right == *e {
+                                            *e = left;
+                                        }
+                                    }
                                 }
                             }
+                            merged.insert(right_index);
                         }
                     }
+                    _ => { /* cannot squash incompatible types */ }
                 }
-                _ => { /* cannot squash incompatible types */ }
             }
-
-            // Finally, remove the BlockCells in bulk.
-            work.moved(self.inner.len() - end_idx - 1);
-            self.inner.drain(start_idx..=end_idx);
         }
+        // Remove the merged blocks, moving each kept one at most once.
+        let Some(&first) = merged.first() else {
+            return;
+        };
+        work.moved(self.inner.len() - first);
+        let mut write = first;
+        for read in first..self.inner.len() {
+            if !merged.contains(&read) {
+                self.inner.swap(write, read);
+                write += 1;
+            }
+        }
+        self.inner.truncate(write);
     }
 
     /// Attempts to squash block at a given `index` with a corresponding block on its left side.
@@ -583,5 +554,46 @@ impl std::fmt::Display for BlockStore {
             s.field(&k.to_string(), v);
         }
         s.finish()
+    }
+}
+
+#[cfg(test)]
+mod find_index_test {
+    use super::ClientBlockList;
+    use crate::block::{Block, BlockRange, ClientID, ID};
+
+    /// Collected runs of these lengths from clock 0.
+    fn list(lens: &[u32]) -> ClientBlockList {
+        let mut list = ClientBlockList::default();
+        let mut clock = 0;
+        for &len in lens {
+            list.push(Block::GC(BlockRange::new(
+                ID::new(ClientID::new(1), clock),
+                len,
+            )));
+            clock += len;
+        }
+        list
+    }
+
+    // Patched for BetterOffice: a clock the list does not hold finds nothing.
+    #[test]
+    fn finds_held_clocks_only() {
+        assert_eq!(list(&[]).find_index(0), None);
+        let one = list(&[1]);
+        assert_eq!(one.find_index(0), Some(0));
+        assert_eq!(one.find_index(1), None);
+        assert_eq!(one.find_index(5), None);
+        let several = list(&[2, 1, 3, 1]);
+        for (clock, &owner) in [0, 0, 1, 2, 2, 2, 3].iter().enumerate() {
+            assert_eq!(several.find_index(clock as u32), Some(owner));
+        }
+        for clock in [7, 13, 1_000, u32::MAX] {
+            assert_eq!(several.find_index(clock), None);
+        }
+        let mut late = ClientBlockList::default();
+        late.push(Block::GC(BlockRange::new(ID::new(ClientID::new(1), 4), 2)));
+        assert_eq!(late.find_index(1), None);
+        assert_eq!(late.find_index(5), Some(0));
     }
 }

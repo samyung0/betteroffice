@@ -150,9 +150,11 @@ pub enum RunContent {
     },
 }
 
+crate::boxed!(FieldFormData(FieldFormDataFields));
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FieldFormData {
+pub struct FieldFormDataFields {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

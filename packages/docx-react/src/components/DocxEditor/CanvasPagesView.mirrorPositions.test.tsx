@@ -46,9 +46,19 @@ function mirrorPositions(container: HTMLElement): string[][] {
 
 const settle = () => act(() => new Promise((resolve) => setTimeout(resolve, 400)));
 
+/** A page's mirror and overlay roots, which a rebuild replaces. */
+function chromeNodes(container: HTMLElement, pageIndex: number): Element[] {
+  const page = container.querySelectorAll('.canvas-page')[pageIndex]!;
+  return [
+    page.querySelector('.layout-page-mirror')!,
+    page.querySelector('.layout-interactive-overlay')!,
+  ];
+}
+
 // An edit before later pages only shifts their positions, which the owned
 // apply does in place (same page object): their mirrors must still carry the
-// positions a fresh layout gives them (RenderedDomContext reads them).
+// positions a fresh layout gives them (RenderedDomContext reads them), and
+// keep their nodes rather than rebuild.
 for (const edit of ['peer', 'local'] as const) {
   test(`after a ${edit} insert before later pages, every mirror holds a fresh layout's positions`, async () => {
     const native = createEditSession(9310);
@@ -65,9 +75,13 @@ for (const edit of ['peer', 'local'] as const) {
         null,
         decodeFrameDelta(native.relayout_frame(request, '{}', 0))
       );
-      const shown = render(<CanvasPagesView displayList={frame.displayList} frame={frame} glyphOutlineProvider={false} />);
+      const shown = render(
+        <CanvasPagesView displayList={frame.displayList} frame={frame} glyphOutlineProvider={false} interactive />
+      );
       await settle();
       const later = frame.pages[1]!.page;
+      const laterNodes = chromeNodes(shown.container, 1);
+      expect(laterNodes.every(Boolean)).toBe(true);
 
       const [opening] = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string }>;
       let delta: Uint8Array;
@@ -80,8 +94,13 @@ for (const edit of ['peer', 'local'] as const) {
       }
       frame = applyFrameDeltaOwned(frame, decodeFrameDelta(delta));
       expect(frame.pages[1]!.page).toBe(later);
-      shown.rerender(<CanvasPagesView displayList={frame.displayList} frame={frame} glyphOutlineProvider={false} />);
+      shown.rerender(
+        <CanvasPagesView displayList={frame.displayList} frame={frame} glyphOutlineProvider={false} interactive />
+      );
       await settle();
+      // identity, not toEqual: a deep compare of two DOM nodes never ends
+      const after = chromeNodes(shown.container, 1);
+      expect(after.map((node, index) => node === laterNodes[index])).toEqual([true, true]);
 
       const fresh = createEditSession(9311);
       try {

@@ -1558,10 +1558,7 @@ fn format_range_lowers_the_word_value_shapes() {
     assert_eq!(map_get(color, "rgb"), Some(&Any::from("FF0000")));
     assert_eq!(map_get(color, "themeColor"), Some(&Any::Null));
     // highlight: hex mapped onto Word's named palette.
-    assert_eq!(
-        map_get(attrs.get("highlight").unwrap(), "color"),
-        Some(&Any::from("yellow"))
-    );
+    assert_eq!(attrs.get("highlight"), Some(&Any::from("yellow")));
 
     // Theme color replaces rgb (XOR).
     doc.format_range(

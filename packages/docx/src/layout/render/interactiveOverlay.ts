@@ -55,6 +55,29 @@ interface WidgetExtent {
   rect: GeoRect;
 }
 
+/** Inline widget buttons and the attrs whose `pos` they carry. */
+const overlayWidgets = new WeakMap<
+  HTMLElement,
+  ReadonlyArray<{ button: HTMLElement; attrs: InlineSdtWidgetAttrs }>
+>();
+
+/**
+ * Rewrites the widget positions of an overlay built by
+ * {@link buildInteractiveOverlayPage} after its page's primitives were shifted
+ * in place (`applyFrameDeltaOwned` moves `inlineSdtWidget.pos` on the same
+ * attrs objects), instead of rebuilding it. False when the overlay holds no
+ * record.
+ */
+export function syncInteractiveOverlayPositions(root: HTMLElement): boolean {
+  const widgets = overlayWidgets.get(root);
+  if (!widgets) return false;
+  for (const { button, attrs } of widgets) {
+    const pos = String(attrs.pos);
+    if (button.dataset.sdtPos !== pos) button.dataset.sdtPos = pos;
+  }
+  return true;
+}
+
 /**
  * Build the visible/pointer-active overlay for one page.
  *
@@ -95,9 +118,13 @@ export function buildInteractiveOverlayPage(
   }
 
   const widgets = collectWidgetExtents(primitives);
+  const buttons = [];
   for (const extent of widgets.values()) {
-    root.appendChild(renderInlineWidget(extent, doc, options.labels));
+    const button = renderInlineWidget(extent, doc, options.labels);
+    root.appendChild(button);
+    buttons.push({ button, attrs: extent.attrs });
   }
+  overlayWidgets.set(root, buttons);
   return root;
 }
 

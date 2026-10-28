@@ -132,7 +132,12 @@ Text:
 - a split at a UTF-16 offset inside a surrogate pair, at a slice boundary or
   in an `ItemContent` split, gives two replacement characters as Yjs does,
   instead of panicking (`split_str_utf16_lossy` in `src/block.rs`, with a unit
-  test).
+  test);
+- `find_position` (`src/types/text.rs`) takes a live item's length, which is
+  its content's UTF-16 length, in a UTF-16 walk instead of counting each
+  string's characters again, so placing an edit costs one step per item
+  before it (positions across surrogate pairs are tested in
+  `crates/docx-edit/tests/raw_ops_surrogate_boundaries.rs`, which CI runs).
 
 Transactions and updates:
 
@@ -147,6 +152,12 @@ Transactions and updates:
   transactions count it as made before them, so changes to it raise events
   (upstream counted it as new and raised none). Tests are in
   `crates/docx-edit/tests/yrs_transaction_work.rs`, which pins the skip case;
+- a commit merges the blocks around each deleted range as upstream does, then
+  removes every merged block from a client's list in one pass
+  (`ClientBlockList::squash_deleted_ranges` in `src/block_store.rs`, called
+  by `try_squash_with` in `src/id_set.rs`); upstream moved the list's tail
+  once per range, quadratic in a commit that deletes in many places (tested
+  in `crates/docx-edit/tests/yrs_squash_once.rs`);
 - a pending update waits on each client's held state (`BlockStore::get_state`
   in `src/block_store.rs`, used by `src/update.rs` and `src/transaction.rs`)
   instead of its clock past skips, and on every client its stacked structs
@@ -184,6 +195,15 @@ Transactions and updates:
 - `BlockStore::push` (`src/block_store.rs`) replaces only a skip; a block
   already placed stays, so it is never freed while its sequence links it
   (tests in `crates/pptx-edit/tests/yrs_placement.rs`);
+- an item next to a collected unit (its origin or right origin) is collected
+  too, as in Yjs 13.6.31's `Item.getMissing` (`missing_dependency` in
+  `src/update.rs`; tests in `crates/pptx-edit/tests/yrs_hostile.rs`);
+- `ClientBlockList::find_index` (`src/block_store.rs`) answers `None` for a
+  clock its list does not hold (an empty list, a clock past its last block
+  or before its first) instead of panicking, so `Store::get_item`,
+  `get_block_range` and `blocks_in` find nothing for an id the document does
+  not hold (tests in `crates/pptx-edit/tests/yrs_hostile.rs`, with a unit
+  test);
 - `TransactionMut::drop` (`src/transaction.rs`) skips the commit while a
   panic unwinds through it, so a second panic cannot abort the process; the
   document must then be dropped (tests in
@@ -221,6 +241,14 @@ Undo and garbage collection:
   `crates/pptx-edit/tests/yrs_undo.rs` and `convergence.rs`,
   `crates/docx-edit/tests/yrs_memory.rs` and `concurrent_undo.rs`, and
   `crates/betteroffice-xlsx/tests/stable_collaboration.rs`);
+- `Item::redo` (`src/block.rs`) keeps the right neighbour a restored list
+  item's trace finds only when it lies after the item's left neighbour, else
+  takes the item now after the left, as a local insert does; a traced right
+  with more than 4,096 items between the left and it gives way to the item
+  after the left too. A trace through a copy an earlier Undo made can land at
+  or before the left, and a copy whose right origin comes before its origin
+  is placed by each replica's block boundaries, so peers and reloads read it
+  elsewhere (tests in `crates/pptx-edit/tests/yrs_undo.rs`, which CI runs);
 - `UndoManager::clear_undo` and `clear_redo` (`src/undo.rs`) clear only their
   own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`).
 
@@ -238,7 +266,11 @@ Read-only accessors, for structure walks and guards that compute no index:
   item right of a deleted one, so the DOCX editor finds the field an edit
   ends at) (`src/store.rs`, with unit tests and tests in `crates/docx-edit`);
 - `StickyIndex::get_offsets` (`src/sticky_index.rs`), which resolves many
-  indexes in one walk as `get_offset` resolves each, with unit tests.
+  indexes in one walk as `get_offset` resolves each, with unit tests;
+- `StickyIndex::at_many` (`src/sticky_index.rs`), which places many indexes in
+  one walk as `at` places each, so a DOCX seed anchors all of a story's
+  bookmarks and field boundaries in linear time (tested in
+  `crates/docx-edit/tests/yrs_sticky_batch.rs`).
 
 Its `Cargo.toml` also has a `[lints]` block that allows its upstream warnings.
 
@@ -250,3 +282,32 @@ crates.io depend on the registry crate.
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 
 License: MIT (`third_party/yrs/LICENSE`).
+
+---
+
+## xlsx-populate blank workbook
+
+`crates/office-service/starters/blank.xlsx` is the blank workbook Microsoft
+Excel saved for xlsx-populate (https://github.com/dtjohnson/xlsx-populate,
+`blank/blank.xlsx`), with the saving machine's path (`x15ac:absPath`) removed
+from `xl/workbook.xml`. It is compiled into the `betteroffice-office-service`
+crate via `include_bytes!` as the workbook the agent's `create` starts from.
+
+Copyright (c) 2015 Dave Johnson.
+
+License: MIT (`crates/office-service/starters/NOTICE.md`).
+
+---
+
+## python-docx default template
+
+`crates/office-service/starters/blank.docx` is python-docx's default template
+(https://github.com/python-openxml/python-docx,
+`src/docx/templates/default.docx`), with its core properties emptied
+(`docProps/core.xml`). It is compiled into the
+`betteroffice-office-service` crate via `include_bytes!` as the document the
+agent's `create` starts from.
+
+Copyright (c) 2013 Steve Canny.
+
+License: MIT (`crates/office-service/starters/NOTICE.md`).

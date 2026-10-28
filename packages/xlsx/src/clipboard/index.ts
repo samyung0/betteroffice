@@ -55,6 +55,11 @@ export function toTsv(cells: CellInput[][]): string {
   return cells.map((row) => row.map(encodeCell).join(FIELD_SEP)).join(ROW_SEP);
 }
 
+/** One TSV of the row blocks {@link toTsv} encoded piece by piece, in order. */
+export function joinTsv(pieces: string[]): string {
+  return pieces.join(ROW_SEP);
+}
+
 /**
  * Parse clipboard TSV back into a row-major grid of raw strings. Handles the
  * Excel dialect: `"`-quoted fields with doubled quotes and embedded tabs/

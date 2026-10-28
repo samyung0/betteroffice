@@ -142,6 +142,83 @@ pub fn unzip_parts_where(
     Ok(parts)
 }
 
+/// Why [`Package::read`] answered no part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartError {
+    /// It inflates past the bytes the read allows.
+    TooLarge(String),
+    /// Its entry does not read (a damaged entry, a bad checksum).
+    Unreadable(String),
+}
+
+impl std::fmt::Display for PartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge(why) | Self::Unreadable(why) => f.write_str(why),
+        }
+    }
+}
+
+/// A package opened once to read several parts by path: its central
+/// directory parsed and its part names normalized once, however many parts
+/// are read (review r2 L3).
+pub struct Package<'a> {
+    archive: zip::ZipArchive<Cursor<&'a [u8]>>,
+    /// Each normalized part name's first entry.
+    names: std::collections::HashMap<String, usize>,
+}
+
+impl<'a> Package<'a> {
+    pub fn open(data: &'a [u8]) -> Result<Self, String> {
+        let archive =
+            zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
+        if archive.len() > MAX_ENTRY_COUNT {
+            return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
+        }
+        let mut names = std::collections::HashMap::new();
+        for index in 0..archive.len() {
+            if let Some(name) = archive
+                .name_for_index(index)
+                .and_then(|name| normalized_security_path(&name.ok()?))
+            {
+                names.entry(name).or_insert(index);
+            }
+        }
+        Ok(Self { archive, names })
+    }
+
+    /// One part's bytes, found by its path as OPC names parts (no leading
+    /// slash, case-insensitive), without inflating the rest; `Ok(None)` when
+    /// the package holds no such part. A part inflating past `max_bytes` is
+    /// refused as a bomb is by [`unzip_parts`].
+    pub fn read(&mut self, path: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, PartError> {
+        let Some(&index) = normalized_security_path(path.trim_start_matches('/'))
+            .and_then(|wanted| self.names.get(&wanted))
+        else {
+            return Ok(None);
+        };
+        let budget = max_bytes.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
+        let mut entry = self
+            .archive
+            .by_index(index)
+            .map_err(|e| PartError::Unreadable(format!("bad zip entry: {e}")))?;
+        let mut buf = Vec::new();
+        // Read no more than one byte past the budget, whatever the entry says
+        // its size is.
+        entry
+            .by_ref()
+            .take(budget + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| PartError::Unreadable(format!("read failed for {path}: {e}")))?;
+        if buf.len() as u64 > budget {
+            return Err(PartError::TooLarge(format!(
+                "{path} inflates past {budget} bytes"
+            )));
+        }
+        Ok(Some(buf))
+    }
+}
+
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
 pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
     rezip_parts_borrowed(entries)
@@ -583,6 +660,105 @@ mod tests {
                 .unwrap_err()
                 .contains("duplicate")
         );
+    }
+
+    /// Security regression (Q240 review r1 M4, r2 M1, r4 L1): one part's
+    /// read stops at its byte budget however small the entry compresses: an
+    /// entry whose checksum is wrong answers "inflates past" because the read
+    /// never reaches its end (read whole, it fails its checksum), finds a
+    /// part by its normalized name only (stored names normalized too, so an
+    /// entry stored in other case or with backslashes is found by its OPC
+    /// name), and never answers a traversal or drive name, requested or
+    /// stored.
+    #[test]
+    fn a_part_read_holds_its_budget_and_refuses_traversal_names() {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, bytes) in [
+                ("word/media/zeros.bin", vec![0_u8; 1 << 20]),
+                ("word/media/ones.bin", vec![1_u8; 1 << 20]),
+                ("Word/Media/Upper.BIN", b"upper".to_vec()),
+                ("word\\media\\back.bin", b"back".to_vec()),
+                ("../escape.xml", b"x".to_vec()),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut zipped = cursor.into_inner();
+        assert!(zipped.len() < 1 << 14, "{}", zipped.len());
+        // ones.bin's stored checksum, wherever the zip records it, made wrong.
+        let crc = zip::ZipArchive::new(Cursor::new(&zipped))
+            .unwrap()
+            .by_name("word/media/ones.bin")
+            .unwrap()
+            .crc32()
+            .to_le_bytes();
+        let places: Vec<usize> = (0..zipped.len() - 3)
+            .filter(|&at| zipped[at..at + 4] == crc)
+            .collect();
+        assert!(places.len() >= 2, "{places:?}");
+        for at in places {
+            zipped[at] ^= 0xff;
+        }
+        let read = |name: &str, max_bytes: u64| {
+            Package::open(&zipped)
+                .unwrap()
+                .read(name, max_bytes)
+                .map_err(|error| error.to_string())
+        };
+        let whole = read("word/media/ones.bin", 2 << 20).unwrap_err();
+        assert!(whole.contains("checksum"), "{whole}");
+        let error = read("word/media/ones.bin", 1_000).unwrap_err();
+        assert!(error.contains("inflates past 1000 bytes"), "{error}");
+        assert_eq!(
+            read("/WORD/media/./zeros.bin", 1 << 20)
+                .unwrap()
+                .map(|bytes| bytes.len()),
+            Some(1 << 20)
+        );
+        assert_eq!(
+            read("word/media/upper.bin", 1 << 20).unwrap(),
+            Some(b"upper".to_vec())
+        );
+        assert_eq!(
+            read("word/media/back.bin", 1 << 20).unwrap(),
+            Some(b"back".to_vec())
+        );
+        for name in [
+            "escape.xml",
+            "../escape.xml",
+            "C:/escape.xml",
+            "word/missing.xml",
+        ] {
+            assert_eq!(read(name, 1 << 20).unwrap(), None, "{name}");
+        }
+    }
+
+    /// One opened package reads several parts by normalized name, and says
+    /// whether a part it refuses is too large or unreadable (review r2 L3,
+    /// N4).
+    #[test]
+    fn a_package_reads_several_parts_from_one_open() {
+        let zipped = rezip_parts(&sample()).unwrap();
+        let mut package = Package::open(&zipped).unwrap();
+        assert_eq!(
+            package.read("/Word/Document.xml", 100).unwrap(),
+            Some(b"<w:document/>".to_vec())
+        );
+        assert_eq!(
+            package.read("word/media/image1.png", 100).unwrap(),
+            Some(vec![0x89, 0x50, 0x4e, 0x47])
+        );
+        assert!(matches!(
+            package.read("word/document.xml", 3),
+            Err(PartError::TooLarge(_))
+        ));
+        assert_eq!(package.read("word/none.xml", 100).unwrap(), None);
     }
 
     fn stored_zip(entries: &[(String, Vec<u8>)], stored: &str) -> Vec<u8> {

@@ -1,22 +1,38 @@
 //! PPTX sessions over `pptx_edit::DeckSession`, as office-checkpoint.ts
 //! drives `PptxDocument`.
 
+mod agent;
+
 use std::collections::HashMap;
 
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
 
-use crate::common::{check_replacement, image_mime_type, len16, sha256_hex, storable_text};
+use crate::common::{
+    check_expected_paragraph, check_paragraph_text, check_replacement, image_mime_type,
+    insert_anchor, len16, sha256_hex, storable_text,
+};
 use crate::env;
 use crate::error::{EditCode, Error, Result};
 use crate::js::{J, Obj, utf16_len};
 use crate::session::{Applied, Item};
+use crate::touched::{self, Kept, Touched};
 use crate::types::{Asset, Command, EffectKind, Entry, Format, ObjectKind, ObjectRef, Target};
+
+/// The root map of PPTX stories (`crate::document_roots`).
+const STORIES: &str = "pptx:stories";
 
 pub(crate) struct PptxSession {
     deck: DeckSession,
-    /// Paragraph id to story id; a session serves one call, and replace_text
-    /// never moves a paragraph to another story.
+    /// Paragraph id to story id; a session serves one call, replace_text
+    /// never moves a paragraph to another story, and a paragraph insert or
+    /// delete clears it.
     stories: Option<HashMap<String, String>>,
+    /// For each paragraph an insert went after, the id of the last paragraph
+    /// this session put there, so the next lands after it.
+    after: HashMap<String, String>,
+    /// What the last command wrote that its Redo re-creates, read after it
+    /// applied, for [`Self::created`].
+    created: Option<Touched>,
 }
 
 struct Paragraph {
@@ -38,6 +54,8 @@ impl PptxSession {
         Ok(Self {
             deck,
             stories: None,
+            after: HashMap::new(),
+            created: None,
         })
     }
 
@@ -241,42 +259,120 @@ impl PptxSession {
             .collect())
     }
 
+    /// A paragraph id never changes story, so the cache only misses the
+    /// paragraphs a command added (or finds one gone): a miss reads the
+    /// deck again once (review L5).
     fn paragraph(&mut self, id: &str) -> Result<(String, Paragraph)> {
-        if self.stories.is_none() {
-            self.stories = Some(
-                self.text_entries()?
-                    .into_iter()
-                    .map(|(entry, story)| (entry.id, story))
-                    .collect(),
-            );
+        let mut fresh = false;
+        loop {
+            if self.stories.is_none() {
+                self.stories = Some(
+                    self.text_entries()?
+                        .into_iter()
+                        .map(|(entry, story)| (entry.id, story))
+                        .collect(),
+                );
+                fresh = true;
+            }
+            let found = self
+                .stories
+                .as_ref()
+                .and_then(|stories| stories.get(id))
+                .cloned()
+                .and_then(|story_id| {
+                    let paragraph = self
+                        .story_paragraphs(&story_id)
+                        .ok()?
+                        .into_iter()
+                        .find(|(paragraph_id, _)| paragraph_id == id)?
+                        .1;
+                    Some((story_id, paragraph))
+                });
+            match found {
+                Some(found) => return Ok(found),
+                None if fresh => return Err(self.paragraph_refusal(id)),
+                None => self.stories = None,
+            }
         }
-        let missing = || {
-            Error::edit(
-                EditCode::UnavailableTarget,
-                "the paragraph is no longer in the deck",
-            )
+    }
+
+    /// [`crate::CommandResult::touched`]: what the command's Undo
+    /// re-creates (the Editor's rule, 2026-10-22): the text a `replace_text`
+    /// takes out, a deleted paragraph's text and mark, the text and format
+    /// markers a `format_text` span covers, the alignment a `set_alignment`
+    /// writes over; for the slide commands [`Self::touched_agent`]; nothing
+    /// for the rest, nor where the target is not found.
+    pub fn touched(&mut self, command: &Command) -> Touched {
+        let (Command::ReplaceText { target_id, .. }
+        | Command::DeleteParagraph { target_id, .. }
+        | Command::FormatText { target_id, .. }
+        | Command::SetAlignment { target_id, .. }) = command
+        else {
+            return self.touched_agent(command);
         };
-        let story_id = self
-            .stories
-            .as_ref()
-            .and_then(|stories| stories.get(id))
-            .cloned()
-            .ok_or_else(missing)?;
-        let paragraph = self
-            .story_paragraphs(&story_id)?
-            .into_iter()
-            .find(|(paragraph_id, _)| paragraph_id == id)
-            .map(|(_, paragraph)| paragraph)
-            .ok_or_else(missing)?;
-        Ok((story_id, paragraph))
+        let Ok((story, paragraph)) = self.paragraph(target_id) else {
+            return Touched::default();
+        };
+        let doc = self.deck.yrs_doc();
+        let (start, end, kept) = match command {
+            Command::ReplaceText { .. } => {
+                match check_replacement(&paragraph.text, command, "PPTX") {
+                    Ok((span, _)) => (span.start as u32, span.end as u32, Kept::Content),
+                    Err(_) => return Touched::default(),
+                }
+            }
+            Command::FormatText { text, .. } => {
+                let Some(at) = paragraph.text.find(text.as_str()) else {
+                    return Touched::default();
+                };
+                let at = len16(&paragraph.text[..at]);
+                (at, at + len16(text), Kept::Formatting)
+            }
+            Command::SetAlignment { .. } => {
+                return touched::mark_entries(
+                    doc,
+                    STORIES,
+                    &story,
+                    paragraph.start + paragraph.length,
+                    &["alignment"],
+                );
+            }
+            _ => (0, paragraph.length + 1, Kept::Content),
+        };
+        touched::story_range(
+            doc,
+            STORIES,
+            &story,
+            paragraph.start + start,
+            paragraph.start + end,
+            kept,
+        )
     }
 
     pub fn apply(&mut self, command: &Command) -> Result<Applied> {
-        let Command::ReplaceText { target_id, .. } = command else {
-            return Err(Error::edit(
-                EditCode::UnsupportedOperation,
-                "PPTX sources support replace_text only",
-            ));
+        let target_id = match command {
+            Command::ReplaceText { target_id, .. } => target_id,
+            Command::InsertParagraph {
+                after_id,
+                before_id,
+                text,
+                style,
+                list,
+            } => {
+                if list.is_some() {
+                    return Err(Error::edit(
+                        EditCode::InvalidInput,
+                        "list sets a DOCX paragraph's list; a new PPTX paragraph takes its neighbour's",
+                    ));
+                }
+                let (anchor, after) = insert_anchor(after_id.as_deref(), before_id.as_deref())?;
+                return self.insert_paragraph(anchor, after, text, style.as_deref());
+            }
+            Command::DeleteParagraph {
+                target_id,
+                expected_text,
+            } => return self.delete_paragraph(target_id, expected_text),
+            _ => return self.apply_agent(command),
         };
         let (story_id, paragraph) = self.paragraph(target_id)?;
         let (span, text) = check_replacement(&paragraph.text, command, "PPTX")?;
@@ -297,23 +393,109 @@ impl PptxSession {
                 .map_err(refused)?;
         }
         if !span.text.is_empty() {
-            let style: TextStyle = match style {
-                None => TextStyle::default(),
-                Some(style) => serde_json::to_string(&style)
-                    .and_then(|json| serde_json::from_str(&json))
-                    .map_err(Error::engine)?,
-            };
             self.deck
-                .insert_text(&ctx, &story_id, start, &span.text, &style)
+                .insert_text(&ctx, &story_id, start, &span.text, &text_style(style)?)
                 .map_err(refused)?;
         }
         Ok(Applied {
-            id: target_id.clone(),
-            inverse: Command::ReplaceText {
+            ids: vec![target_id.clone()],
+            inverse: Some(Command::ReplaceText {
                 target_id: target_id.clone(),
                 expected_text: text,
                 text: storable_text(&paragraph.text),
-            },
+            }),
+        })
+    }
+
+    /// A paragraph right after or before `anchor` in its text, taking that
+    /// paragraph's properties (level, bullet, alignment) as a split does and,
+    /// for its text, the style of its character next to the new one. Several
+    /// inserts after one paragraph land in call order. The inverse deletes
+    /// it, unless it is its story's last paragraph, which delete_paragraph
+    /// refuses.
+    fn insert_paragraph(
+        &mut self,
+        anchor: &str,
+        after: bool,
+        text: &str,
+        style: Option<&str>,
+    ) -> Result<Applied> {
+        if style.is_some() {
+            return Err(Error::edit(
+                EditCode::InvalidInput,
+                "style names a DOCX paragraph style; a new PPTX paragraph takes its neighbour's formatting",
+            ));
+        }
+        check_paragraph_text(text)?;
+        let (story_id, _) = self.paragraph(anchor)?;
+        let paragraphs = self.story_paragraphs(&story_id)?;
+        let position = |id: &str| paragraphs.iter().position(|(other, _)| other == id);
+        let ctx = EditCtx::local("wasm");
+        // After a paragraph a new one is split off its end, after the
+        // paragraph this call last put there; before one it copies that
+        // paragraph's mark, which keeps its id.
+        let (new_id, start, style, undoable) = if after {
+            let index = match self.after.get(anchor).and_then(|id| position(id)) {
+                Some(index) => index,
+                None => position(anchor).ok_or_else(missing_paragraph)?,
+            };
+            let neighbour = &paragraphs[index].1;
+            let end = neighbour.start + neighbour.length;
+            self.deck
+                .insert_paragraph_break(&ctx, &story_id, end)
+                .map_err(refused)?;
+            let (id, _) = self
+                .story_paragraphs(&story_id)?
+                .into_iter()
+                .nth(index + 1)
+                .ok_or_else(|| Error::engine("the split paragraph is missing"))?;
+            let style = style_at(&neighbour.runs, neighbour.length as usize);
+            (id, end + 1, style, index + 1 < paragraphs.len())
+        } else {
+            let paragraph = &paragraphs[position(anchor).ok_or_else(missing_paragraph)?].1;
+            let id = self
+                .deck
+                .insert_paragraph_before(&ctx, &story_id, anchor)
+                .map_err(refused)?;
+            (id, paragraph.start, style_at(&paragraph.runs, 0), true)
+        };
+        if !text.is_empty() {
+            self.deck
+                .insert_text(&ctx, &story_id, start, text, &text_style(style)?)
+                .map_err(refused)?;
+        }
+        self.stories = None;
+        if after {
+            self.after.insert(anchor.to_owned(), new_id.clone());
+        }
+        Ok(Applied {
+            ids: vec![new_id.clone()],
+            inverse: undoable.then(|| Command::DeleteParagraph {
+                target_id: new_id,
+                expected_text: text.to_owned(),
+            }),
+        })
+    }
+
+    /// Refused unless the paragraph reads `expected_text` and is not its
+    /// story's last. No inverse: putting it back exactly is the live Undo's.
+    fn delete_paragraph(&mut self, id: &str, expected_text: &str) -> Result<Applied> {
+        let (story_id, paragraph) = self.paragraph(id)?;
+        check_expected_paragraph(id, &paragraph.text, expected_text)?;
+        let last = self.story_paragraphs(&story_id)?.pop().map(|(id, _)| id);
+        if last.as_deref() == Some(id) {
+            return Err(Error::edit(
+                EditCode::InvalidInput,
+                "a shape's last paragraph cannot be deleted; replace its text instead",
+            ));
+        }
+        self.deck
+            .remove_paragraph(&EditCtx::local("wasm"), &story_id, id)
+            .map_err(refused)?;
+        self.stories = None;
+        Ok(Applied {
+            ids: Vec::new(),
+            inverse: None,
         })
     }
 
@@ -331,11 +513,29 @@ impl PptxSession {
     }
 }
 
-/// The deck's refusal to edit an equation's text is an edit refusal with its
-/// sentence; any other failure stays the engine's.
+fn missing_paragraph() -> Error {
+    Error::edit(
+        EditCode::UnavailableTarget,
+        "the paragraph is no longer in the deck",
+    )
+}
+
+/// A run style read from the deck (none for `undefined`) as the engine takes it.
+fn text_style(style: Option<J>) -> Result<TextStyle> {
+    match style {
+        None => Ok(TextStyle::default()),
+        Some(style) => serde_json::to_string(&style)
+            .and_then(|json| serde_json::from_str(&json))
+            .map_err(Error::engine),
+    }
+}
+
+/// The deck's refusal to edit an equation's text, or to place a layout
+/// placeholder without a size, is an edit refusal with its sentence; any
+/// other failure stays the engine's.
 fn refused(error: pptx_edit::EditError) -> Error {
     match error {
-        pptx_edit::EditError::EquationText(_) => {
+        pptx_edit::EditError::EquationText(_) | pptx_edit::EditError::InvalidGeometry(_) => {
             Error::edit(EditCode::InvalidInput, error.to_string())
         }
         error => Error::engine(error),

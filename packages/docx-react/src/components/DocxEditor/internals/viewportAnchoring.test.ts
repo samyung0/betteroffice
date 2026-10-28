@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   computeViewportAnchoredScrollTop,
+  layoutPassOrigin,
   mergeLayoutUpdateOrigin,
   rescaleScrollTop,
   shouldScrollCaretIntoView,
@@ -52,15 +53,35 @@ describe('computeViewportAnchoredScrollTop', () => {
 
 describe('shouldScrollCaretIntoView', () => {
   test('preserves local caret scrolling', () => {
-    expect(shouldScrollCaretIntoView('local', false)).toBe(true);
+    expect(shouldScrollCaretIntoView('local', 'same')).toBe(true);
   });
 
   test('does not scroll to a sticky caret after a remote relayout', () => {
-    expect(shouldScrollCaretIntoView('remote', false)).toBe(false);
+    expect(shouldScrollCaretIntoView('remote', 'same')).toBe(false);
   });
 
   test('allows a local selection action after a remote relayout', () => {
-    expect(shouldScrollCaretIntoView('remote', true)).toBe(true);
+    expect(shouldScrollCaretIntoView('remote', 'changed')).toBe(true);
+  });
+
+  // A document's first frame keeps a reader placed elsewhere (a restored
+  // scroll offset) where they are.
+  test("never scrolls to a session's first caret", () => {
+    expect(shouldScrollCaretIntoView('local', 'first')).toBe(false);
+    expect(shouldScrollCaretIntoView('remote', 'first')).toBe(false);
+  });
+});
+
+describe('layoutPassOrigin', () => {
+  test('keeps a scheduled origin', () => {
+    expect(layoutPassOrigin('local')).toBe('local');
+    expect(layoutPassOrigin('remote')).toBe('remote');
+  });
+
+  // A read-only switch, a first layout or fonts becoming ready are no edit
+  // of the reader's: they keep the view instead of going to the caret.
+  test('lays out an unscheduled pass as remote', () => {
+    expect(layoutPassOrigin(null)).toBe('remote');
   });
 });
 

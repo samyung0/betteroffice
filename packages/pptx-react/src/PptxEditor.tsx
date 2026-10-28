@@ -37,6 +37,7 @@ import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, usePro
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -220,6 +221,8 @@ export interface PptxEditorProps {
   showFontPicker?: boolean;
   showFontSizePicker?: boolean;
   showZoomControl?: boolean;
+  /** Puts the slide strip under the slide at any width, as an editor under 640px has it. */
+  stripBelow?: boolean;
   /** The zoom it opens at (default 'fit'); the toolbar and `view.zoom` change it. */
   initialZoom?: PptxZoom;
   /** Called whenever what `runCommand` can do changes, for host menus. */
@@ -442,6 +445,7 @@ function PptxEditorContent({
   showFontPicker = true,
   showFontSizePicker = true,
   showZoomControl = true,
+  stripBelow = false,
   initialZoom = 'fit',
   onCommandState,
   defaultSpeakerNotes = false,
@@ -505,7 +509,8 @@ function PptxEditorContent({
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const [narrowLayout, setNarrowLayout] = useState(false);
+  const [narrowEditor, setNarrowEditor] = useState(false);
+  const narrowLayout = stripBelow || narrowEditor;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const pictureInputRef = useRef<HTMLInputElement>(null);
   const [stageFocused, setStageFocused] = useState(false);
@@ -532,6 +537,8 @@ function PptxEditorContent({
   const [selection, setSelection] = useState<PptxTextSelection | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+  /** The selection the last text edit left; a different one means the caret moved. */
+  const editedSelectionRef = useRef<PptxTextSelection | null>(null);
   const [shapeSelection, setShapeSelection] = useState<PptxShapeSelection | null>(null);
   /** Select all's objects; a text or single-object selection replaces it. */
   const [multiSelection, setMultiSelection] = useState<{
@@ -988,7 +995,7 @@ function PptxEditorContent({
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const update = () => setNarrowLayout(root.clientWidth < NARROW_LAYOUT_WIDTH);
+    const update = () => setNarrowEditor(root.clientWidth < NARROW_LAYOUT_WIDTH);
     update();
     const observer = new ResizeObserver(update);
     observer.observe(root);
@@ -1875,10 +1882,24 @@ function PptxEditorContent({
   const commit = (nextSelection: PptxTextSelection | null) => {
     if (readOnly) return;
     selectionRef.current = nextSelection ? { ...nextSelection, focusLine: undefined } : null;
+    editedSelectionRef.current = selectionRef.current;
     setSelection(selectionRef.current);
     setShapeSelection(null);
     recentClickRef.current = null;
     refreshAt(undefined, true);
+  };
+
+  /** Ends the engine's typing run: the next edit is a new undo step. */
+  const endTypingRun = (handle: PresentationHandle) => {
+    if (handle.undoCaptureMode() === 'auto') handle.addUndoBoundary();
+  };
+
+  /** The engine groups typing in one story by time alone, so text typed after
+   *  a caret move ends the typing run first and is its own undo step. */
+  const endTypingRunIfMoved = (handle: PresentationHandle) => {
+    if (selectionRef.current === editedSelectionRef.current) return;
+    editedSelectionRef.current = selectionRef.current;
+    endTypingRun(handle);
   };
 
   const insertSlideText = (text: string) => {
@@ -1886,6 +1907,7 @@ function PptxEditorContent({
     const current = selectionRef.current;
     if (!handle || !current || readOnly || canvasReview.reviewing || !text) return;
     try {
+      endTypingRunIfMoved(handle);
       const start = Math.min(current.anchor, current.focus);
       const end = Math.max(current.anchor, current.focus);
       const receipt = handle.replaceText(current.storyId, start, end, text.replace(/\r\n?/g, '\n'), typingStyle(textStyle));
@@ -2030,6 +2052,7 @@ function PptxEditorContent({
         return;
       }
       if (readOnly) return;
+      endTypingRunIfMoved(handle);
       // A table cell leaves Tab to the browser until cells get their own navigation.
       if (event.key === 'Tab' && !modifier && !event.altKey && !isTableCellStory(selection.storyId)) {
         event.preventDefault();
@@ -3342,7 +3365,12 @@ function PptxEditorContent({
                   }}
                   onPaste={(event) => {
                     event.preventDefault();
-                    if (!compositionRef.current) insertSlideText(event.clipboardData.getData('text/plain'));
+                    const handle = handleRef.current;
+                    if (compositionRef.current || !handle) return;
+                    // A paste is its own undo step, apart from the typing around it.
+                    endTypingRun(handle);
+                    insertSlideText(event.clipboardData.getData('text/plain'));
+                    endTypingRun(handle);
                   }}
                   onCopy={(event) => {
                     const copied = clipboardText();
@@ -3535,17 +3563,18 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
           {model ? (
-            // As PowerPoint's status-bar Notes button, over the slide area's corner.
-            <span style={styles.notesToggle}>
+            // As PowerPoint's status-bar Notes button, over the slide area's corner;
+            // with the strip under the slide, the left one, over the first thumbnail.
+            <span style={narrowLayout ? styles.narrowNotesToggle : styles.notesToggle}>
               <ToolbarButton
                 title={t('notes.toggle')}
                 active={speakerNotes}
                 onClick={toggleSpeakerNotes}
                 testId="pptx-notes-toggle"
-                style={narrowLayout ? undefined : { gap: 6, padding: '0 10px' }}
+                style={{ gap: 6, padding: '0 10px' }}
               >
                 <ToolbarIcon name="notes" size={16} />
-                {narrowLayout ? null : <span>{t('notes.toggle')}</span>}
+                <span>{t('notes.toggle')}</span>
               </ToolbarButton>
             </span>
           ) : null}
@@ -3567,6 +3596,7 @@ function PptxEditorContent({
           readOnly={!model || canvasReview.reviewing || readOnly}
           label={t('notes.panelLabel')}
           placeholder={t('notes.placeholder')}
+          limitHint={t('notes.tooLong')}
           onCommit={(text) => {
             const handle = handleRef.current;
             if (!handle || readOnly) return;
@@ -3661,11 +3691,49 @@ function RemoteShapeOutline({
   );
 }
 
+/**
+ * Speaker notes a person may write on a slide, in Unicode code points: Capy's
+ * collaboration server refuses an update that grows a slide's notes past it
+ * (Epo 2026-10-22).
+ */
+const MAX_NOTES_CHARS = 4000;
+/** The x/4,000 counter shows from 90% of the cap, as Capy's capped inputs (`CharCount`). */
+const NOTES_COUNT_FROM = Math.ceil(MAX_NOTES_CHARS * 0.9);
+
+function codePoints(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * `next`, an edit of `previous`, with the text it inserted cut so the notes
+ * hold at most `MAX_NOTES_CHARS` code points (or as many as `previous`, when it
+ * held more), and the caret after the kept part; null when it fits.
+ */
+function fitNotes(previous: string, next: string): { text: string; caret: number } | null {
+  // UTF-16 units bound code points.
+  if (next.length <= MAX_NOTES_CHARS) return null;
+  const over = codePoints(next) - Math.max(MAX_NOTES_CHARS, codePoints(previous));
+  if (over <= 0) return null;
+  // The inserted text lies between the common prefix and suffix, which never
+  // end inside a surrogate pair.
+  const shorter = Math.min(previous.length, next.length);
+  let start = 0;
+  while (start < shorter && previous[start] === next[start]) start += 1;
+  if (start > 0 && (next.charCodeAt(start - 1) & 0xfc00) === 0xd800) start -= 1;
+  let tail = 0;
+  while (tail < shorter - start && previous[previous.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1;
+  if (tail > 0 && (next.charCodeAt(next.length - tail) & 0xfc00) === 0xdc00) tail -= 1;
+  const inserted = Array.from(next.slice(start, next.length - tail));
+  const kept = inserted.slice(0, Math.max(0, inserted.length - over)).join('');
+  return { text: next.slice(0, start) + kept + next.slice(next.length - tail), caret: start + kept.length };
+}
+
 function NotesPanel({
   value,
   readOnly,
   label,
   placeholder,
+  limitHint,
   onCommit,
 }: {
   value: string;
@@ -3673,19 +3741,73 @@ function NotesPanel({
   readOnly: boolean;
   label: string;
   placeholder: string;
+  /** Shown while the last input was cut at `MAX_NOTES_CHARS`. */
+  limitHint: string;
   onCommit: (text: string) => void;
 }) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composingRef = useRef(false);
+  // A composition past the cap stays here, uncommitted, until it ends: cutting
+  // it while the IME holds it would break the composition.
+  const [draft, setDraft] = useState<string | null>(null);
+  // The caret after the last cut input (the notes re-render without the cut part).
+  const [cut, setCut] = useState<{ caret: number } | null>(null);
+  useLayoutEffect(() => {
+    if (cut) textareaRef.current?.setSelectionRange(cut.caret, cut.caret);
+  }, [cut]);
+  const shown = draft ?? value;
+  // UTF-16 units bound code points, so most notes are never counted.
+  const count = shown.length < NOTES_COUNT_FROM ? 0 : codePoints(shown);
+  const commit = (next: string) => {
+    const fitted = fitNotes(value, next);
+    setCut(fitted && { caret: fitted.caret });
+    const text = fitted?.text ?? next;
+    if (text !== value) onCommit(text);
+  };
   return (
     <div style={styles.notesPanel}>
-      <span style={styles.notesLabel}>{label}</span>
+      <div style={styles.notesHeader}>
+        <span style={styles.notesLabel}>{label}</span>
+        {cut ? (
+          <span role="alert" title={limitHint} data-testid="pptx-notes-limit" style={styles.notesLimit}>
+            {limitHint}
+          </span>
+        ) : null}
+        {count >= NOTES_COUNT_FROM ? (
+          <span
+            data-testid="pptx-notes-count"
+            data-full={count >= MAX_NOTES_CHARS || undefined}
+            style={count >= MAX_NOTES_CHARS ? styles.notesCountFull : styles.notesCount}
+          >
+            {count}/{MAX_NOTES_CHARS}
+          </span>
+        ) : null}
+      </div>
       <textarea
+        ref={textareaRef}
         aria-label={label}
         style={styles.notesTextarea}
-        value={value}
+        value={shown}
         readOnly={readOnly}
         placeholder={placeholder}
         data-testid="pptx-notes-textarea"
-        onChange={(event) => onCommit(event.target.value)}
+        onChange={(event) => {
+          const next = event.target.value;
+          if (composingRef.current && fitNotes(value, next)) {
+            setDraft(next);
+            return;
+          }
+          setDraft(null);
+          commit(next);
+        }}
+        onCompositionStart={() => {
+          composingRef.current = true;
+        }}
+        onCompositionEnd={(event) => {
+          composingRef.current = false;
+          setDraft(null);
+          commit(event.currentTarget.value);
+        }}
       />
     </div>
   );
@@ -4205,6 +4327,7 @@ const styles: Record<string, CSSProperties> = {
   },
   // Hosts move it left with --pptx-notes-toggle-right when their own chrome covers the corner.
   notesToggle: { position: 'absolute', right: 'var(--pptx-notes-toggle-right, 8px)', bottom: 8, zIndex: 5 },
+  narrowNotesToggle: { position: 'absolute', left: 8, bottom: 8, zIndex: 5 },
   notesPanel: {
     flex: '0 0 auto',
     display: 'flex',
@@ -4214,12 +4337,25 @@ const styles: Record<string, CSSProperties> = {
     background: 'var(--pptx-surface, #ffffff)',
     borderTop: '1px solid var(--pptx-divider, #e2e8f0)',
   },
-  notesLabel: {
+  // One fixed line: the panel's height sets the slide's fit, so the limit line
+  // and the counter never resize the slide; the limit line ends in an ellipsis.
+  notesHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    height: 16,
     fontSize: 11,
+    lineHeight: '16px',
+    overflow: 'hidden',
+  },
+  notesLabel: {
     fontWeight: 650,
     color: 'var(--pptx-text-muted, #647087)',
     textTransform: 'uppercase',
     letterSpacing: '0.02em',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+    marginRight: 'auto',
   },
   notesTextarea: {
     width: '100%',
@@ -4234,6 +4370,17 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     outline: 'none',
   },
+  // The XLSX editor's refusal line, in the error colour.
+  notesLimit: {
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    color: 'var(--pptx-error-text, #8b1e2d)',
+  },
+  // Capy's CharCount: muted, in the error colour at or over the cap.
+  notesCount: { flexShrink: 0, whiteSpace: 'nowrap', color: 'var(--pptx-text-muted, #647087)' },
+  notesCountFull: { flexShrink: 0, whiteSpace: 'nowrap', color: 'var(--pptx-error-text, #8b1e2d)' },
   empty: { margin: 'auto', color: 'var(--pptx-text-muted, #6b7587)', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: 'var(--pptx-error-text, #8b1e2d)', background: 'var(--pptx-error-bg, #fff0f2)', border: '1px solid var(--pptx-error-border, #efb8c0)', borderRadius: 6, fontSize: 12 },
   hiddenFileInput: {

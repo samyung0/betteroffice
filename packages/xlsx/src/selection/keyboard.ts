@@ -6,7 +6,7 @@
  * the F2/Enter handlers below.
  */
 
-import { extendTo, moveFocus, selectionAt } from './model';
+import { activeCell, extendTo, moveFocus, selectionAt } from './model';
 import type {
   CellAddr,
   Direction,
@@ -28,17 +28,17 @@ function mod(key: KeyInput): boolean {
 }
 
 // jump to the used-range edge in a direction (ctrl/cmd+arrow) — we have no data
-// map here, so the boundary is the used range itself.
+// map here, so the boundary is the used range itself; past it the focus stays.
 function edgeInDirection(focus: CellAddr, direction: Direction, limits: SelectionLimits): CellAddr {
   switch (direction) {
     case 'up':
       return { row: 0, col: focus.col };
     case 'down':
-      return { row: limits.rows - 1, col: focus.col };
+      return { row: Math.max(focus.row, limits.usedRows - 1), col: focus.col };
     case 'left':
       return { row: focus.row, col: 0 };
     case 'right':
-      return { row: focus.row, col: limits.cols - 1 };
+      return { row: focus.row, col: Math.max(focus.col, limits.usedCols - 1) };
   }
 }
 
@@ -46,22 +46,22 @@ function moveAction(selection: Selection): SelectionAction {
   return { type: 'move', selection };
 }
 
-// tab/shift-tab: step within the row, wrapping to the next/previous row's far
-// edge at the used-range bounds. always collapses (excel commits the cell).
-function tabMove(sel: Selection, back: boolean, limits: SelectionLimits): Selection {
-  const { row, col } = sel.focus;
-  if (!back && col >= limits.cols - 1) {
-    return selectionAt({ row: Math.min(row + 1, limits.rows - 1), col: 0 });
-  }
-  if (back && col <= 0) {
-    return selectionAt({ row: Math.max(row - 1, 0), col: limits.cols - 1 });
-  }
-  return selectionAt({ row, col: col + (back ? -1 : 1) });
-}
-
 // a lone printable character (no ctrl/cmd/alt) opens the editor seeded with it.
 function isPrintable(key: KeyInput): boolean {
   return key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey;
+}
+
+/**
+ * The whole used range, keeping the selection's active cell as Excel does; an
+ * active cell outside that range moves to its first cell, so the selection
+ * always holds it.
+ */
+export function selectAll(state: Selection | null, limits: SelectionLimits): Selection {
+  const anchor = { row: 0, col: 0 };
+  const focus = { row: limits.usedRows - 1, col: limits.usedCols - 1 };
+  const active = state ? activeCell(state) : anchor;
+  const inside = active.row <= focus.row && active.col <= focus.col;
+  return { anchor, focus: { ...focus }, active: { ...(inside ? active : anchor) } };
 }
 
 /**
@@ -77,15 +77,20 @@ export function selectionKeyReducer(
   const direction = ARROWS[key.key];
   if (direction) {
     if (mod(key)) {
-      const edge = edgeInDirection(state.focus, direction, limits);
-      return moveAction(key.shiftKey ? extendTo(state, edge, limits) : selectionAt(edge));
+      return moveAction(
+        key.shiftKey
+          ? extendTo(state, edgeInDirection(state.focus, direction, limits), limits)
+          : selectionAt(edgeInDirection(activeCell(state), direction, limits))
+      );
     }
     return moveAction(moveFocus(state, direction, { extend: key.shiftKey, limits }));
   }
 
   switch (key.key) {
+    // tab/shift+tab step right/left like the arrows and stop at the sheet's
+    // edges, as excel does for one cell; they always collapse (excel commits it).
     case 'Tab':
-      return moveAction(tabMove(state, Boolean(key.shiftKey), limits));
+      return moveAction(moveFocus(state, key.shiftKey ? 'left' : 'right', { extend: false, limits }));
 
     // enter navigates (down/up); it never opens the editor — F2 does. this is
     // the excel split: type to overwrite, F2 to edit in place, enter to commit.
@@ -94,14 +99,14 @@ export function selectionKeyReducer(
 
     case 'Home':
       return moveAction(
-        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: state.focus.row, col: 0 })
+        mod(key) ? selectionAt({ row: 0, col: 0 }) : selectionAt({ row: activeCell(state).row, col: 0 })
       );
 
     case 'End':
       return moveAction(
         mod(key)
-          ? selectionAt({ row: limits.rows - 1, col: limits.cols - 1 })
-          : selectionAt({ row: state.focus.row, col: limits.cols - 1 })
+          ? selectionAt({ row: limits.usedRows - 1, col: limits.usedCols - 1 })
+          : selectionAt({ row: activeCell(state).row, col: limits.usedCols - 1 })
       );
 
     case 'PageDown':
@@ -123,12 +128,9 @@ export function selectionKeyReducer(
       return { type: 'clear' };
   }
 
-  // cmd/ctrl+A selects the whole used range.
+  // cmd/ctrl+A selects the whole used range, the active cell staying put.
   if ((key.key === 'a' || key.key === 'A') && mod(key)) {
-    return moveAction({
-      anchor: { row: 0, col: 0 },
-      focus: { row: limits.rows - 1, col: limits.cols - 1 },
-    });
+    return moveAction(selectAll(state, limits));
   }
 
   if (isPrintable(key)) {

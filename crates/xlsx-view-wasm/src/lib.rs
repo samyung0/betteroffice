@@ -34,6 +34,7 @@ struct SheetInfo {
     frozen_cols: u32,
     initial_scroll_x: f32,
     initial_scroll_y: f32,
+    used_range: Option<CellRange>,
 }
 
 #[derive(Deserialize)]
@@ -234,6 +235,7 @@ impl XlsxViewDocument {
             frozen_cols,
             initial_scroll_x,
             initial_scroll_y,
+            used_range,
         })
     }
 

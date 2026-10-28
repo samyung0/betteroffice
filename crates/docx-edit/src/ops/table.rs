@@ -19,9 +19,10 @@ use yrs::{
 
 use crate::op::{OpError, OpResult};
 use crate::seed::border_side_sources;
+use crate::segments::tables;
 use crate::{
-    EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs, map_string,
-    out_len, revision_value, story_ref, write_pilcrow_properties,
+    EditCtx, EditingDoc, KIND_KEY, Position, STORIES, check_position, insertion_attrs,
+    revision_value, story_ref, write_pilcrow_properties,
 };
 
 const TR_INS: &str = "trIns";
@@ -489,19 +490,8 @@ fn covering<'a>(anchors: &'a [CellAnchor], row: usize, column: usize) -> Option<
 
 fn table_at<T: ReadTxn>(txn: &T, locator: &TableLocator) -> OpResult<(TextRef, MapRef, u32)> {
     let story = story_ref(txn, &locator.story).map_err(OpError::from)?;
-    let mut offset = 0u32;
-    let mut table_index = 0u32;
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && map_string(&map, txn, KIND_KEY).as_deref() == Some("table")
-        {
-            if table_index == locator.table_index {
-                return Ok((story, map, offset));
-            }
-            table_index += 1;
-        }
-        offset += len;
+    if let Some((offset, map)) = tables(&story, txn).nth(locator.table_index as usize) {
+        return Ok((story, map, offset));
     }
     Err(OpError::UnknownTable {
         story: locator.story.clone(),
@@ -842,13 +832,8 @@ fn remove_row_at(
 /// share a revision id, matching the sidebar's "Inserted table" grouping.
 pub(crate) fn table_row_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<TableRowChange> {
     let mut changes = Vec::new();
-    let mut offset = 0u32;
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && map_string(&map, txn, KIND_KEY).as_deref() == Some("table")
-            && let Ok(data) = read_table(&map, txn)
-        {
+    for (offset, map) in tables(story, txn) {
+        if let Ok(data) = read_table(&map, txn) {
             for (key, row_kind, table_kind) in [
                 (
                     TR_INS,
@@ -899,7 +884,6 @@ pub(crate) fn table_row_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Tab
                 }
             }
         }
-        offset += len;
     }
     changes
 }
@@ -917,21 +901,11 @@ pub(crate) fn resolve_table_row_revisions(
     resolved: &mut Vec<String>,
 ) -> OpResult<()> {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
-    let mut tables = Vec::new();
-    let mut offset = 0u32;
-    let mut table_index = 0u32;
-    for diff in story.diff(txn, YChange::identity) {
-        let len = out_len(&diff.insert);
-        if let Out::YMap(map) = diff.insert
-            && map_string(&map, txn, KIND_KEY).as_deref() == Some("table")
-        {
-            if offset >= span_start && offset < span_end {
-                tables.push((offset, table_index, map));
-            }
-            table_index += 1;
-        }
-        offset += len;
-    }
+    let tables: Vec<(u32, u32, MapRef)> = self::tables(story, txn)
+        .enumerate()
+        .filter(|(_, (offset, _))| *offset >= span_start && *offset < span_end)
+        .map(|(table_index, (offset, map))| (offset, table_index as u32, map))
+        .collect();
 
     for (table_offset, table_index, table) in tables.into_iter().rev() {
         let mut data = read_table(&table, txn)?;
@@ -1007,19 +981,12 @@ impl EditingDoc {
     ) -> OpResult<TableLocator> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id).map_err(OpError::from)?;
-        let mut offset = 0u32;
         let mut ordinal = 0u32;
-        for diff in story.diff(&txn, YChange::identity) {
-            let len = out_len(&diff.insert);
-            if let Out::YMap(map) = diff.insert
-                && map_string(&map, &txn, KIND_KEY).as_deref() == Some("table")
-            {
-                if offset == target_index {
-                    return Ok(TableLocator::new(story_id, ordinal));
-                }
-                ordinal += 1;
+        for (offset, _) in tables(&story, &txn) {
+            if offset == target_index {
+                return Ok(TableLocator::new(story_id, ordinal));
             }
-            offset += len;
+            ordinal += 1;
         }
         Err(OpError::UnknownTable {
             story: story_id.to_owned(),
@@ -1118,19 +1085,13 @@ impl EditingDoc {
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
 
-        let mut ordinal = 0u32;
-        let mut offset = 0u32;
-        for diff in story.diff(&txn, YChange::identity) {
-            if offset >= at.index {
-                break;
-            }
-            if let Out::YMap(map) = &diff.insert
-                && map_string(map, &txn, KIND_KEY).as_deref() == Some("table")
-            {
-                ordinal += 1;
-            }
-            offset += out_len(&diff.insert);
-        }
+        // The txn has changed nothing yet, so the story's index is in step.
+        let ordinal = match self.segment_index_txn(&at.story, &story, &txn) {
+            Some(index) => index.tables_before(at.index),
+            None => tables(&story, &txn)
+                .take_while(|(offset, _)| *offset < at.index)
+                .count(),
+        } as u32;
         let locator = TableLocator::new(at.story.clone(), ordinal);
         let mut used = story_ids(&txn);
         let table_slot = fresh_table_slot(&used, &at.story, ordinal as usize);

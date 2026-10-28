@@ -93,9 +93,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     // The worker is a genuine yrs peer. Reusing the main replica's client id
     // makes a fast structural input race overlap one client's clock range and
-    // corrupt the update; a fresh id lets yrs merge queued/local operations
-    // safely while the main replica applies worker updates with local origin.
-    session = await createResidentEngineSession();
+    // corrupt the update; an id of its own (the host's assigned worker id, or
+    // a random one) lets yrs merge queued/local operations safely while the
+    // main replica applies worker updates with local origin. A worker that
+    // replaces another under the same assigned id hydrates from the main
+    // replica, which holds every worker update it applied, and the replaced
+    // worker's later replies are dropped, so no clock is taken twice.
+    session = await createResidentEngineSession(request.snapshot.workerClientId);
     hydrate(request.snapshot);
     subscribe();
     const started = performance.now();

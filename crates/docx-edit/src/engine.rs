@@ -91,32 +91,170 @@ fn is_body_story(story: &str) -> bool {
     story == "body" || story.starts_with("body:")
 }
 
-/// Whether every event stays inside the body's story tree.
+/// Whether every event stays inside the body's story tree. An event's story
+/// is climbed to from its target by parents: its path would count the
+/// target's index in its story item by item.
 fn events_stay_in_body(txn: &yrs::TransactionMut, events: &yrs::types::Events) -> bool {
-    use yrs::types::{Event, PathSegment};
-    events.iter().all(|event| match event.path().front() {
-        Some(PathSegment::Key(story)) => is_body_story(story),
-        Some(PathSegment::Index(_)) => false,
-        // The stories map itself: stories added or removed.
-        None => match event {
-            Event::Map(event) => event.keys(txn).keys().all(|story| is_body_story(story)),
-            _ => false,
-        },
+    use yrs::ReadTxn;
+    use yrs::branch::{Branch, BranchPtr};
+    use yrs::types::Event;
+    let Some(stories) = txn.get_map(crate::STORIES) else {
+        return false;
+    };
+    let stories = BranchPtr::from(AsRef::<Branch>::as_ref(&stories));
+    events.iter().all(|event| {
+        let target: &Branch = match event {
+            Event::Text(event) => event.target().as_ref(),
+            Event::Map(event) => event.target().as_ref(),
+            Event::Array(event) => event.target().as_ref(),
+            _ => return false,
+        };
+        match target.item() {
+            Some(item) => crate::segments::story_level(item, stories)
+                .is_some_and(|(story, _)| is_body_story(&story)),
+            // The stories map itself: stories added or removed.
+            None => match event {
+                Event::Map(event) => event.keys(txn).keys().all(|story| is_body_story(story)),
+                _ => false,
+            },
+        }
+    })
+}
+
+/// What a commit whose one event is story text `text`'s did there, read
+/// from its inserted and deleted items instead of the delta, which walks the
+/// whole story: a plain insert when it deleted nothing and inserted one run
+/// of its client's text with the format markers around it, side by side;
+/// `Other` when it deleted an item it had not inserted (a deletion or an
+/// attribute change in the delta) or inserted anything else. `None` where
+/// only the delta tells: items inserted and deleted again, or more than one
+/// client's or run's. The insert's index is walked left to the paragraph
+/// mark before it, whose index the story's segment index holds while in step
+/// (`epoch`).
+fn inserted_text(
+    txn: &yrs::TransactionMut,
+    text: yrs::branch::BranchPtr,
+    story: &str,
+    indexes: &std::sync::Mutex<crate::segments::Indexes>,
+    epoch: u64,
+) -> Option<StoryEdit> {
+    use yrs::block::ItemContent;
+    let inserted = txn.insert_set();
+    for (client, ranges) in txn.delete_set().iter() {
+        for range in ranges.iter() {
+            if !inserted.contains(&yrs::ID::new(*client, range.start)) {
+                return Some(StoryEdit::Other);
+            }
+        }
+    }
+    if !txn.delete_set().is_empty() {
+        return None;
+    }
+    let mut clients = inserted.iter();
+    let (Some((client, ranges)), None) = (clients.next(), clients.next()) else {
+        return None;
+    };
+    let mut clocks = ranges.iter();
+    let (Some(clocks), None) = (clocks.next(), clocks.next()) else {
+        return None;
+    };
+    let items = yrs::ReadTxn::store(txn)
+        .blocks_in(client, clocks.clone())
+        .map(|(_, item)| item)
+        .collect::<Option<Vec<_>>>()?;
+    let (mut first, mut len, mut phase) = (None, 0, 0);
+    for (at, item) in items.iter().enumerate() {
+        if item.is_deleted() {
+            return None;
+        }
+        if item.parent_branch() != Some(text)
+            || items
+                .get(at + 1)
+                .is_some_and(|next| item.right() != Some(*next))
+        {
+            return Some(StoryEdit::Other);
+        }
+        phase = match (item.content(), phase) {
+            (ItemContent::Format(..), 0 | 2) => phase,
+            (ItemContent::String(_), 0 | 1) => {
+                first.get_or_insert(*item);
+                len += item.len();
+                1
+            }
+            (ItemContent::Format(..), 1) => 2,
+            _ => return Some(StoryEdit::Other),
+        };
+    }
+    let Some(first) = first else {
+        return Some(StoryEdit::Other);
+    };
+    let index = indexes
+        .lock()
+        .unwrap()
+        .get(story)
+        .filter(|(at, _)| *at == epoch)
+        .map(|(_, index)| std::sync::Arc::clone(index));
+    let mut units = 0;
+    let mut left = first.left();
+    while let Some(item) = left {
+        if let Some(index) = &index
+            && !item.is_deleted()
+            && matches!(item.content(), ItemContent::Type(_))
+            && let Some(slot) = index.slot_of(item.id())
+        {
+            units += index.paras()[slot].pilcrow + 1;
+            break;
+        }
+        units += crate::segments::units(&item);
+        left = item.left();
+    }
+    Some(StoryEdit::PlainInsert {
+        story: story.to_owned(),
+        at: units,
+        len,
     })
 }
 
 /// A plain insert when `events` hold exactly one story's text event whose
-/// delta inserts text alone.
-fn classify_story_events(txn: &yrs::TransactionMut, events: &yrs::types::Events) -> StoryEdit {
-    use yrs::types::{Delta, Event, PathSegment};
+/// delta inserts text alone: read from the commit's inserted items where
+/// they show it ([`inserted_text`]), else from the delta.
+fn classify_story_events(
+    txn: &yrs::TransactionMut,
+    events: &yrs::types::Events,
+    indexes: &std::sync::Mutex<crate::segments::Indexes>,
+    epoch: u64,
+) -> StoryEdit {
+    let Some((event, story)) = story_text_event(events) else {
+        return StoryEdit::Other;
+    };
+    let text = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(event.target()));
+    inserted_text(txn, text, &story, indexes, epoch)
+        .unwrap_or_else(|| delta_edit(txn, event, &story))
+}
+
+/// The one event of `events` when it is a story text's, with the story.
+fn story_text_event<'a>(
+    events: &'a yrs::types::Events<'a>,
+) -> Option<(&'a yrs::types::text::TextEvent, std::sync::Arc<str>)> {
+    use yrs::types::{Event, PathSegment};
     let mut events = events.iter();
     let (Some(Event::Text(event)), None) = (events.next(), events.next()) else {
-        return StoryEdit::Other;
+        return None;
     };
-    let path = event.path();
-    let (Some(PathSegment::Key(story)), 1) = (path.back(), path.len()) else {
-        return StoryEdit::Other;
-    };
+    let mut path = event.path();
+    match (path.pop_back(), path.is_empty()) {
+        (Some(PathSegment::Key(story)), true) => Some((event, story)),
+        _ => None,
+    }
+}
+
+/// A plain insert when a story text event's delta inserts text alone.
+fn delta_edit(
+    txn: &yrs::TransactionMut,
+    event: &yrs::types::text::TextEvent,
+    story: &str,
+) -> StoryEdit {
+    use yrs::types::Delta;
     let (at, inserted) = match event.delta(txn) {
         [Delta::Inserted(inserted, _)] => (0, inserted),
         [Delta::Retain(at, None), Delta::Inserted(inserted, _)] => (*at, inserted),
@@ -968,10 +1106,16 @@ impl EngineSession {
         // Type observers run before the update observer of the same commit.
         let yrs_doc = doc.yrs_doc();
         let log = Rc::clone(&edits);
+        let (indexes, epoch) = (
+            std::sync::Arc::clone(&doc.segment_indexes),
+            std::sync::Arc::clone(&doc.epoch),
+        );
         yrs_doc.get_or_insert_map(crate::STORIES).observe_deep_with(
             "docx-edit-engine",
             move |txn, events| {
-                let edit = classify_story_events(txn, events);
+                // The epoch moves on after the type observers.
+                let before = epoch.load(std::sync::atomic::Ordering::Relaxed);
+                let edit = classify_story_events(txn, events, &indexes, before);
                 let in_body = events_stay_in_body(txn, events);
                 let mut log = log.borrow_mut();
                 log.pending = Some(match log.pending {
@@ -1037,6 +1181,16 @@ impl EngineSession {
 
     pub fn doc_epoch(&self) -> u64 {
         self.doc_epoch.get()
+    }
+
+    /// The last committed transaction when it inserted text alone into one
+    /// story: the document epoch it made, the story, the story index and the
+    /// UTF-16 length.
+    pub fn last_plain_insert(&self) -> Option<(u64, String, u32, u32)> {
+        match self.edits.borrow().last.clone()? {
+            (epoch, StoryEdit::PlainInsert { story, at, len }) => Some((epoch, story, at, len)),
+            (_, StoryEdit::Other) => None,
+        }
     }
 
     /// Runs a callback with resident lowered blocks.
@@ -3000,6 +3154,49 @@ mod tests {
     use super::*;
     use yrs::Any;
     use yrs::types::Attrs;
+
+    /// Through random edits (typing, replacements, deletes, splits and
+    /// merges, formats, tables, Undo and Redo, a peer's), each commit's edit
+    /// read from its items is the one its delta shows.
+    #[test]
+    fn a_commits_edit_read_from_its_items_is_the_deltas() {
+        use crate::segments::tests::{Draw, random_doc, random_edit};
+        let mut inserts = 0;
+        for seed in 1..=16_u64 {
+            let mut draw = Draw(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let engine = EngineSession::new(7);
+            random_doc(engine.doc());
+            let peer = EditingDoc::new(9);
+            peer.apply_update_v1(&engine.doc().encode_state_as_update_v1())
+                .unwrap();
+            let undo = crate::UndoSession::new();
+            let seen: std::sync::Arc<std::sync::Mutex<Option<StoryEdit>>> = Default::default();
+            let delta = std::sync::Arc::clone(&seen);
+            let _by_delta = engine
+                .doc()
+                .yrs_doc()
+                .get_or_insert_map(crate::STORIES)
+                .observe_deep(move |txn, events| {
+                    *delta.lock().unwrap() = Some(match story_text_event(events) {
+                        Some((event, story)) => delta_edit(txn, event, &story),
+                        None => StoryEdit::Other,
+                    });
+                });
+            for step in 0..150 {
+                // An index in step, as the editor's reads keep one.
+                engine.doc().segment_index("body").unwrap();
+                seen.lock().unwrap().take();
+                random_edit(engine.doc(), &peer, &undo, &mut draw);
+                let Some(expected) = seen.lock().unwrap().take() else {
+                    continue;
+                };
+                let (_, edit) = engine.edits.borrow().last.clone().unwrap();
+                inserts += usize::from(matches!(edit, StoryEdit::PlainInsert { .. }));
+                assert_eq!(edit, expected, "seed {seed} step {step}");
+            }
+        }
+        assert!(inserts > 100, "{inserts} plain inserts");
+    }
 
     #[test]
     fn lowered_story_is_resident_and_generation_tagged() {
