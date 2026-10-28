@@ -247,6 +247,7 @@ impl StoryParser<'_, '_> {
                             .bookmark_xml
                             .clone()
                             .unwrap_or_else(|| child.to_raw_inline_xml()),
+                        shown: Vec::new(),
                         source_ordinal: None,
                     })
                 } else {
@@ -1532,7 +1533,7 @@ mod tests {
             panic!("run")
         };
         assert_eq!(run.content.len(), 1);
-        let RunContent::Shape { shape } = &run.content[0] else {
+        let RunContent::Shape { shape, .. } = &run.content[0] else {
             panic!("group")
         };
         let children = shape.children.as_ref().unwrap();

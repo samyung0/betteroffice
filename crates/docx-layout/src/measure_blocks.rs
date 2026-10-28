@@ -1027,7 +1027,7 @@ pub(crate) fn is_collapsible_section_mark(
     incoming_columns: Option<&ColumnLayout>,
 ) -> bool {
     if !is_section_break_mark(block, previous, next)
-        || crate::break_policy::breaks_before_block(block).is_some()
+        || crate::break_policy::breaks_before_block(block)
         || incoming_columns.is_some_and(|columns| columns.count > 1.0)
         || !matches!(
             incoming_type.unwrap_or(SectionBreakType::NextPage),
@@ -7172,6 +7172,8 @@ mod tests {
         ] {
             let fonts = crate::MeasureFonts::default();
             let _fonts = fonts.enter();
+            // Capy caches extents only in a float pass.
+            let _float_pass = FloatPass::enter();
             let font = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
             assert_eq!(crate::register_measure_font_bytes(font).unwrap(), 0);
             let mut config = MeasurementConfig {

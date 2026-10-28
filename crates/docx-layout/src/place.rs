@@ -102,6 +102,7 @@ struct ConvergenceInput<'a, F: PartialEq> {
     keep_with_next: &'a crate::keep_together::KeepWithNextScan,
     measured: &'a [MeasuredBlock],
     previous_pages: &'a [crate::types::Page],
+    continuous_flow: bool,
     /// The last dirty block looked up, with the latest resumable checkpoint
     /// ahead of its restart.
     resume_before: std::cell::Cell<Option<(usize, Option<usize>)>>,
@@ -123,10 +124,13 @@ enum Convergence {
     },
 }
 
+/// Whether the paragraph at `block_index` opens `page` because a break puts it
+/// there. A continuous flow (the reading layout) has no such breaks.
 fn pristine_paragraph_start(
     block_index: usize,
     measured: &[MeasuredBlock],
     page: &crate::types::Page,
+    continuous_flow: bool,
 ) -> bool {
     let Some(block) = measured.get(block_index) else {
         return false;
@@ -141,6 +145,7 @@ fn pristine_paragraph_start(
         && Some(&fragment.block_id) == block.block.block_id()
         && fragment.from_line == 0
         && fragment.carried_from_prev != Some(true)
+        && !continuous_flow
         && (crate::break_policy::breaks_before_block(&block.block)
             || block_index
                 .checked_sub(1)
@@ -251,9 +256,14 @@ impl<F: PartialEq> ConvergenceInput<'_, F> {
                 let end = self
                     .previous_checkpoints
                     .partition_point(|resume| resume.block_index < restart);
-                let resume = self.previous_checkpoints[..end]
-                    .iter()
-                    .rposition(|resume| resumable(resume, self.measured, self.previous_pages));
+                let resume = self.previous_checkpoints[..end].iter().rposition(|resume| {
+                    resumable(
+                        resume,
+                        self.measured,
+                        self.previous_pages,
+                        self.continuous_flow,
+                    )
+                });
                 self.resume_before.set(Some((next_dirty, resume)));
                 resume
             }
@@ -312,6 +322,7 @@ fn resumable(
     checkpoint: &LayoutCheckpoint,
     measured: &[MeasuredBlock],
     pages: &[crate::types::Page],
+    continuous_flow: bool,
 ) -> bool {
     let Some(MeasuredBlock {
         block: LayoutBlock::Paragraph(block),
@@ -333,7 +344,7 @@ fn resumable(
     let starts_paragraph = fragments.next().is_some_and(|fragment| {
         fragment.from_line == 0 && fragment.carried_from_prev != Some(true)
     }) && (fragments.next().is_none()
-        || pristine_paragraph_start(checkpoint.block_index, measured, page));
+        || pristine_paragraph_start(checkpoint.block_index, measured, page, continuous_flow));
     let flow = &checkpoint.flow;
     checkpoint.page_index > 0
         && page.opening_fragment_geometry.is_none()
@@ -694,7 +705,12 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
     // afresh at the document's origin, still converging with the retained layout.
     let resume = previous_checkpoints.iter().rev().find(|checkpoint| {
         checkpoint.block_index < restart
-            && resumable(checkpoint, &input.measured, &previous_layout.pages)
+            && resumable(
+                checkpoint,
+                &input.measured,
+                &previous_layout.pages,
+                plan.continuous_flow,
+            )
     });
     let resume_page = resume.map_or(0, |resume| resume.page_index);
     let dirty: Option<Vec<usize>> =
@@ -787,6 +803,7 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
             keep_with_next: &plan.keep_with_next,
             measured: &input.measured,
             previous_pages: &previous_layout.pages,
+            continuous_flow: plan.continuous_flow,
             resume_before: std::cell::Cell::new(None),
         };
         let placement = place(
@@ -1295,7 +1312,12 @@ fn place<F: PartialEq>(
             && checkpointed_page != Some(page_index)
             && (!matches!(mb.block, LayoutBlock::Paragraph(_))
                 || fragments_after[page_index] == 1
-                || pristine_paragraph_start(i, measured, &paginator.pages[page_index]))
+                || pristine_paragraph_start(
+                    i,
+                    measured,
+                    &paginator.pages[page_index],
+                    plan.continuous_flow,
+                ))
             && paginator
                 .current_page_start()
                 .is_some_and(|(current, _, _)| current == page_index)
@@ -3627,7 +3649,12 @@ mod pagination_rule_tests {
             checkpoint.block_index = 2;
             checkpoint.page_index = 2;
             checkpoint.page_number = full.layout.pages[2].number;
-            assert!(!resumable(&checkpoint, &value.measured, &full.layout.pages));
+            assert!(!resumable(
+                &checkpoint,
+                &value.measured,
+                &full.layout.pages,
+                false
+            ));
         }
     }
 
@@ -3765,8 +3792,22 @@ mod pagination_rule_tests {
         assert!(!resumable(
             checkpoint,
             &full_input.measured,
-            &full.layout.pages
+            &full.layout.pages,
+            false
         ));
+    }
+
+    #[test]
+    fn a_continuous_flow_has_no_paragraph_a_break_puts_at_the_page_top() {
+        let mut value = input(vec![
+            paragraph(0, 1, 20.0, json!({})),
+            paragraph(1, 1, 20.0, json!({ "pageBreakBefore": true })),
+            paragraph(2, 1, 20.0, json!({})),
+        ]);
+        let full = layout_document_checkpointed(&mut value).unwrap();
+        let page = &full.layout.pages[1];
+        assert!(pristine_paragraph_start(1, &value.measured, page, false));
+        assert!(!pristine_paragraph_start(1, &value.measured, page, true));
     }
 
     #[test]

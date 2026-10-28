@@ -295,12 +295,10 @@ fn serialize_run_content(
                 Some("column") => {
                     writer.attribute("w:type", "column");
                 }
-                None | Some("textWrapping") => {
-                    let clear = nonempty(clear.as_deref()).filter(|value| *value != "none");
-                    if break_type.is_some() || clear.is_some() {
-                        writer.attribute("w:type", "textWrapping");
-                    }
-                    if let Some(clear) = clear {
+                Some("textWrapping") => {
+                    writer.attribute("w:type", "textWrapping");
+                    if let Some(clear) = nonempty(clear.as_deref()).filter(|value| *value != "none")
+                    {
                         writer.attribute("w:clear", clear);
                     }
                 }
@@ -507,16 +505,14 @@ pub fn serialize_drawing_content(
     }
     writer.end_element();
     writer.start_element("wp:cNvGraphicFramePr");
-    if image.no_change_aspect == Some(true) {
-        writer
-            .start_element("a:graphicFrameLocks")
-            .attribute(
-                "xmlns:a",
-                "http://schemas.openxmlformats.org/drawingml/2006/main",
-            )
-            .attribute("noChangeAspect", "1")
-            .end_element();
-    }
+    writer
+        .start_element("a:graphicFrameLocks")
+        .attribute(
+            "xmlns:a",
+            "http://schemas.openxmlformats.org/drawingml/2006/main",
+        )
+        .attribute("noChangeAspect", "1")
+        .end_element();
     writer.end_element();
     append_generated(&mut writer, &graphic);
     writer.end_element().end_element();
@@ -1318,6 +1314,7 @@ mod tests {
     use crate::formatting::{FontFamily, TextFormatting};
     use crate::inline::{Run, RunType};
     use crate::serializer::s10::SerializerDeterminism;
+    use crate::xml::{ParseBudget, ParseLimits, parse_xml};
 
     use super::*;
 
@@ -1327,29 +1324,6 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
-    }
-
-    #[test]
-    fn line_breaks_preserve_explicit_types_and_type_clearing_breaks() {
-        for break_type in [None, Some("textWrapping")] {
-            for clear in [None, Some("all")] {
-                let content = RunContent::Break {
-                    break_type: break_type.map(str::to_owned),
-                    clear: clear.map(str::to_owned),
-                };
-                let expected = if clear.is_some() {
-                    "<w:br w:type=\"textWrapping\" w:clear=\"all\"/>"
-                } else if break_type.is_some() {
-                    "<w:br w:type=\"textWrapping\"/>"
-                } else {
-                    "<w:br/>"
-                };
-                assert_eq!(
-                    serialize_run_content(&content, &mut context()).unwrap(),
-                    expected
-                );
-            }
-        }
     }
 
     #[test]
@@ -1439,34 +1413,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn drawing_aspect_lock_serializes_only_when_the_picture_is_locked() {
-        for (locks, locked) in [
-            ("", false),
-            (
-                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="0"/></wp:cNvGraphicFramePr>"#,
-                false,
-            ),
-            (
-                r#"<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>"#,
-                true,
-            ),
-        ] {
-            let source = format!(
-                r#"<w:drawing><wp:inline><wp:extent cx="381000" cy="190500"/><wp:docPr id="1" name="Picture 1"/>{locks}<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>"#
-            );
-            let image = crate::image::parse_drawing(&drawing_root(&source), None, None).unwrap();
-            let xml = serialize_drawing_content(&image, &mut context()).unwrap();
-            assert_eq!(xml.contains(r#"noChangeAspect="1""#), locked, "{xml}");
-        }
-    }
-
     fn drawing_root(xml: &str) -> crate::xml::XmlElement {
-        let limits = crate::xml::ParseLimits::default();
-        crate::xml::parse_xml(
+        let limits = ParseLimits::default();
+        parse_xml(
             xml.as_bytes(),
             "drawing.xml",
-            &mut crate::xml::ParseBudget::new(&limits),
+            &mut ParseBudget::new(&limits),
         )
         .unwrap()
         .root()

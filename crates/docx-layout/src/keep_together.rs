@@ -510,6 +510,7 @@ mod tests {
                 make_paragraph_block("Heading", true),
                 // a page-break unit opening the next paragraph
                 LayoutBlock::PageBreak(crate::types::PageBreakBlock {
+                    section_mark_ineligible: None,
                     sdt_groups: None,
                     id: BlockId::Str("break".into()),
                     pm_start: None,

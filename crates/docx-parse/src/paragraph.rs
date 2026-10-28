@@ -1,5 +1,6 @@
 //! Paragraphs and tracked inline structures.
 
+use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
 use crate::block::transparent_children;
@@ -200,6 +201,32 @@ pub struct DrawingContext<'a> {
     pub smart_art: &'a mut SmartArtContext,
 }
 
+struct ComposedDrawingContext<'a> {
+    media: &'a MediaMap,
+    charts: &'a ChartPartsMap,
+    smart_art: &'a mut SmartArtContext,
+    group_text_boxes: Option<&'a mut GroupTextBoxParser<'a>>,
+}
+
+type GroupTextBoxParser<'a> = dyn FnMut(
+        &mut Shape,
+        &XmlElement,
+        &mut ParseBudget<'_>,
+        &mut SmartArtContext,
+    ) -> Result<(), ParseError>
+    + 'a;
+
+impl<'a> ComposedDrawingContext<'a> {
+    fn new(context: &'a mut DrawingContext<'_>) -> Self {
+        Self {
+            media: context.media,
+            charts: context.charts,
+            smart_art: &mut *context.smart_art,
+            group_text_boxes: None,
+        }
+    }
+}
+
 impl HexIdAllocator {
     pub fn from_sha256(seed: &str) -> Result<Self, ParseError> {
         if seed.len() != 64 || !seed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -307,6 +334,47 @@ pub fn parse_paragraph(
             .child("w", "sectPr")
             .map(|section| parse_section_properties(Some(section)));
     }
+    let resources = drawing
+        .as_ref()
+        .map(|context| (context.media, context.charts));
+    let mut enrich = |shape: &mut Shape,
+                      source: &XmlElement,
+                      budget: &mut ParseBudget<'_>,
+                      smart_art: &mut SmartArtContext|
+     -> Result<(), ParseError> {
+        let Some((media, charts)) = resources else {
+            return Ok(());
+        };
+        let warnings =
+            crate::shape::enrich_group_text_boxes(shape, source, budget, |container, budget| {
+                let mut parser = crate::block::StoryParser {
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    numbering,
+                    media,
+                    charts,
+                    smart_art: &mut *smart_art,
+                    budget,
+                    ids: &mut *ids,
+                    part,
+                };
+                parser.parse_text_box_content(container, depth)
+            })?;
+        for warning in warnings {
+            if !smart_art.warnings.iter().any(|known| known == warning) {
+                smart_art.warnings.push(warning.to_owned());
+            }
+        }
+        Ok(())
+    };
+    let mut drawing = drawing.map(|context| ComposedDrawingContext {
+        media: context.media,
+        charts: context.charts,
+        smart_art: &mut *context.smart_art,
+        group_text_boxes: Some(&mut enrich),
+    });
     paragraph.content = parse_paragraph_contents(
         element,
         relationships,
@@ -315,7 +383,7 @@ pub fn parse_paragraph(
         doc_defaults,
         part,
         budget,
-        drawing,
+        drawing.as_mut(),
         depth,
         false,
     )?;
@@ -361,6 +429,7 @@ pub fn parse_document_paragraph_properties(
             children: vec![XmlNode::Element(run_properties.clone())],
             paragraph_ordinal: None,
             para_id_attribute: None,
+            bookmark_xml: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None)
             .run
@@ -470,7 +539,7 @@ fn parse_paragraph_contents(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &mut ParseBudget<'_>,
-    mut drawing: Option<&mut DrawingContext<'_>>,
+    mut drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
     deletion: bool,
 ) -> Result<Vec<ParagraphContent>, ParseError> {
@@ -501,7 +570,7 @@ fn parse_paragraph_contents(
         check_container_beyond_field_nesting(beyond_nesting, child, part)?;
         match child.local_name() {
             "r" => {
-                let run = parse_run_composed(
+                let run = parse_run_with_context(
                     child,
                     relationships,
                     theme,
@@ -815,7 +884,7 @@ fn parse_simple_field_composed(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &mut ParseBudget<'_>,
-    drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
@@ -865,9 +934,9 @@ fn parse_simple_field_composed(
         field_type: parse_field_type(&instruction),
         instruction,
         content,
-        fld_lock: matches!(element.attribute(Some("w"), "fldLock"), Some("1" | "true"))
+        fld_lock: (element.parse_boolean_attribute(Some("w"), "fldLock") == Some(true))
             .then_some(true),
-        dirty: matches!(element.attribute(Some("w"), "dirty"), Some("1" | "true")).then_some(true),
+        dirty: (element.parse_boolean_attribute(Some("w"), "dirty") == Some(true)).then_some(true),
         structured_result,
         field_tree,
     })
@@ -882,7 +951,7 @@ fn parse_hyperlink_composed(
     doc_defaults: Option<&DocDefaults>,
     part: &str,
     budget: &mut ParseBudget<'_>,
-    drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut ComposedDrawingContext<'_>>,
     depth: usize,
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
@@ -1031,6 +1100,7 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
             children,
             paragraph_ordinal: element.paragraph_ordinal,
             para_id_attribute: element.para_id_attribute.clone(),
+            bookmark_xml: element.bookmark_xml.clone(),
         }
     }
     InlineNode::RawXml(Box::new(RawInlineXml {
@@ -1108,6 +1178,7 @@ pub fn resolve_raw_inline(
                     .collect(),
                 paragraph_ordinal: element.paragraph_ordinal,
                 para_id_attribute: element.para_id_attribute.clone(),
+                bookmark_xml: element.bookmark_xml.clone(),
             }],
         }
     }
@@ -1121,6 +1192,7 @@ pub fn resolve_raw_inline(
             .collect(),
         paragraph_ordinal: None,
         para_id_attribute: None,
+        bookmark_xml: None,
     };
     let limits = ParseLimits::default();
     let content = parse_paragraph_contents(
@@ -1157,6 +1229,7 @@ pub fn parse_raw_inline(xml: &str) -> Option<Vec<InlineNode>> {
         children: vec![XmlNode::Element(parse_raw_root(xml)?)],
         paragraph_ordinal: None,
         para_id_attribute: None,
+        bookmark_xml: None,
     };
     let limits = ParseLimits::default();
     parse_paragraph_contents(
@@ -1205,6 +1278,7 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         attributes: element.attributes.clone(),
         paragraph_ordinal: element.paragraph_ordinal,
         para_id_attribute: element.para_id_attribute.clone(),
+        bookmark_xml: element.bookmark_xml.clone(),
         children: element
             .children
             .iter()
@@ -1310,7 +1384,29 @@ pub(crate) fn parse_run_composed(
     styles: Option<&StyleMap>,
     doc_defaults: Option<&DocDefaults>,
     budget: &mut ParseBudget<'_>,
-    mut drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut DrawingContext<'_>>,
+) -> Result<Run, ParseError> {
+    let mut drawing = drawing.map(ComposedDrawingContext::new);
+    parse_run_with_context(
+        element,
+        relationships,
+        theme,
+        styles,
+        doc_defaults,
+        budget,
+        drawing.as_mut(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_run_with_context(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    budget: &mut ParseBudget<'_>,
+    mut drawing: Option<&mut ComposedDrawingContext<'_>>,
 ) -> Result<Run, ParseError> {
     let mut run = parse_run(element, theme, styles, doc_defaults).run;
     // `None` keeps the run's opaque drawing: a `w:pict`, `w:object` or
@@ -1378,7 +1474,7 @@ fn parse_drawing_owned(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
-    drawing: Option<&mut DrawingContext<'_>>,
+    mut drawing: Option<&mut ComposedDrawingContext<'_>>,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
         if let Some(rule) = parse_horizontal_rule(element) {
@@ -1409,6 +1505,8 @@ fn parse_drawing_owned(
                 xml: element.to_raw_inline_xml(),
                 text: None,
                 preview: None,
+                previews: Vec::new(),
+                text_box: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1438,11 +1536,19 @@ fn parse_drawing_owned(
                 xml,
                 text: None,
                 preview: None,
+                previews: Vec::new(),
+                text_box: None,
             },
         }]);
     }
     if is_shape_drawing(element) {
         if let Some(mut shape) = parse_shape_from_drawing(element) {
+            if shape.scene.is_some()
+                && let Some(context) = drawing.as_deref_mut()
+                && let Some(enrich) = context.group_text_boxes.as_deref_mut()
+            {
+                enrich(&mut shape, element, budget, context.smart_art)?;
+            }
             let media = drawing.as_ref().map(|context| context.media);
             resolve_shape_fill_pictures(&mut shape, relationships, media);
             apply_shape_metadata(&mut shape, element);
@@ -1467,10 +1573,10 @@ fn parse_alternate_content(
     element: &XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
-    drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut ComposedDrawingContext<'_>>,
 ) -> Result<Vec<RunContent>, ParseError> {
     Ok(
-        parse_alternate_content_branch(element, relationships, budget, drawing)?
+        parse_alternate_content_branch_with_context(element, relationships, budget, drawing)?
             .map(|(_, parsed)| parsed)
             .unwrap_or_default(),
     )
@@ -1482,8 +1588,25 @@ pub fn parse_alternate_content_branch<'a>(
     element: &'a XmlElement,
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
-    mut drawing: Option<&mut DrawingContext<'_>>,
+    drawing: Option<&mut DrawingContext<'_>>,
 ) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
+    let mut drawing = drawing.map(ComposedDrawingContext::new);
+    parse_alternate_content_branch_with_context(element, relationships, budget, drawing.as_mut())
+}
+
+fn parse_alternate_content_branch_with_context<'a>(
+    element: &'a XmlElement,
+    relationships: Option<&RelationshipMap>,
+    budget: &mut ParseBudget<'_>,
+    mut drawing: Option<&mut ComposedDrawingContext<'_>>,
+) -> Result<Option<(&'a XmlElement, Vec<RunContent>)>, ParseError> {
+    let has_media = drawing.is_some();
+    let resolved = |image: &crate::image::Image| {
+        image.src.is_some() || (!has_media && !image.relationship_id.is_empty())
+    };
+    // A branch the model cannot draw (a ChartEx chart, a picture without media)
+    // gives way to the first later branch with a picture it can.
+    let mut unsupported = None;
     for branch_name in ["Choice", "Fallback"] {
         for branch in element
             .child_elements()
@@ -1492,20 +1615,51 @@ pub fn parse_alternate_content_branch<'a>(
             let mut parsed = Vec::new();
             for child in branch.child_elements() {
                 if matches!(child.local_name(), "drawing" | "pict" | "object") {
-                    parsed.extend(parse_drawing_owned(
-                        child,
-                        relationships,
-                        budget,
-                        drawing.as_deref_mut(),
-                    )?);
+                    match parse_drawing_owned(child, relationships, budget, drawing.as_deref_mut())
+                    {
+                        Ok(child_parsed) => parsed.extend(child_parsed),
+                        Err(_) if unsupported.is_some() => return Ok(unsupported),
+                        Err(error) => return Err(error),
+                    }
                 }
             }
-            if !parsed.is_empty() {
+            if parsed.is_empty() {
+                continue;
+            }
+            if unsupported.is_some() {
+                if let Some(image) = parsed.into_iter().find_map(|content| match content {
+                    RunContent::Drawing { image, .. } if resolved(&image) => Some(image),
+                    _ => None,
+                }) {
+                    let picture = RunContent::Drawing {
+                        image,
+                        source_xml: None,
+                    };
+                    return Ok(Some((branch, vec![picture])));
+                }
+                continue;
+            }
+            let drawable = parsed.iter().any(|content| match content {
+                RunContent::OpaqueDrawing { kind, .. } => kind != "drawing",
+                RunContent::Drawing { image, .. } => resolved(image),
+                _ => true,
+            });
+            if drawable {
                 return Ok(Some((branch, parsed)));
             }
+            unsupported = Some((branch, parsed));
         }
     }
-    Ok(None)
+    Ok(unsupported)
+}
+
+pub(crate) fn has_ole_object(element: &XmlElement, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    element
+        .child_elements()
+        .any(|child| child.local_name() == "OLEObject" || has_ole_object(child, depth + 1))
 }
 
 fn contains_drawing_owned_content(element: &XmlElement) -> bool {
@@ -1547,11 +1701,12 @@ pub fn apply_shape_metadata(shape: &mut Shape, drawing: &XmlElement) {
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(4096).collect::<String>());
     let decorative = doc_properties
-        .is_some_and(|element| element.attribute(None, "decorative") == Some("1"))
+        .is_some_and(|element| element.parse_boolean_attribute(None, "decorative") == Some(true))
         || find_descendant_by_name(drawing, "adec:decorative", 0).is_some();
     let hidden = doc_properties
-        .is_some_and(|element| element.attribute(None, "hidden") == Some("1"))
-        || non_visual.is_some_and(|element| element.attribute(None, "hidden") == Some("1"));
+        .is_some_and(|element| element.parse_boolean_attribute(None, "hidden") == Some(true))
+        || non_visual
+            .is_some_and(|element| element.parse_boolean_attribute(None, "hidden") == Some(true));
     let relative_height = find_descendant_by_name(drawing, "wp:anchor", 0)
         .and_then(|anchor| anchor.attribute(None, "relativeHeight"))
         .and_then(|raw| raw.parse::<f64>().ok())
@@ -1715,7 +1870,8 @@ fn apply_list_rendering(
         return;
     };
     if rendering.is_bullet {
-        rendering.marker = convert_bullet_to_unicode(&rendering.marker);
+        rendering.marker =
+            convert_list_bullet(&rendering.marker, rendering.marker_font_family.as_deref());
     }
     let level = numbering.get_level(rendering.num_id, rendering.level);
     if let Some(level_properties) = level.and_then(|level| level.p_pr) {
@@ -1784,6 +1940,19 @@ fn style_chain_ind(style_id: Option<&str>, styles: Option<&StyleMap>) -> (bool, 
     result
 }
 
+/// A symbol face addresses glyphs by font position, either the raw byte or `U+F0xx`, so the same
+/// character means a different shape there than in a text face.
+fn convert_list_bullet(value: &str, font: Option<&str>) -> String {
+    let mut characters = value.trim_ascii().chars();
+    if let Some(face) = font.and_then(SymbolFont::named)
+        && let (Some(character), None) = (characters.next(), characters.next())
+        && let Some(shape) = face.shape(character)
+    {
+        return shape.to_string();
+    }
+    convert_bullet_to_unicode(value)
+}
+
 pub fn convert_bullet_to_unicode(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1796,7 +1965,7 @@ pub fn convert_bullet_to_unicode(value: &str) -> String {
         0x00a7 | 0x006e | 0xf06e | 0xf0a7 | 0x25a0 => "■".to_owned(),
         0x00fc | 0x00a8 | 0x00fb | 0x00fe | 0xf0fc => "✓".to_owned(),
         0x0075 | 0x25c6 => "◆".to_owned(),
-        0x0076 => "❖".to_owned(),
+        0x0076 | 0xf076 => "❖".to_owned(),
         0x25cf => "●".to_owned(),
         0x25a1 => "□".to_owned(),
         0x25c7 => "◇".to_owned(),
@@ -1935,6 +2104,55 @@ fn nonempty_attribute(element: &XmlElement, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::xml::{ParseLimits, parse_xml};
+
+    #[test]
+    fn wingdings_bullets_draw_the_shape_of_their_font_position() {
+        for (marker, font, expected) in [
+            ("\u{f0a8}", Some("Wingdings"), "□"),
+            ("\u{a8}", Some("Wingdings"), "□"),
+            ("o", Some("Wingdings"), "□"),
+            ("q", Some(" wingdings "), "□"),
+            ("\u{f0a7}", Some("Wingdings"), "▪"),
+            ("\u{f0d8}", Some("Wingdings"), "►"),
+            ("\u{f075}", Some("Wingdings"), "♦"),
+            ("\u{f06d}", Some("Wingdings"), "○"),
+            ("\u{f0d9}", Some("Wingdings"), "▲"),
+            ("\u{f075}", Some("Wingdings 3"), "►"),
+            ("\u{f076}", Some("Wingdings"), "❖"),
+            ("\u{f0fc}", Some("Wingdings"), "✓"),
+            ("\u{f0b7}", Some("Symbol"), "•"),
+            ("o", Some("Courier New"), "○"),
+            ("\u{f0a8}", None, "•"),
+            ("\u{f0e0}", Some("Wingdings"), "•"),
+        ] {
+            assert_eq!(
+                convert_list_bullet(marker, font),
+                expected,
+                "{marker:?} in {font:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn list_bullets_draw_every_slot_of_the_shared_symbol_table() {
+        for name in ["Wingdings", "Wingdings 2", "Wingdings 3", "Webdings"] {
+            let face = SymbolFont::named(name).expect("symbol face");
+            for slot in 0x21..=0xffu32 {
+                let private_use = char::from_u32(0xf000 + slot).expect("private-use char");
+                let Some(shape) = face.shape(private_use) else {
+                    continue;
+                };
+                let byte = char::from_u32(slot).expect("byte char");
+                for marker in [private_use, byte] {
+                    assert_eq!(
+                        convert_list_bullet(&marker.to_string(), Some(name)),
+                        shape.to_string(),
+                        "{marker:?} in {name}"
+                    );
+                }
+            }
+        }
+    }
 
     fn parse(xml: &str) -> Paragraph {
         let limits = ParseLimits::default();
@@ -2407,6 +2625,67 @@ mod tests {
                 Some((image.size.width, image.size.height))
             );
         }
+    }
+
+    const ALTERNATE_PICTURE: &str = r#"<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdFallback"/></pic:blipFill><pic:spPr><a:prstGeom prst="rect"/></pic:spPr></pic:pic></a:graphicData>"#;
+    const CHARTEX_CHOICE: &str = r#"<a:graphicData uri="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart r:id="rIdChartEx"/></a:graphicData>"#;
+
+    fn alternate_drawing(payload: &str, container: &str) -> String {
+        let position = if container == "anchor" {
+            r#"<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<w:drawing><wp:{container}>{position}<wp:extent cx="914400" cy="457200"/><wp:docPr id="7" name="Drawing"/><a:graphic>{payload}</a:graphic></wp:{container}></w:drawing>"#
+        )
+    }
+
+    fn alternate_document(choice: &str, container: &str, requires: &str) -> (Vec<u8>, String) {
+        let choice = alternate_drawing(choice, container);
+        let fallback = alternate_drawing(ALTERNATE_PICTURE, container);
+        let alternate = format!(
+            r#"<mc:AlternateContent><mc:Choice Requires="{requires}">{choice}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
+        );
+        let parts = [
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/word/charts/chartEx1.xml" ContentType="application/vnd.ms-office.chartex+xml"/></Types>"#.to_owned()),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+            ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChartEx" Type="http://schemas.microsoft.com/office/2014/relationships/chartEx" Target="charts/chartEx1.xml"/><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/><Relationship Id="rIdFallback" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/fallback.png"/><Relationship Id="rIdChoice" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/fallback.png"/></Relationships>"#.to_owned()),
+            ("word/charts/chartEx1.xml", r#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><cx:chart/></cx:chartSpace>"#.to_owned()),
+            ("word/charts/chart1.xml", r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_owned()),
+            ("word/document.xml", format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p w14:paraId="11111111"><w:r><w:t>Before</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r>{alternate}</w:r></w:p></w:body></w:document>"#)),
+        ];
+        let mut parts: Vec<_> = parts
+            .into_iter()
+            .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+            .collect();
+        parts.push((
+            "word/media/fallback.png".to_owned(),
+            vec![
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96,
+                0, 2, 0, 0, 5, 0, 1, 169, 245, 232, 39, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+                130,
+            ],
+        ));
+        (ooxml_opc::rezip_parts(&parts).unwrap(), alternate)
+    }
+
+    #[test]
+    fn unsupported_alternate_content_draws_its_fallback_picture_and_keeps_the_wrapper() {
+        let (bytes, alternate) = alternate_document(CHARTEX_CHOICE, "inline", "cx");
+        let wire = crate::s9::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+        let content = &wire.document.package.document.content;
+        let crate::block::BlockContent::Paragraph(paragraph) = &content[1] else {
+            panic!("expected the drawing paragraph");
+        };
+        let contents = run_contents(paragraph);
+        let [RunContent::Drawing { image, source_xml }] = contents.as_slice() else {
+            panic!("expected the fallback picture, got {contents:?}");
+        };
+        assert_eq!(image.relationship_id, "rIdFallback");
+        assert!(image.src.is_some());
+        assert_eq!(source_xml.as_deref(), Some(alternate.as_str()));
     }
 
     fn run_texts(paragraph: &Paragraph) -> Vec<&str> {
