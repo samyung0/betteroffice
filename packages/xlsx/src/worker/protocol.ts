@@ -41,6 +41,7 @@ export const WORKBOOK_METHODS = [
   'captureFormat',
   'applyFormat',
   'mergedRanges',
+  'selectionData',
   'historyState',
   'renderPng',
   'renderRangePng',

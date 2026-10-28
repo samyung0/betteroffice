@@ -32,6 +32,7 @@ import {
   rangeRect,
   selectAll,
   selectionAt,
+  selectionDataRequest,
   selectionKeyReducer,
   safeExternalHyperlink,
   SheetGoneError,
@@ -52,10 +53,13 @@ import type {
   DrawCmd,
   Direction,
   EditResult,
+  KeyInput,
   MergedRange,
   Proposal,
   Selection,
+  SelectionHidden,
   SelectionLimits,
+  SelectionMerges,
   SheetInfo,
   TextCmd,
   Viewport,
@@ -162,13 +166,49 @@ const COPY_PIECE_CELLS = 100_000;
  * long read keeps the browser's permission; writeText once read where the
  * browser has no ClipboardItem.
  */
-function writeClipboard(text: Promise<string>): Promise<void> {
+function writeClipboard(text: Promise<string>, marker?: string): Promise<void> {
   if (typeof ClipboardItem === 'undefined')
     return text.then((value) => navigator.clipboard.writeText(value));
   const blob = text.then((value) => new Blob([value], { type: 'text/plain' }));
   // a write the browser refuses at once never reads it.
   blob.catch(() => {});
-  return navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+  if (!marker) return navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]);
+  const html = text.then((value) => new Blob([markedTable(marker, value)], { type: 'text/html' }));
+  html.catch(() => {});
+  return navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob, 'text/html': html })]);
+}
+
+/**
+ * The cells a copy may carry as an HTML table naming it (`marker`), so its
+ * own paste can tell it from text copied elsewhere and shift its formulas.
+ */
+const XLSX_MARKED_COPY_MAX_CELLS = 100_000;
+
+function markedTable(marker: string, text: string): string {
+  const escape = (value: string) =>
+    value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const rows = fromTsv(text)
+    .map((row) => `<tr>${row.map((cell) => `<td>${escape(cell)}</td>`).join('')}</tr>`)
+    .join('');
+  return `<table data-betteroffice-clipboard="${marker}">${rows}</table>`;
+}
+
+/** The clipboard's text, and its HTML where the browser gives it. */
+async function readClipboard(): Promise<{ text: string; html: string | null }> {
+  const reading = navigator.clipboard.readText();
+  reading.catch(() => {});
+  let html: string | null = null;
+  if (typeof navigator.clipboard.read === 'function') {
+    try {
+      const item = (await navigator.clipboard.read()).find((entry) =>
+        entry.types.includes('text/plain')
+      );
+      if (item?.types.includes('text/html')) html = await (await item.getType('text/html')).text();
+    } catch {
+      // the text alone pastes as typed.
+    }
+  }
+  return { text: await reading, html };
 }
 
 /**
@@ -372,6 +412,41 @@ function mergeOrigin(addr: CellAddr, merges: readonly MergedRange[]): CellAddr {
       addr.col <= m.end.col
   );
   return merge ? { row: merge.start.row, col: merge.start.col } : addr;
+}
+
+// the sheet's hidden rows and columns: every frame carries the whole sheet's
+// spans, so keyboard moves step over them anywhere on it.
+function hiddenTracks(grid: DisplayList['grid'] | undefined): SelectionHidden {
+  const hidden = (spans: [number, number][] | undefined, index: number) => {
+    let low = 0;
+    let high = spans?.length ?? 0;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (spans![mid]![1] < index) low = mid + 1;
+      else high = mid;
+    }
+    return low < (spans?.length ?? 0) && spans![low]![0] <= index;
+  };
+  return {
+    isRowHidden: (row) => hidden(grid?.hiddenRowSpans, row),
+    isColHidden: (col) => hidden(grid?.hiddenColSpans, col),
+  };
+}
+
+// the merged ranges a frame knows (in view and in the selection), each one
+// cell for keyboard moves.
+function knownMerges(...lists: readonly (readonly MergedRange[])[]): SelectionMerges {
+  return {
+    mergeAt: (row, col) => {
+      for (const ranges of lists) {
+        const m = ranges.find(
+          (m) => row >= m.start.row && row <= m.end.row && col >= m.start.col && col <= m.end.col
+        );
+        if (m) return { top: m.start.row, left: m.start.col, bottom: m.end.row, right: m.end.col };
+      }
+      return null;
+    },
+  };
 }
 
 function messageOf(error: unknown): string {
@@ -832,6 +907,12 @@ function XlsxEditorContent({
   const [selection, setSelection] = useState<Selection | null>(null);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
+  // a keyboard jump waiting for the engine's answer (Ctrl/Cmd+arrow, End, a
+  // move landing past the drawn window), and the keys pressed behind it: they
+  // act in order where it lands (upstream #1539).
+  const jumpRef = useRef<Promise<void> | null>(null);
+  const queuedKeysRef = useRef<KeyInput[]>([]);
+  const [jumped, setJumped] = useState(0);
   const flushEditorRef = useRef<() => Promise<void>>(async () => {});
   const [editing, setEditing] = useState<EditState | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -912,6 +993,8 @@ function XlsxEditorContent({
 
   const activeSheet = pendingSheet?.index ?? sheetInfo?.activeSheet ?? 0;
   const activeSheetId = sheetInfo?.sheetIds[activeSheet] ?? '';
+  const activeSheetIdRef = useRef(activeSheetId);
+  activeSheetIdRef.current = activeSheetId;
   // the frame on screen draws the sheet the user is on.
   const shownHere = shown && shown.sheetInfo.activeSheet === activeSheet ? shown : null;
   const selectionFormatting = shownHere?.formatting ?? NO_FORMATTING;
@@ -1645,6 +1728,16 @@ function XlsxEditorContent({
     return deriveLimits(frameRef.current, usedRange(), (scrollRef.current?.clientHeight ?? 0) / zoom);
   }, [usedRange, zoom]);
 
+  // keyboard moves step over hidden rows and columns and count a merged range
+  // as one cell, as in Excel.
+  const navigation = useCallback(
+    () => ({
+      hidden: hiddenTracks(frameRef.current?.grid),
+      merges: knownMerges(mergedRanges, visibleMergedRanges),
+    }),
+    [mergedRanges, visibleMergedRanges]
+  );
+
   // map a viewport-local pointer event to a sheet cell via the frame geometry.
   const pointToCell = useCallback(
     (clientX: number, clientY: number): CellAddr | null => {
@@ -1845,7 +1938,9 @@ function XlsxEditorContent({
         pendingDraftRef.current = null;
         setEditing(null);
         const base = selectionAt({ row, col });
-        setSelection(move ? moveFocus(base, move, { extend, limits: limits() }) : base);
+        setSelection(
+          move ? moveFocus(base, move, { ...navigation(), extend, limits: limits() }) : base
+        );
         if (move) requestReveal();
         after?.();
         if (refocusNow) focusContainer();
@@ -1853,7 +1948,7 @@ function XlsxEditorContent({
       if (mayBeRefused(value)) void awaitCommit(done, close);
       else close(false);
     },
-    [editing, commitCell, awaitCommit, limits, focusContainer, readOnly, requestReveal]
+    [editing, commitCell, awaitCommit, limits, navigation, focusContainer, readOnly, requestReveal]
   );
 
   useEffect(() => {
@@ -1944,6 +2039,8 @@ function XlsxEditorContent({
 
   // the latest copy or cut read.
   const copyGenerationRef = useRef(0);
+  // the latest copy this editor marked: a paste of it shifts its formulas.
+  const markedCopyRef = useRef<{ marker: string; origin: CellAddr; length: number } | null>(null);
   // whether the clipboard took a copy of `target`: its area from its own
   // top-left up to the used range's end, read in pieces under the engine's
   // read cap. The write starts in the key press, before the read, so a long
@@ -1952,10 +2049,13 @@ function XlsxEditorContent({
   // notice, and so is a write the browser refuses. A newer copy or cut
   // supersedes it: it stops reading and writes nothing, so the clipboard
   // holds the latest. `check` runs before the read: a refusal copies nothing.
+  // A target still to come (a keyboard jump waiting for the engine) is copied
+  // where it lands; the write starts at the key press all the same.
   const copySelection = useCallback(
     async (
-      target: Selection | null = selection,
-      check?: () => Promise<unknown>
+      target: Selection | null | Promise<Selection | null> = selection,
+      check?: () => Promise<unknown>,
+      mark = true
     ): Promise<boolean> => {
       const handle = handleRef.current;
       if (!handle || !target) return false;
@@ -1964,21 +2064,38 @@ function XlsxEditorContent({
         if (onNotice) onNotice('copy-too-large');
         else reportError(new RangeTooLargeError(message));
       };
-      const r = upToUsedEnd(normalizeRange(target), usedRange());
-      if (r) {
-        const rows = r.bottom - r.top + 1;
-        const cols = r.right - r.left + 1;
-        if (rows * cols > XLSX_COPY_MAX_CELLS) {
-          tooLarge(`range ${rows}x${cols} exceeds the ${XLSX_COPY_MAX_CELLS}-cell copy cap`);
-          return false;
+      // the area copied, null past the used range, undefined past the cap.
+      const area = (selected: Selection | null) => {
+        const r = selected && upToUsedEnd(normalizeRange(selected), usedRange());
+        if (r) {
+          const rows = r.bottom - r.top + 1;
+          const cols = r.right - r.left + 1;
+          if (rows * cols > XLSX_COPY_MAX_CELLS) {
+            tooLarge(`range ${rows}x${cols} exceeds the ${XLSX_COPY_MAX_CELLS}-cell copy cap`);
+            return undefined;
+          }
         }
-      }
+        return r ?? null;
+      };
+      const settled = target instanceof Promise ? null : area(target);
+      if (settled === undefined) return false;
+      // a small copy names itself in an HTML flavour; it counts once its text is read.
+      markedCopyRef.current = null;
+      const marker =
+        mark &&
+        settled &&
+        (settled.bottom - settled.top + 1) * (settled.right - settled.left + 1) <=
+          XLSX_MARKED_COPY_MAX_CELLS
+          ? `betteroffice-${crypto.randomUUID()}`
+          : undefined;
       // a text the copy refused itself (superseded, too long, a failed check
       // or read) leaves the clipboard as it was, without the copy-failed
       // notice; `quiet` is one already told or never to tell.
       let refused = false;
       const quiet = new Error('copy refused');
       const text = (async () => {
+        const r = target instanceof Promise ? area(await target) : settled;
+        if (r === undefined) throw quiet;
         await check?.();
         const pieces: string[] = [];
         let bytes = 0;
@@ -2007,14 +2124,21 @@ function XlsxEditorContent({
             pieces.push(piece);
           }
         }
-        return joinTsv(pieces);
+        const joined = joinTsv(pieces);
+        if (marker && r && generation === copyGenerationRef.current)
+          markedCopyRef.current = {
+            marker,
+            origin: { row: r.top, col: r.left },
+            length: joined.length,
+          };
+        return joined;
       })().catch((e: unknown) => {
         refused = true;
         if (e !== quiet && generation === copyGenerationRef.current) reportEditError(e);
         throw e;
       });
       try {
-        await writeClipboard(text);
+        await writeClipboard(text, marker);
         return true;
       } catch (e) {
         if (!refused) {
@@ -2030,26 +2154,32 @@ function XlsxEditorContent({
   // a cut reads, then clears the range it copied on its own sheet, shown or
   // not (nothing once a newer copy superseded its read, or once that sheet is
   // removed); edits wait while it reads. Read-only, it copies.
-  const cutSelection = useCallback(async () => {
+  const cutSelection = useCallback(async (landing?: Promise<Selection | null>) => {
     if (!selection) return;
     if (readOnly) {
-      await copySelection(selection);
+      await copySelection(landing ?? selection);
       return;
     }
-    const target = selection;
+    const target = landing ?? selection;
     const handle = handleRef.current;
     const sheetId = activeSheetId;
-    const r = inUsedRange(normalizeRange(target), usedRange());
-    const range = r && `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+    const rangeOf = (selected: Selection | null) => {
+      const r = selected && inUsedRange(normalizeRange(selected), usedRange());
+      return r && `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+    };
+    let range = landing ? null : rangeOf(selection);
     // a clear past the engine's update cap is refused before anything is copied.
-    const check =
-      handle && range
-        ? () => handle.inSheet(sheetId, 'checkClearContents', activeSheet, range)
-        : undefined;
+    const check = handle
+      ? async () => {
+          if (landing) range = rangeOf(await landing);
+          if (range) await handle.inSheet(sheetId, 'checkClearContents', activeSheet, range);
+        }
+      : undefined;
     setCutReading(true);
     try {
-      // a pause begun during the read leaves a copy.
-      if (!(await copySelection(target, check)) || hostRefusesRef.current) return;
+      // a pause begun during the read leaves a copy; a cut's formulas paste
+      // as they were, as Excel moves them.
+      if (!(await copySelection(target, check, false)) || hostRefusesRef.current) return;
       if (!handle || !range || handleRef.current !== handle) return;
       track(handle, handle.inSheet(sheetId, 'clearContents', activeSheet, range)).then(
         applyResult,
@@ -2070,24 +2200,40 @@ function XlsxEditorContent({
     reportEditError,
   ]);
 
-  const pasteSelection = useCallback(async () => {
+  const pasteSelection = useCallback(async (landing?: Promise<Selection | null>) => {
     const handle = handleRef.current;
     if (!handle || !selection || readOnly) return;
     let text: string;
+    let html: string | null;
     try {
-      text = await navigator.clipboard.readText();
+      ({ text, html } = await readClipboard());
     } catch {
       return;
     }
-    if (readOnlyRef.current || handleRef.current !== handle) return;
+    // this editor's own copy: its formulas shift from the cells they came
+    // from, as Excel pastes them (upstream #1520).
+    const marked = markedCopyRef.current;
+    const own =
+      marked && html?.includes(marked.marker) && text.length === marked.length ? marked : null;
+    const target = landing ? await landing : selection;
+    if (!target || readOnlyRef.current || handleRef.current !== handle) return;
     const grid = fromTsv(text);
     if (grid.length === 0) return;
-    const r = normalizeRange(selection);
+    const r = normalizeRange(target);
     const edits: CellInputEdit[] = [];
     let width = 1;
     grid.forEach((rowArr, dr) => {
       width = Math.max(width, rowArr.length);
-      rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
+      rowArr.forEach((input, dc) =>
+        edits.push({
+          row: r.top + dr,
+          col: r.left + dc,
+          input,
+          ...(own && input.startsWith('=')
+            ? { copyFrom: { row: own.origin.row + dr, col: own.origin.col + dc } }
+            : {}),
+        })
+      );
     });
     onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportEditError);
     setSelection({
@@ -2401,7 +2547,9 @@ function XlsxEditorContent({
         pendingDraftRef.current = null;
         setFormulaDraft(null);
         if (move) {
-          setSelection((prev) => (prev ? moveFocus(prev, move, { limits: limits() }) : prev));
+          setSelection((prev) =>
+            prev ? moveFocus(prev, move, { ...navigation(), limits: limits() }) : prev
+          );
           requestReveal();
         }
         after?.();
@@ -2411,7 +2559,7 @@ function XlsxEditorContent({
       if (mayBeRefused(formulaDraft)) void awaitCommit(done, close);
       else close(false);
     },
-    [formulaDraft, commitCell, awaitCommit, limits, readOnly, requestReveal, focusContainer]
+    [formulaDraft, commitCell, awaitCommit, limits, navigation, readOnly, requestReveal, focusContainer]
   );
 
   flushEditorRef.current = async () => {
@@ -2428,6 +2576,103 @@ function XlsxEditorContent({
       editing !== null || formulaDraft !== null || nudgeOffset !== null || inFlight > 0
     );
   }, [editing, formulaDraft, nudgeOffset, inFlight, onPendingChange]);
+
+  // asks the engine where a key lands, then moves there: the data edge of a
+  // Ctrl/Cmd+arrow, the row's last data cell for End, the used range's last
+  // cell for Ctrl/Cmd+End, or the merge a move past the drawn window lands in
+  // (`landing`). Keys pressed meanwhile wait behind it. A selection, sheet or
+  // workbook that changed before the answer drops the jump and what waited.
+  const jump = useCallback(
+    (
+      from: Selection,
+      key: KeyInput,
+      at: CellAddr,
+      direction: 'up' | 'down' | 'left' | 'right' | 'rowEnd' | 'usedRange' | 'merge',
+      landing?: Selection
+    ) => {
+      const handle = handleRef.current;
+      if (!handle) return;
+      const sheetId = activeSheetId;
+      const bounds = limits();
+      const { hidden, merges } = navigation();
+      const done = handle
+        .onSheet(sheetId, 'selectionData', activeSheet, at.row, at.col, direction)
+        // without the engine's answer the jump stops at the used range.
+        .then((data) => data, () => undefined)
+        .then((data) => {
+          if (
+            handleRef.current !== handle ||
+            selectionRef.current !== from ||
+            activeSheetIdRef.current !== sheetId
+          ) {
+            queuedKeysRef.current = [];
+            return;
+          }
+          const merge = data?.merge;
+          const action = landing
+            ? {
+                type: 'move' as const,
+                selection: merge ? selectionAt({ row: merge.top, col: merge.left }) : landing,
+              }
+            : selectionKeyReducer(from, key, bounds, data, hidden, merges);
+          if (action.type !== 'move') return;
+          selectionRef.current = action.selection;
+          setSelection(action.selection);
+          requestReveal();
+        })
+        .finally(() => {
+          if (jumpRef.current === done) jumpRef.current = null;
+          setJumped((n) => n + 1);
+        });
+      jumpRef.current = done;
+    },
+    [activeSheet, activeSheetId, limits, navigation, requestReveal]
+  );
+
+  // a key the grid takes: a move (asking the engine first where it needs
+  // to), an edit opened or a clear. Whether it took the key.
+  const gridKey = useCallback(
+    (key: KeyInput): boolean => {
+      if (!selection) return false;
+      const request = selectionDataRequest(selection, key);
+      if (request) {
+        jump(selection, key, request.from, request.direction);
+        return true;
+      }
+      const { hidden, merges } = navigation();
+      const action = selectionKeyReducer(selection, key, limits(), undefined, hidden, merges);
+      switch (action.type) {
+        case 'move': {
+          const next = action.selection;
+          const grid = frameRef.current?.grid;
+          // a cell past the drawn window may lie in a merge the frame does not
+          // know: the engine names it before the move lands.
+          if (
+            grid &&
+            !next.active &&
+            sameCell(next.anchor, next.focus) &&
+            !cellRect(grid, next.anchor.row, next.anchor.col)
+          ) {
+            jump(selection, key, next.anchor, 'merge', next);
+            return true;
+          }
+          setSelection(next);
+          // select all keeps the view, as the menu's Select all does.
+          if (!next.active) requestReveal();
+          return true;
+        }
+        case 'startEdit':
+          openEditor(action.initialInput);
+          return true;
+        case 'clear':
+          clearCells();
+          return true;
+        case 'none':
+          return false;
+      }
+    },
+    [selection, jump, navigation, limits, requestReveal, openEditor, clearCells]
+  );
 
   // grid-level keyboard: chrome shortcuts first, then the pure selection reducer.
   const onKeyDown = useCallback(
@@ -2476,18 +2721,21 @@ function XlsxEditorContent({
       }
 
       if (mod) {
+        // behind a jump still waiting for the engine, the clipboard keys act
+        // where it lands; the clipboard itself starts in this key press.
+        const landing = jumpRef.current?.then(() => selectionRef.current);
         if (lower === 'c') {
-          void copySelection();
+          void copySelection(landing ?? selection);
           e.preventDefault();
           return;
         }
         if (lower === 'v') {
-          void pasteSelection();
+          void pasteSelection(landing);
           e.preventDefault();
           return;
         }
         if (lower === 'x') {
-          void cutSelection();
+          void cutSelection(landing);
           e.preventDefault();
           return;
         }
@@ -2508,35 +2756,23 @@ function XlsxEditorContent({
         }
       }
 
-      const action = selectionKeyReducer(
-        selection,
-        {
-          key: e.key,
-          shiftKey: e.shiftKey,
-          metaKey: e.metaKey,
-          ctrlKey: e.ctrlKey,
-          altKey: e.altKey,
-        },
-        limits()
-      );
-      switch (action.type) {
-        case 'move':
-          setSelection(action.selection);
-          // select all keeps the view, as the menu's Select all does.
-          if (!(mod && lower === 'a')) requestReveal();
+      const key: KeyInput = {
+        key: e.key,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+      };
+      // keys pressed while a jump waits for the engine act, in order, where it
+      // lands (upstream #1539).
+      if (jumpRef.current || queuedKeysRef.current.length > 0) {
+        if (e.key === 'Escape' || selectionKeyReducer(selection, key, limits()).type !== 'none') {
+          queuedKeysRef.current.push(key);
           e.preventDefault();
-          break;
-        case 'startEdit':
-          openEditor(action.initialInput);
-          e.preventDefault();
-          break;
-        case 'clear':
-          clearCells();
-          e.preventDefault();
-          break;
-        case 'none':
-          break;
+        }
+        return;
       }
+      if (gridKey(key)) e.preventDefault();
     },
     [
       selection,
@@ -2550,14 +2786,34 @@ function XlsxEditorContent({
       undo,
       redo,
       save,
-      openEditor,
-      clearCells,
       selectedChart,
       nudgeChart,
       readOnly,
-      requestReveal,
+      gridKey,
     ]
   );
+
+  // the keys a jump held back, one at a time on the selection it left: typing
+  // that opened an edit goes on into it, as its input would take it.
+  const replayKeyRef = useRef<(key: KeyInput) => void>(() => {});
+  replayKeyRef.current = (key) => {
+    if (!editing) {
+      gridKey(key);
+      return;
+    }
+    if (key.key === 'Enter') commitEditor(key.shiftKey ? 'up' : 'down');
+    else if (key.key === 'Tab') commitEditor(key.shiftKey ? 'left' : 'right');
+    else if (key.key === 'Escape') cancelEditor();
+    else if (key.key.length === 1 && !key.ctrlKey && !key.metaKey && !key.altKey)
+      setEditing((prev) => (prev ? { ...prev, value: prev.value + key.key } : prev));
+  };
+  useEffect(() => {
+    if (jumpRef.current) return;
+    const key = queuedKeysRef.current.shift();
+    if (!key) return;
+    replayKeyRef.current(key);
+    setJumped((n) => n + 1);
+  }, [jumped]);
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {

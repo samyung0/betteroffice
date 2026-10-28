@@ -158,6 +158,24 @@ async function withCells(bytes: Uint8Array, cells: Record<string, number>): Prom
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 }
 
+// A1:B2 merged and rows 4 to 6 hidden.
+async function withShape(bytes: Uint8Array): Promise<Uint8Array> {
+  const cells = await withCells(bytes, { A1: 1, A3: 3, A4: 4, A5: 5, A6: 6, A7: 7 });
+  const zip = await JSZip.loadAsync(cells);
+  let sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  for (const row of [4, 5, 6]) sheet = sheet.replace(`<row r="${row}">`, `<row r="${row}" hidden="1">`);
+  zip.file('xl/worksheets/sheet1.xml', sheet);
+  const handle = openWorkbook(new Uint8Array(await zip.generateAsync({ type: 'uint8array' })));
+  try {
+    handle.applyOps([
+      { type: 'mergeCells', sheet: 0, range: { start: { row: 0, col: 0 }, end: { row: 1, col: 1 } } },
+    ]);
+    return handle.save();
+  } finally {
+    handle.dispose();
+  }
+}
+
 // column B wider than the window.
 function withWideColumn(bytes: Uint8Array): Uint8Array {
   const handle = openWorkbook(bytes);
@@ -292,6 +310,8 @@ let wideFrozen: Fixture;
 let paneFilled: Fixture;
 let wideColumn: Fixture;
 let tallFont: Fixture;
+// A1:B2 merged, rows 4 to 6 hidden.
+let shaped: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -332,6 +352,7 @@ beforeAll(async () => {
   paneFilled = fixtureFrom(withFarCell(source, 40));
   wideColumn = fixtureFrom(withWideColumn(source));
   tallFont = fixtureFrom(await withTallFontColumn(source));
+  shaped = fixtureFrom(await withShape(smallBytes));
 });
 
 afterAll(async () => {
@@ -771,6 +792,100 @@ describe('XlsxEditor keyboard', () => {
     await view.click({ row: 0, col: 0 });
     await press(view.surface, 'End', { ctrlKey: true });
     expect(view.nameBox().value).toBe('D62');
+  }, MANY_KEYS_MS);
+
+  // upstream #1511, #1539, #1580 and #1665 on this editor.
+  it('jumps Ctrl+Down to the data edge, and a Delete pressed before the answer clears where it lands', async () => {
+    const view = await mountEditor(farColumn);
+    await view.click({ row: 0, col: 9 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown', ctrlKey: true });
+      fireEvent.keyDown(view.surface, { key: 'Delete' });
+    });
+    await view.idle();
+    expect(view.nameBox().value).toBe('J90000');
+    expect(await view.input(89_999, 9)).toBe('');
+    expect(await view.input(90_000, 9)).toBe('2');
+    await press(view.surface, 'ArrowDown', { ctrlKey: true });
+    expect(view.nameBox().value).toBe('J90001');
+    await press(view.surface, 'ArrowDown', { ctrlKey: true });
+    expect(view.nameBox().value).toBe('J90010');
+  }, MANY_KEYS_MS);
+
+  it('types keys pressed before a jump lands into the cell it lands on', async () => {
+    const view = await mountEditor(farColumn);
+    await view.click({ row: 0, col: 9 });
+    await act(async () => {
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown', ctrlKey: true });
+      fireEvent.keyDown(view.surface, { key: 'x' });
+      fireEvent.keyDown(view.surface, { key: 'y' });
+      fireEvent.keyDown(view.surface, { key: 'Enter' });
+    });
+    await view.idle();
+    expect(await view.input(89_999, 9)).toBe('xy');
+    expect(view.nameBox().value).toBe('J90001');
+  }, MANY_KEYS_MS);
+
+  it('ends a row at its last data cell', async () => {
+    const view = await mountEditor(spread);
+    await view.click({ row: 1, col: 0 });
+    await press(view.surface, 'End');
+    expect(view.nameBox().value).toBe('C2');
+  }, MANY_KEYS_MS);
+
+  it('steps over hidden rows and through a merged range as one cell', async () => {
+    const view = await mountEditor(shaped);
+    await view.click({ row: 1, col: 1 });
+    expect(view.nameBox().value).toBe('A1');
+    await press(view.surface, 'Enter');
+    expect(view.nameBox().value).toBe('A3');
+    await press(view.surface, 'ArrowDown');
+    expect(view.nameBox().value).toBe('A7');
+    await press(view.surface, 'ArrowUp');
+    await press(view.surface, 'ArrowUp');
+    expect(view.nameBox().value).toBe('A1');
+    await press(view.surface, 'ArrowRight');
+    expect(view.nameBox().value).toBe('C1');
+  }, MANY_KEYS_MS);
+
+  // upstream #1520 on this editor.
+  it('pastes a formula copied here with its relative references shifted', async () => {
+    const view = await mountEditor(small);
+    let item: ClipboardItem | undefined;
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        write: async ([written]: ClipboardItem[]) => {
+          item = written;
+          await (await written.getType('text/plain')).text();
+        },
+        readText: async () => (await item!.getType('text/plain')).text(),
+        read: async () => [item!],
+      },
+    });
+    try {
+      await view.click({ row: 0, col: 2 });
+      await press(view.surface, '=');
+      await act(async () => view.type('=A1+$B$1'));
+      await press(view.editor()!, 'Enter');
+      await view.click({ row: 0, col: 2 });
+      await press(view.surface, 'c', { ctrlKey: true });
+      await view.idle();
+      await view.click({ row: 2, col: 3 });
+      await press(view.surface, 'v', { ctrlKey: true });
+      await view.idle();
+      expect(await view.input(2, 3)).toBe('=B3+$B$1');
+      // text copied elsewhere pastes as typed.
+      item = new ClipboardItem({ 'text/plain': new Blob(['=A1'], { type: 'text/plain' }) });
+      await view.click({ row: 4, col: 3 });
+      await press(view.surface, 'v', { ctrlKey: true });
+      await view.idle();
+      expect(await view.input(4, 3)).toBe('=A1');
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
   }, MANY_KEYS_MS);
 
   it('copies and clears only the used part of a whole-column selection', async () => {

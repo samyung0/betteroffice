@@ -184,3 +184,61 @@ describe('select-all, edit, and clear', () => {
     expect(press(sel, { key: 'F5' }).type).toBe('none');
   });
 });
+
+// upstream #1511, #1580, #1665 on Capy's used-range rules (2026-10-17).
+describe('engine data edges, hidden tracks and merged cells', () => {
+  const hidden = {
+    isRowHidden: (row: number) => row >= 10 && row <= 20,
+    isColHidden: (col: number) => col === 4,
+  };
+  // B2:C3 (rows 1-2, cols 1-2) is merged.
+  const merges = {
+    mergeAt: (row: number, col: number) =>
+      row >= 1 && row <= 2 && col >= 1 && col <= 2 ? { top: 1, left: 1, bottom: 2, right: 2 } : null,
+  };
+  const go = (state: Selection, key: Partial<KeyInput> & { key: string }, data?: { edge?: { row: number; col: number } | null }) =>
+    moved(selectionKeyReducer(state, key, limits, data, hidden, merges));
+
+  it('ctrl/cmd+arrow lands on the data edge the engine found, else on the used range edge', () => {
+    const sel = selectionAt({ row: 5, col: 0 });
+    expect(go(sel, { key: 'ArrowDown', ctrlKey: true }, { edge: { row: 30, col: 0 } })).toEqual(
+      selectionAt({ row: 30, col: 0 })
+    );
+    expect(go(sel, { key: 'ArrowDown', ctrlKey: true }, { edge: null })).toEqual(selectionAt({ row: 59, col: 0 }));
+    expect(go(sel, { key: 'ArrowDown', ctrlKey: true, shiftKey: true }, { edge: { row: 30, col: 0 } })).toEqual({
+      anchor: { row: 5, col: 0 },
+      focus: { row: 30, col: 0 },
+    });
+  });
+
+  it('end goes to the last data cell of the row, shift extends there', () => {
+    const sel = selectionAt({ row: 5, col: 0 });
+    expect(go(sel, { key: 'End' }, { edge: { row: 5, col: 7 } })).toEqual(selectionAt({ row: 5, col: 7 }));
+    expect(go(sel, { key: 'End' })).toEqual(selectionAt({ row: 5, col: 19 }));
+    expect(go(sel, { key: 'End', ctrlKey: true, shiftKey: true })).toEqual({
+      anchor: { row: 5, col: 0 },
+      focus: { row: 59, col: 19 },
+    });
+  });
+
+  it('arrows, enter, tab and paging step over hidden rows and columns', () => {
+    expect(go(selectionAt({ row: 9, col: 0 }), { key: 'ArrowDown' })).toEqual(selectionAt({ row: 21, col: 0 }));
+    expect(go(selectionAt({ row: 21, col: 0 }), { key: 'Enter', shiftKey: true })).toEqual(
+      selectionAt({ row: 9, col: 0 })
+    );
+    expect(go(selectionAt({ row: 0, col: 3 }), { key: 'Tab' })).toEqual(selectionAt({ row: 0, col: 5 }));
+    expect(go(selectionAt({ row: 5, col: 0 }), { key: 'PageDown' })).toEqual(selectionAt({ row: 26, col: 0 }));
+  });
+
+  it('a merged range is one cell: moves leave it from its far edge and land on its top-left cell', () => {
+    const merged = selectionAt({ row: 1, col: 1 });
+    expect(go(merged, { key: 'Enter' })).toEqual(selectionAt({ row: 3, col: 1 }));
+    expect(go(merged, { key: 'Tab' })).toEqual(selectionAt({ row: 1, col: 3 }));
+    expect(go(selectionAt({ row: 3, col: 2 }), { key: 'ArrowUp' })).toEqual(merged);
+    expect(go(selectionAt({ row: 2, col: 3 }), { key: 'ArrowLeft' })).toEqual(merged);
+    expect(go(merged, { key: 'ArrowDown', shiftKey: true })).toEqual({
+      anchor: { row: 1, col: 1 },
+      focus: { row: 3, col: 1 },
+    });
+  });
+});
