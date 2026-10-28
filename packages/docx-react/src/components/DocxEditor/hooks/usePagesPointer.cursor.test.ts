@@ -205,13 +205,11 @@ describe('pages pointer hover cursor', () => {
     expect(host.style.cursor).toBe('text');
   });
 
-  test('a read-only document paints the text cursor over body text only', () => {
+  test('a read-only document never paints the caret cursor', () => {
     const options = stableOptions();
     renderHook(() => usePagesPointer(options({ readOnly: true })));
 
     mouse('mousemove', 400, 500, canvasOf());
-    expect(host.style.cursor).toBe('text');
-    mouse('mousemove', 50, 500, canvasOf());
     expect(host.style.cursor).toBe('default');
   });
 
