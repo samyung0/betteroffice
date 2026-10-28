@@ -3134,8 +3134,6 @@ pub(crate) struct PageIn {
     #[serde(default)]
     page_borders: Option<PageBordersIn>,
     #[serde(default)]
-    page_borders: Option<PageBordersIn>,
-    #[serde(default)]
     columns: Option<ColumnLayoutIn>,
     #[serde(default)]
     note_areas: Vec<NoteAreaIn>,

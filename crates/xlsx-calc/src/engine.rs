@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use xlsx_model::progress::tick as progress;
 use xlsx_model::{
-    CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId, SheetId,
-    Table, Workbook,
+    Cell, CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId,
+    SheetId, Table, Workbook,
 };
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
@@ -603,7 +603,13 @@ impl Pass<'_> {
                     #[cfg(test)]
                     SCHEDULER_STEPS.with(|count| count.set(count.get() + 1));
                     let u = members[member];
-                    if write_if_changed(wb, u, circular_value(wb, u), &self.budget, &mut self.journal) {
+                    if write_if_changed(
+                        wb,
+                        u,
+                        circular_value(wb, u),
+                        &self.budget,
+                        &mut self.journal,
+                    ) {
                         self.changed.push((u.0, cell_of(u)));
                     }
                     self.cycle_cells.push((u.0, cell_of(u)));
@@ -649,7 +655,9 @@ impl Pass<'_> {
                     }
                 }
             }
-            Some(NodeValue::Refused) => refuse(wb, u, &self.budget, &mut self.changed, &mut self.journal),
+            Some(NodeValue::Refused) => {
+                refuse(wb, u, &self.budget, &mut self.changed, &mut self.journal)
+            }
             None => {}
         }
     }
@@ -1008,7 +1016,15 @@ fn write_spill(
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, budget, changed, &mut moved, journal);
+        write_spilled_cell(
+            wb,
+            (u.0, row, col),
+            value,
+            budget,
+            changed,
+            &mut moved,
+            journal,
+        );
     }
     journal.array(wb, u.0, anchor);
     if let Some(sheet) = wb.sheet_mut(u.0) {

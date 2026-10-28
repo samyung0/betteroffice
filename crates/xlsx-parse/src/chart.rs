@@ -1452,7 +1452,7 @@ fn resolve_reference_with<'a, T>(
         .iter()
         .find(|sheet| sheet.name.eq_ignore_ascii_case(&sheet_name))
     else {
-        return Ok(Vec::new());
+        return Err(refused("names a sheet this workbook does not hold"));
     };
     let (start, end) = parse_area(area).ok_or_else(|| refused("is not a cell range"))?;
     let (rows, cols) = (end.row - start.row + 1, end.col - start.col + 1);
@@ -1463,7 +1463,6 @@ fn resolve_reference_with<'a, T>(
     if count > limit as u64 {
         return Err(refused("would hold more points than a chart can carry"));
     }
-    let sheet = &workbook.sheets[sheet];
     let mut values = Vec::with_capacity(count as usize);
     for row in start.row..=end.row {
         for col in start.col..=end.col {

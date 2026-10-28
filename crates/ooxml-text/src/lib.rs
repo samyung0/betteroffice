@@ -54,8 +54,8 @@
 pub mod auto_space;
 pub mod bidi;
 pub mod caps;
-pub mod embedded_font;
 pub mod echo;
+pub mod embedded_font;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
@@ -71,8 +71,8 @@ pub use bidi::{
 pub use caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
-pub use embedded_font::{EmbeddedFontError, decode_embedded_font, decode_embedded_font_within};
 pub use echo::{EchoGlyphSet, echo_glyph_set};
+pub use embedded_font::{EmbeddedFontError, decode_embedded_font, decode_embedded_font_within};
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{
     BreakOpportunity, break_allowed_between, break_opportunities, presentation_break_opportunities,
