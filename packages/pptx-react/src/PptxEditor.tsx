@@ -379,7 +379,7 @@ const INSERT_IMAGE_TYPES: Record<string, string> = {
 /** Windows/Office caret phase. */
 const CARET_BLINK_MS = 530;
 
-/** The strip's room beside the slide number; thumbnails fill it at their slide's aspect ratio. */
+/** Thumbnails paint at the strip's room beside the slide number and show at the width the button leaves, less beside the strip's scrollbar. */
 const THUMBNAIL_WIDTH = 126;
 /** Below this editor width the strip is a row of smaller thumbnails under the slide. */
 const NARROW_LAYOUT_WIDTH = 640;
@@ -3287,7 +3287,7 @@ function PptxEditorContent({
                 <span
                   style={{
                     ...styles.slidePreview,
-                    width: narrowLayout ? NARROW_THUMBNAIL_WIDTH : THUMBNAIL_WIDTH,
+                    ...(narrowLayout ? { flex: '0 0 auto', width: NARROW_THUMBNAIL_WIDTH } : undefined),
                     ...(thumbnail
                       ? { aspectRatio: `${thumbnail.width} / ${thumbnail.height}` }
                       : { aspectRatio: '16 / 9', padding: 8 }),
@@ -3840,7 +3840,7 @@ export function SlideThumbnail({
         const canvas = canvasRef.current;
         if (!latest || !canvas) return;
         sizeCanvasForSlide(canvas, frame, dpr, scale);
-        // Fills its frame, which is narrower in the narrow layout.
+        // Fills its frame, which is narrower in the narrow layout or beside the strip's scrollbar.
         canvas.style.width = '100%';
         canvas.style.height = 'auto';
         canvas.getContext('2d')?.drawImage(painted, 0, 0);
@@ -4246,8 +4246,8 @@ const styles: Record<string, CSSProperties> = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    flex: '0 0 auto',
-    width: THUMBNAIL_WIDTH,
+    flex: 1,
+    minWidth: 0,
     overflow: 'hidden',
     background: '#ffffff',
     boxSizing: 'border-box',
