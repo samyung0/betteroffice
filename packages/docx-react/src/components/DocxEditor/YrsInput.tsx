@@ -46,7 +46,7 @@ import {
   type YrsSelectionText,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
-import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
+import { pageMoveTarget, paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
   shouldScrollCaretIntoView,
   type CaretSelectionChange,
@@ -186,6 +186,23 @@ function nextWordOffset(text: string, offset: number): number {
   while (next < text.length && !/\s/u.test(text[next])) next += 1;
   while (next < text.length && /\s/u.test(text[next])) next += 1;
   return next;
+}
+
+/** Page-local y to client px through each page's painted rect, measured once per page. */
+function pageClientY(host: HTMLElement, queries: DisplayListQueries) {
+  const pages = new Map<number, { top: number; scale: number } | null>();
+  return (pageIndex: number, y: number): number | null => {
+    if (!pages.has(pageIndex)) {
+      const rect = resolveDisplayPageClientRect(host, queries, pageIndex);
+      const size = queries.pageSize(pageIndex);
+      pages.set(
+        pageIndex,
+        rect && size && size.height > 0 ? { top: rect.top, scale: rect.height / size.height } : null
+      );
+    }
+    const page = pages.get(pageIndex);
+    return page ? page.top + y * page.scale : null;
+  };
 }
 
 function toRange(selection: YrsSelection, map: YrsInputPositionMap): YrsStoryRange {
@@ -779,12 +796,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const moveSelection = useCallback(
     (
-      direction: 'left' | 'right' | 'up' | 'down' | 'home' | 'end',
+      direction: 'left' | 'right' | 'up' | 'down' | 'pageUp' | 'pageDown' | 'home' | 'end',
       extend: boolean,
       wholeDocument: boolean,
       byWord = false
     ): void => {
-      const verticalDirection = direction === 'up' || direction === 'down' ? direction : null;
+      const byPage = direction === 'pageUp' || direction === 'pageDown';
+      const verticalDirection =
+        direction === 'up' || direction === 'pageUp'
+          ? 'up'
+          : direction === 'down' || direction === 'pageDown'
+            ? 'down'
+            : null;
       const interactionEpoch = verticalDirection
         ? inputOperationQueueRef.current?.captureInteractionEpoch()
         : undefined;
@@ -824,14 +847,27 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const head = current.head;
         if (verticalDirection) {
           const displayPosition = locToDisplayPosition(head);
-          const movement =
-            displayPosition == null
-              ? null
-              : querySnapshot?.queries.verticalMove(
+          const queries = querySnapshot?.queries;
+          const host = canvasHostRef?.current;
+          // PageUp/PageDown move about one viewport, and the view follows by as much.
+          const scroller = byPage && host ? findVerticalScrollParentOrRoot(host) : null;
+          const goalX = verticalCaretGoalRef.current.current();
+          const pageMove =
+            displayPosition != null && queries && host && scroller
+              ? pageMoveTarget(
+                  queries,
+                  pageClientY(host, queries),
                   displayPosition,
                   verticalDirection,
-                  verticalCaretGoalRef.current.current()
-                );
+                  scroller.clientHeight,
+                  goalX
+                )
+              : null;
+          const movement = byPage
+            ? pageMove
+            : displayPosition == null
+              ? null
+              : queries?.verticalMove(displayPosition, verticalDirection, goalX);
           if (movement) {
             verticalCaretGoalRef.current.retain(movement.goalX);
             const target = resolveDisplayTarget?.(movement.position) ?? {
@@ -847,9 +883,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
             ) {
               return;
             }
+            if (scroller && pageMove) scroller.scrollTop += pageMove.scrollBy;
             setSelection(extend ? current.anchor : next, next);
             return;
           }
+          if (byPage) return;
           const next = paragraphVerticalMove(map.paragraphs, head, verticalDirection);
           setSelection(extend ? current.anchor : next, next);
           return;
@@ -893,6 +931,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       });
     },
     [
+      canvasHostRef,
       displayPositionToLoc,
       enqueueInputOperation,
       ensureSelection,
@@ -1054,6 +1093,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       } else if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         event.preventDefault();
         moveSelection(event.key === 'ArrowUp' ? 'up' : 'down', event.shiftKey, false);
+      } else if ((event.key === 'PageUp' || event.key === 'PageDown') && !mod && !event.altKey) {
+        event.preventDefault();
+        moveSelection(event.key === 'PageUp' ? 'pageUp' : 'pageDown', event.shiftKey, false);
       } else if (event.key === 'Home' || event.key === 'End') {
         event.preventDefault();
         moveSelection(event.key === 'Home' ? 'home' : 'end', event.shiftKey, mod);

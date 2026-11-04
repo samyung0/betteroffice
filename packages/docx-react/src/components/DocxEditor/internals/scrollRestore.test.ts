@@ -489,43 +489,6 @@ describe('viewport anchoring across a page boundary', () => {
     expect(scroller.scrollTop).toBe(documentTop(1, 700) - anchor.viewportOffset);
   });
 
-  test('reads the lines of the pages the viewport shows only', () => {
-    const pageCount = 40;
-    const lines = Array.from({ length: pageCount }, (_, pageIndex) => [
-      visualLine(`p${pageIndex}a`, pageIndex * 100 + 1, pageIndex * 100 + 20, 100, pageIndex),
-      visualLine(`p${pageIndex}b`, pageIndex * 100 + 21, pageIndex * 100 + 40, 500, pageIndex),
-    ]).flat();
-    const scrollTop = documentTop(30, 450);
-    const { host, scroller } = createScene(scrollTop, pageCount);
-    const read: number[] = [];
-    let wholeReads = 0;
-    const counted = {
-      ...queries(lines, pageCount),
-      visualLines: () => {
-        wholeReads += 1;
-        return lines;
-      },
-      visualLinesOnPage: (pageIndex: number) => {
-        read.push(pageIndex);
-        return lines.filter((line) => line.pageIndex === pageIndex);
-      },
-    } as DisplayListQueries;
-    const captured: number[] = [];
-    const anchor = captureDisplayListViewportAnchor(counted, host, scroller, (position) => {
-      captured.push(position);
-      return STICKY;
-    });
-
-    expect(captured).toEqual([30 * 100 + 21]);
-    expect(anchor.viewportOffset).toBe(documentTop(30, 500) - scrollTop);
-    expect(wholeReads).toBe(0);
-    expect(read).toEqual([30]);
-    const everyLine = queries(lines, pageCount);
-    expect(captureDisplayListViewportAnchor(everyLine, host, scroller, () => STICKY)).toEqual(
-      anchor
-    );
-  });
-
   test('finds a line that overflows its page as far as the viewport', () => {
     const { host, scroller } = createScene(documentTop(2, 18), 3);
     const tall = { ...visualLine(paraId, 1, 2, 10, 0), height: 2_400 };

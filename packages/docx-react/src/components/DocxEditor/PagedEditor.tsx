@@ -1575,12 +1575,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           setIsFocused(true);
         }
 
-        // PageUp/PageDown - let container handle scrolling
-        if (['PageUp', 'PageDown'].includes(e.key) && !e.metaKey && !e.ctrlKey) {
-          // Let the editor handle the cursor movement first
-          // If it doesn't handle it (at bounds), the container will scroll
-        }
-
         // Cmd/Ctrl+Home - scroll to top and move cursor to start
         if (e.key === 'Home' && (e.metaKey || e.ctrlKey)) {
           cancelPendingScrollRestore();

@@ -194,8 +194,17 @@ export function useFindReplaceBridge({
     [findReplace, pagedEditorRef]
   );
 
+  // Closing returns focus to the document, where navigation already selected
+  // the current match, so typing continues there as in Word (#1504).
+  const { close } = findReplace;
+  const handleClose = useCallback((): void => {
+    close();
+    pagedEditorRef.current?.focus();
+  }, [close, pagedEditorRef]);
+
   return {
     findResultRef,
+    handleClose,
     handleFind,
     handleFindNext,
     handleFindPrevious,

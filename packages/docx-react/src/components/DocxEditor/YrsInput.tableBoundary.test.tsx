@@ -50,7 +50,6 @@ async function mount(between: boolean) {
       ref={input}
       enabled
       readOnly={false}
-      seedSelection={false}
       session={session}
       inputPositionMap={map}
       displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
@@ -69,18 +68,15 @@ async function mount(between: boolean) {
 
 for (const between of [false, true]) {
   test(`in-thread backspace ${between ? 'between tables' : 'after a table'} preserves both the story and cell contents`, async () => {
-    const { session, textarea, input, press } = await mount(between);
+    const { session, press } = await mount(between);
     const before = session.storySegments('body');
     const cellStory = session.storyIds().find(story =>
       session.paragraphs(story).some(para => para.text === 'T1-B2'))!;
-    const cell = session.paragraphs(cellStory)[0]!;
+    // Capy's slot rule (2026-09-28): Backspace beside a table never deletes or
+    // splits it; unlike upstream #1680 the caret stays where it was.
     await press('Backspace');
     expect(session.storySegments('body')).toEqual(before);
-    expect(session.selection()?.head).toEqual({ story: cellStory, paraId: cell.paraId, offset: 5 });
-    fireEvent.input(textarea, { target: { value: 'Hello' } });
-    await act(async () => { await input.current!.flushPendingInput(); });
-    expect(session.paragraphs(cellStory)[0]!.text).toBe('T1-B2Hello');
-    expect(session.storySegments('body')).toEqual(before);
+    expect(session.paragraphs(cellStory)[0]!.text).toBe('T1-B2');
     expect(() => session.yrsBlocksForStory('body', {})).not.toThrow();
     for (const text of ['T1-A1', 'T1-B1', 'T1-A2', ...(between ? ['T2-A1', 'T2-B1', 'T2-A2', 'T2-B2'] : [])]) {
       expect(session.storyIds().some(story => session.paragraphs(story).some(para => para.text === text))).toBe(true);

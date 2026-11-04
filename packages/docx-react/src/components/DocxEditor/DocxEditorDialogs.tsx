@@ -66,6 +66,7 @@ interface SplitCellDialogState {
 export function DocxEditorDialogs({
   findReplace,
   findResultRef,
+  onFindClose,
   onFind,
   onFindNext,
   onFindPrevious,
@@ -107,6 +108,7 @@ export function DocxEditorDialogs({
   // Find/Replace
   findReplace: ReturnType<typeof useFindReplace>;
   findResultRef: React.RefObject<FindResult | null>;
+  onFindClose: () => void;
   onFind: (searchText: string, options: FindOptions) => FindResult | null;
   onFindNext: () => FindMatch | null;
   onFindPrevious: () => FindMatch | null;
@@ -158,7 +160,7 @@ export function DocxEditorDialogs({
       {findReplace.state.isOpen && (
         <FindReplaceDialog
           isOpen={findReplace.state.isOpen}
-          onClose={findReplace.close}
+          onClose={onFindClose}
           onFind={onFind}
           onFindNext={onFindNext}
           onFindPrevious={onFindPrevious}
