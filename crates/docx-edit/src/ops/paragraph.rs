@@ -421,6 +421,38 @@ fn is_comment_reference<T: ReadTxn>(chunk: &Chunk, txn: &T) -> bool {
         if map_string(map, txn, "modelKind").as_deref() == Some("commentReference"))
 }
 
+/// The run defaults of the empty paragraph Enter starts at a paragraph's end, as Word carries the
+/// insertion point's formatting (upstream #1453): the formatting of the run before the caret
+/// (`before`, the paragraph's units up to it; comment references show nothing and are skipped),
+/// or the mark's own when the paragraph has no run. A block embed is not a run.
+fn caret_run_formatting<T: ReadTxn>(
+    before: &[Chunk],
+    txn: &T,
+    props: &[(String, Any)],
+) -> Option<Any> {
+    let run = before
+        .iter()
+        .rev()
+        .find(|chunk| !is_comment_reference(chunk, txn))
+        .filter(|chunk| match &chunk.kind {
+            ChunkKind::Pilcrow(_) => false,
+            ChunkKind::Embed(Some(map)) => {
+                !map_string(map, txn, KIND_KEY).is_some_and(|kind| is_block_embed(&kind))
+            }
+            _ => true,
+        });
+    match run {
+        Some(run) => crate::seed::mark_run_formatting(&run.attrs),
+        None => {
+            let defaults = props
+                .iter()
+                .find(|(key, _)| key == DEFAULT_TEXT_FORMATTING)
+                .map(|(_, defaults)| crate::seed::mark_run_attrs(defaults))?;
+            crate::seed::mark_run_formatting(defaults.iter().map(|(key, value)| (key, value)))
+        }
+    }
+}
+
 impl EditingDoc {
     /// Splits a paragraph by inserting exactly ONE pilcrow at `at`.
     ///
@@ -438,7 +470,10 @@ impl EditingDoc {
     /// with the text's paragraph, and the empty one's property change takes
     /// the new ids. Comment references show nothing, so Enter before ones that
     /// end the paragraph splits after them: it is Enter at the end, and they
-    /// stay with the text. Suggesting mode stamps the inserted pilcrow `ins`
+    /// stay with the text. The empty paragraph made at the end takes its run
+    /// defaults (`defaultTextFormatting`) from the run before the caret, as
+    /// Word carries the insertion point's formatting, so typing there
+    /// continues in it. Suggesting mode stamps the inserted pilcrow `ins`
     /// and `pPrIns`, reusing an adjacent revision by the same author when there
     /// is one.
     ///
@@ -473,11 +508,15 @@ impl EditingDoc {
 
     fn split_at(&self, ctx: &EditCtx, mut at: Position, before: bool) -> OpResult<SplitReceipt> {
         let second_para_id = self.next_id();
-        let slot = self
-            .segment_index(&at.story)?
-            .para_at(at.index)
-            .filter(|para| para.start == at.index && para.node_start > at.index)
-            .map(|para| (para.node_start, para.pilcrow));
+        let (para_start, slot) = {
+            let index = self.segment_index(&at.story)?;
+            let para = index.para_at(at.index);
+            (
+                para.map_or(at.index, |para| para.start),
+                para.filter(|para| para.start == at.index && para.node_start > at.index)
+                    .map(|para| (para.node_start, para.pilcrow)),
+            )
+        };
         let mut before_block = before || slot.is_some();
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
@@ -527,6 +566,11 @@ impl EditingDoc {
         });
         let (first_para_id, props) = capture_pilcrow(&orig_map, &txn);
         let second_half_empty = orig_index == at.index;
+        // The empty paragraph Enter makes at the end types in the formatting at the caret.
+        let carried = (second_half_empty && !before_block).then(|| {
+            let before = self.snapshot_range_in(&at.story, &story, &txn, para_start, at.index);
+            caret_run_formatting(&before, &txn, &props)
+        });
         // At the end the new mark goes after the source one, which keeps the
         // text and its id, so a peer's concurrent change to the source mark
         // stays on the text. A section's last paragraph keeps inserting before
@@ -596,6 +640,12 @@ impl EditingDoc {
             });
         }
         if after {
+            set_or_remove(
+                &mut txn,
+                &new_pilcrow,
+                DEFAULT_TEXT_FORMATTING,
+                carried.flatten(),
+            );
             return Ok(SplitReceipt {
                 first_para_id,
                 second_para_id,
@@ -617,6 +667,12 @@ impl EditingDoc {
                 let changes = with_fresh_revision_ids(changes, || self.next_id());
                 orig_map.insert(&mut txn, PPR_CHANGE, changes);
             }
+            set_or_remove(
+                &mut txn,
+                &orig_map,
+                DEFAULT_TEXT_FORMATTING,
+                carried.flatten(),
+            );
         }
         if !ctx.is_suggesting() {
             crate::ops::field_changes::split_field(
