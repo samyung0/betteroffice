@@ -37,7 +37,8 @@ async function loadHarness() {
     './xlsx-styles': { normalFontIndex },
   };
   const context = {
-    window: {},
+    // Capy's harness wraps the page's fetch to name a failed font download.
+    window: { fetch: () => Promise.reject(new Error('no network in the harness test')) },
     location: { search: '?format=pptx' },
     URLSearchParams,
     DOMParser: new Window().DOMParser,
