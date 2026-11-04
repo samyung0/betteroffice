@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::f64::consts::PI;
 
 use docx_layout::types::{
@@ -147,7 +147,12 @@ fn lower_shape(
         .map(|start| (Some(start as f64), Some((start + 1) as f64)))
         .unwrap_or((None, None));
     let mut nested_sequences = Vec::new();
-    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences, env);
+    let fill = shape_fill(shape);
+    let background = fill
+        .as_ref()
+        .filter(|fill| fill["type"] == "solid")
+        .and_then(|fill| fill["color"].as_str());
+    let inner_text = shape_inner_text(shape, &block_id, &mut nested_sequences, env, background);
     let mut seen = HashSet::new();
     nested_sequences.retain(|name| seen.insert(name.clone()));
     let position = shape_position(shape);
@@ -157,7 +162,7 @@ fn lower_shape(
         id: BlockId::Str(block_id),
         shape_type,
         geometry_path,
-        fill: shape_fill(shape),
+        fill,
         stroke: shape_stroke(shape),
         transform: shape_transform(shape),
         width,
@@ -387,6 +392,7 @@ fn shape_inner_text(
     block_id: &str,
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
+    background: Option<&str>,
 ) -> Option<Vec<ParagraphBlock>> {
     let text_body = object(shape, "textBody")?;
     let content = text_body.get("content")?.as_array()?;
@@ -399,6 +405,7 @@ fn shape_inner_text(
             &mut blocks,
             nested_sequences,
             env,
+            (None, background),
         );
     }
     Some(blocks)
@@ -413,6 +420,7 @@ fn push_shape_body_block(
     output: &mut Vec<ParagraphBlock>,
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
+    backgrounds: (Option<&str>, Option<&str>),
 ) {
     if depth > MAX_SHAPE_BODY_DEPTH {
         skip_deep_content(block, nested_sequences);
@@ -422,6 +430,7 @@ fn push_shape_body_block(
         Some("table") => {
             for (row_index, row) in array(block, "rows").into_iter().flatten().enumerate() {
                 for (cell_index, cell) in array(row, "cells").into_iter().flatten().enumerate() {
+                    let cell_background = shape_shading(field(cell, "formatting"), env);
                     for (index, child) in array(cell, "content").into_iter().flatten().enumerate() {
                         push_shape_body_block(
                             child,
@@ -430,6 +439,7 @@ fn push_shape_body_block(
                             output,
                             nested_sequences,
                             env,
+                            (cell_background.as_deref().or(backgrounds.0), backgrounds.1),
                         );
                     }
                 }
@@ -444,10 +454,22 @@ fn push_shape_body_block(
                     output,
                     nested_sequences,
                     env,
+                    backgrounds,
                 );
             }
         }
-        _ => output.push(shape_paragraph(block, block_id, nested_sequences, env)),
+        _ => {
+            let mut paragraph = shape_paragraph(block, block_id, nested_sequences, env);
+            // text box tables lower to plain paragraphs, so the cell fill paints behind them
+            if let Some(cell_background) = backgrounds.0 {
+                let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+                if attrs.shading.is_none() {
+                    attrs.shading = Some(cell_background.to_owned());
+                }
+            }
+            super::resolve_paragraph_auto_text_color(&mut paragraph, backgrounds.0, backgrounds.1);
+            output.push(paragraph);
+        }
     }
 }
 
@@ -457,13 +479,31 @@ fn shape_paragraph(
     nested_sequences: &mut Vec<String>,
     env: &RenderEnv,
 ) -> ParagraphBlock {
-    let alignment = object(paragraph, "formatting")
+    let formatting = object(paragraph, "formatting");
+    let alignment = formatting
         .and_then(|value| string_in(value, "alignment"))
         .and_then(|value| match value.as_str() {
             "both" => Some("justify".to_owned()),
             "left" | "center" | "right" => Some(value),
             _ => None,
         });
+    let values: BTreeMap<String, yrs::Any> = formatting
+        .into_iter()
+        .flatten()
+        .filter_map(|(key, value)| {
+            Some((
+                key.clone(),
+                crate::seed::any_from_value(value.clone()).ok()?,
+            ))
+        })
+        .collect();
+    let mut attrs = ParagraphAttrs {
+        alignment,
+        ..ParagraphAttrs::default()
+    };
+    super::lower_paragraph_spacing(&values, &mut attrs, env);
+    super::lower_paragraph_indent(&values, &mut attrs);
+    attrs.shading = shape_shading(field(paragraph, "formatting"), env);
     let mut runs: Vec<Run> = array(paragraph, "content")
         .into_iter()
         .flatten()
@@ -506,10 +546,7 @@ fn shape_paragraph(
         id: BlockId::Str(block_id),
         para_id: string(paragraph, "paraId"),
         runs,
-        attrs: Some(ParagraphAttrs {
-            alignment,
-            ..ParagraphAttrs::default()
-        }),
+        attrs: Some(attrs),
         pm_start: None,
         pm_end: None,
     }
@@ -679,7 +716,10 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
         "PAGE" | "NUMPAGES" | "DATE" | "TIME" => raw_type.clone(),
         _ => "OTHER".to_owned(),
     };
-    let mut fmt = shape_run_formatting(formatting.or_else(|| field(field_value, "formatting")));
+    let mut fmt = shape_run_formatting_with_shading(
+        formatting.or_else(|| field(field_value, "formatting")),
+        env,
+    );
     let mut nested_sequences = crate::seed::nested_sequence_names(field_value);
     if hidden_result {
         nested_sequences.extend(
@@ -705,7 +745,7 @@ fn shape_field_run(field_value: &Value, env: &RenderEnv) -> Run {
 }
 
 fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
-    let formatting = shape_run_formatting(field(run, "formatting"));
+    let formatting = shape_run_formatting_with_shading(field(run, "formatting"), env);
     array(run, "content")
         .into_iter()
         .flatten()
@@ -764,6 +804,18 @@ fn shape_document_runs(run: &Value, env: &RenderEnv) -> Vec<Run> {
         .collect()
 }
 
+fn shape_shading(formatting: Option<&Value>, env: &RenderEnv) -> Option<String> {
+    let shading = field(formatting?, "shading")?;
+    let shading = crate::seed::any_from_value(shading.clone()).ok()?;
+    super::resolve_paragraph_shading(&shading, env)
+}
+
+fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) -> RunFormatting {
+    let mut formatting = shape_run_formatting(source);
+    formatting.highlight = shape_shading(source, env);
+    formatting
+}
+
 fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
     let Some(source) = source.and_then(object_value) else {
         return RunFormatting::default();
@@ -820,6 +872,10 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
     let base = shape_base_color(value)?;
     let mut color = ColorValue {
+        transforms: value
+            .get("transforms")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default(),
         theme_tint: string_in(value, "themeTint"),
         theme_shade: string_in(value, "themeShade"),
         luminance_modulation: number_in(value, "luminanceModulation"),
@@ -1297,6 +1353,30 @@ mod textbox_charts_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_colors_resolve_ordered_drawingml_transforms() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"204060","transforms":[{"kind":"shade","value":0.5}]}),
+                "#142C44",
+            ),
+            (
+                json!({"themeColor":"accent4","transforms":[{"kind":"tint","value":0.4}]}),
+                "#FFE8CB",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"tint","value":0.5},{"kind":"lumMod","value":0.5}]}),
+                "#3F5493",
+            ),
+            (
+                json!({"rgb":"4472C4","transforms":[{"kind":"lumMod","value":0.5},{"kind":"tint","value":0.5}]}),
+                "#BDBFC6",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {

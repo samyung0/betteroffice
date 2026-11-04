@@ -602,11 +602,24 @@ fn table_base(locator: &TableLocator) -> String {
     format!("{}:t{}", locator.story, locator.table_index)
 }
 
+/// Story ids without the `~{client}` suffix of an edit-born cell, so a slot is fresh only when
+/// no replica's cell holds it.
 fn story_ids<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let Some(stories) = txn.get_map(STORIES) else {
         return HashSet::new();
     };
-    stories.iter(txn).map(|(id, _)| id.to_string()).collect()
+    stories
+        .iter(txn)
+        .map(|(id, _)| bare_story_id(id).to_owned())
+        .collect()
+}
+
+fn bare_story_id(id: &str) -> &str {
+    let Some((bare, client)) = id.rsplit_once('~') else {
+        return id;
+    };
+    let digits = !client.is_empty() && client.bytes().all(|byte| byte.is_ascii_digit());
+    if digits { bare } else { id }
 }
 
 fn fresh_row_slot(used: &HashSet<String>, base: &str, start: usize, columns: usize) -> usize {
@@ -630,16 +643,19 @@ fn fresh_column_slot(used: &HashSet<String>, base: &str, rows: usize, start: usi
         .expect("usize address space cannot be exhausted by story ids")
 }
 
+/// A cell story id minted by an edit. The `~{client}` suffix keeps it apart from the cell a
+/// concurrent replica mints for the same slot; ids read from a document carry none.
 fn fresh_cell_story(
     used: &mut HashSet<String>,
     base: &str,
     row: usize,
     mut column: usize,
+    client: u64,
 ) -> String {
     loop {
         let candidate = format!("{base}:r{row}c{column}");
         if used.insert(candidate.clone()) {
-            return candidate;
+            return format!("{candidate}~{client}");
         }
         column += 1;
     }
@@ -1106,7 +1122,7 @@ impl EditingDoc {
         for row in 0..rows as usize {
             let mut cells = Vec::with_capacity(columns as usize);
             for column in 0..columns as usize {
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &story_id)?;
                 cells.push(CellData {
                     tc_pr: HashMap::from([
@@ -1227,7 +1243,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row_slot, column);
+            let story_id = fresh_cell_story(&mut used, &base, row_slot, column, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -1317,7 +1333,7 @@ impl EditingDoc {
                     tc_pr: HashMap::new(),
                     story: String::new(),
                 });
-            let story_id = fresh_cell_story(&mut used, &base, row, column_slot);
+            let story_id = fresh_cell_story(&mut used, &base, row, column_slot, self.client_id());
             let para_id = create_cell_story(self, &mut txn, &story_id)?;
             let mut cell = reset_cell_spans(template);
             cell.story = story_id.clone();
@@ -1616,7 +1632,7 @@ impl EditingDoc {
                     });
                     continue;
                 }
-                let story_id = fresh_cell_story(&mut used, &base, row, column);
+                let story_id = fresh_cell_story(&mut used, &base, row, column, self.client_id());
                 let para_id = create_cell_story(self, &mut txn, &story_id)?;
                 let mut cell = reset_cell_spans(target.cell.clone());
                 cell.story = story_id.clone();
@@ -2114,12 +2130,12 @@ mod tests {
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c0".to_owned())
+                .contains(&format!("body:t0:r2c0~{}", doc.client_id()))
         );
         assert!(
             receipt
                 .created_story_ids
-                .contains(&"body:t0:r2c1".to_owned())
+                .contains(&format!("body:t0:r2c1~{}", doc.client_id()))
         );
         for story in &receipt.created_story_ids {
             assert_eq!(doc.paragraphs(story).unwrap().len(), 1);
@@ -2394,12 +2410,12 @@ mod tests {
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r0c2".to_owned())
+                .contains(&format!("body:t0:r0c2~{}", doc.client_id()))
         );
         assert!(
             inserted
                 .created_story_ids
-                .contains(&"body:t0:r1c2".to_owned())
+                .contains(&format!("body:t0:r1c2~{}", doc.client_id()))
         );
         let (_, grid, rows) = table_value(&doc);
         assert_eq!(grid.as_array().unwrap().len(), 3);
@@ -2812,8 +2828,17 @@ mod tests {
         TableRange::new(cell(0, 0), cell(rows - 1, columns - 1))
     }
 
+    /// The first body table's cell story; a cell an edit made carries its replica's `~{client}`.
+    fn cell_story(doc: &EditingDoc, row: u32, column: u32) -> String {
+        let bare = format!("body:t0:r{row}c{column}");
+        doc.story_ids_for_test()
+            .into_iter()
+            .find(|id| bare_story_id(id) == bare)
+            .unwrap()
+    }
+
     fn type_in(doc: &EditingDoc, row: u32, column: u32, text: &str) {
-        let story = format!("body:t0:r{row}c{column}");
+        let story = cell_story(doc, row, column);
         doc.insert_text(
             &direct(),
             Position::new(story.as_str(), 0),
@@ -2928,7 +2953,7 @@ mod tests {
         type_in(&doc, 0, 0, "A");
         type_in(&doc, 0, 1, "B");
         for _ in 0..3 {
-            doc.split_paragraph(&direct(), Position::new("body:t0:r0c1", 1))
+            doc.split_paragraph(&direct(), Position::new(cell_story(&doc, 0, 1), 1))
                 .unwrap();
         }
         let top = runs(&doc, "A")[0].2;
@@ -3090,8 +3115,8 @@ mod tests {
         sync(&left, &right);
         assert_eq!(table_value(&left), table_value(&right));
         assert_eq!(
-            project_story(&right, "body:t0:r0c0").unwrap(),
-            project_story(&left, "body:t0:r0c0").unwrap()
+            project_story(&right, &cell_story(&right, 0, 0)).unwrap(),
+            project_story(&left, &cell_story(&left, 0, 0)).unwrap()
         );
         assert!(runs(&left, "typed").len() == 1 && runs(&right, "typed").len() == 1);
 
@@ -3249,11 +3274,12 @@ mod tests {
 
     #[test]
     fn an_auto_fitted_table_holding_a_nested_table_keeps_its_grid() {
-        let inner = TableLocator::new("body:t0:r0c0", 0);
         for inner_auto in [false, true] {
             let doc = inserted(&direct(), 1, 2);
+            let outer_cell = cell_story(&doc, 0, 0);
+            let inner = TableLocator::new(outer_cell.as_str(), 0);
             type_in(&doc, 0, 1, "Label");
-            doc.insert_table(&direct(), Position::new("body:t0:r0c0", 0), 1, 2, 12)
+            doc.insert_table(&direct(), Position::new(outer_cell.as_str(), 0), 1, 2, 12)
                 .unwrap();
             if inner_auto {
                 doc.autofit_table(&direct(), &inner).unwrap();

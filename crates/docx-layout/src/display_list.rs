@@ -12609,7 +12609,15 @@ pub fn build_resident_display_pages_from_with_fonts_observed(
             .clone()
             .map(|index| std::mem::take(&mut input.layout.pages[index]))
             .collect();
-        refresh_resident_display_pages(input, pagination, layout, batch.clone())?;
+        let reading: HashSet<usize> = batch.clone().collect();
+        refresh_resident_display_pages_reading(
+            input,
+            pagination,
+            layout,
+            batch.clone(),
+            &reading,
+            None,
+        )?;
         if !converted {
             converted = true;
             observe_phase();
@@ -14600,10 +14608,12 @@ mod tests {
 
     /// Every retained primitive carries its attributes inline, so rarely set
     /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
+    /// Capy's glyph runs are 8 bytes over upstream's 1152: its `cluster_runs` flag and
+    /// tab/break counts beside #1732's echo widths (S3 DOCX report).
     #[test]
     fn retained_primitives_stay_compact() {
         assert!(std::mem::size_of::<DocAttrs>() <= 800);
-        assert!(std::mem::size_of::<Primitive>() <= 1152);
+        assert!(std::mem::size_of::<Primitive>() <= 1160);
     }
 
     /// The resident input as it was built before typed transcoding: every

@@ -621,8 +621,14 @@ fn strip_control(id: &str) -> Option<String> {
         .then(|| id[..at].to_owned())
 }
 
-/// Ends in `:tN:rNcN`.
+/// Ends in `:tN:rNcN`, with a `~<client>` suffix when an edit made it.
 fn is_cell_story(id: &str) -> bool {
+    let id = match id.rsplit_once('~') {
+        Some((id, client)) if !client.is_empty() && client.bytes().all(|b| b.is_ascii_digit()) => {
+            id
+        }
+        _ => id,
+    };
     let Some(at) = id.rfind(":t") else {
         return false;
     };
@@ -879,6 +885,11 @@ mod tests {
         assert_eq!(enclosing_cell_story("body:sdt1"), None);
         assert!(is_cell_story("hf:rId7:t2:r10c0"));
         assert!(!is_cell_story("body:t0:r1"));
+        assert!(is_cell_story("body:t0:r1c2~51"));
+        assert_eq!(
+            enclosing_cell_story("body:t0:r1c2~51:sdt0").as_deref(),
+            Some("body:t0:r1c2~51")
+        );
     }
 
     #[test]

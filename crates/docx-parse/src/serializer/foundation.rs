@@ -56,6 +56,11 @@ pub fn serialize_border(border: Option<&BorderSpec>, side: BorderSide) -> String
 
 pub(super) fn write_border(writer: &mut XmlWriter, border: &BorderSpec, side: BorderSide) {
     writer.start_element(side.qname());
+    if matches!(border.style.as_str(), "none" | "nil") {
+        writer.attribute("w:val", &border.style).end_element();
+        return;
+    }
+
     writer.attribute("w:val", &border.style);
     if let Some(value) = border.size {
         writer.attribute("w:sz", &int_attr(Some(value)));
@@ -321,7 +326,7 @@ mod tests {
         };
         assert_eq!(
             serialize_border(Some(&nil), BorderSide::Right),
-            "<w:right w:val=\"nil\" w:sz=\"8\" w:space=\"2\" w:color=\"FF00&quot;/&gt;&lt;evil\" w:themeColor=\"accent&amp;1\" w:themeTint=\"80&apos;\" w:shadow=\"true\" w:frame=\"true\"/>"
+            "<w:right w:val=\"nil\"/>"
         );
     }
 

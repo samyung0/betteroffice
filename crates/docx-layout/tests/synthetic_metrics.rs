@@ -6,6 +6,14 @@ use docx_layout::types::{BlockExtent, Input, LayoutBlock, MeasuredBlock, Paragra
 use std::collections::BTreeMap;
 
 const CONTENT_WIDTH: f64 = 624.0;
+
+/// The runs a measured line holds, from its head run to its tail run.
+fn line_runs<'a>(
+    runs: &'a [Run],
+    line: &docx_layout::types::TypesetRow,
+) -> impl Iterator<Item = &'a Run> {
+    (line.head_run..=line.tail_run).filter_map(|index| runs.get(index))
+}
 const FONT_SIZE_PT: f64 = 11.0;
 const FONT_SIZE_PX: f64 = FONT_SIZE_PT * 96.0 / 72.0;
 const LIBERATION: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
@@ -574,17 +582,13 @@ fn missing_fonts_wrap_inline_items_once_on_the_next_row() {
         };
         let extent = measure_paragraph(paragraph, 32.0, &fallback_config()).unwrap();
         assert_eq!(extent.lines.len(), 3, "{item}");
-        let segments: Vec<_> = extent
+        let item_kind = std::mem::discriminant(&block.runs[1]);
+        let counts: Vec<_> = extent
             .lines
             .iter()
-            .map(|line| docx_layout::resolve_lines::resolve_line_segments(&block.runs, line))
-            .collect();
-        let item_kind = std::mem::discriminant(&block.runs[1]);
-        let counts: Vec<_> = segments
-            .iter()
-            .map(|row| {
-                row.iter()
-                    .filter(|segment| std::mem::discriminant(&segment.run) == item_kind)
+            .map(|line| {
+                line_runs(&block.runs, line)
+                    .filter(|run| std::mem::discriminant(*run) == item_kind)
                     .count()
             })
             .collect();
@@ -604,11 +608,11 @@ fn missing_fonts_wrap_inline_items_once_on_the_next_row() {
         assert_eq!(extent.lines[0].width, 32.0);
         assert_eq!(extent.lines[1].width, 24.0);
         assert_eq!(extent.lines[2].width, 16.0);
-        for (row, line) in segments.iter().zip(&extent.lines) {
-            let width: f64 = row
-                .iter()
-                .map(|segment| match &segment.run {
-                    Run::Text(text) => fallback_width(&segment.text, text.fmt.font_size.unwrap()),
+        // Every line here holds whole runs, so a text run's width is its own text's.
+        for line in &extent.lines {
+            let width: f64 = line_runs(&block.runs, line)
+                .map(|run| match run {
+                    Run::Text(text) => fallback_width(&text.text, text.fmt.font_size.unwrap()),
                     Run::Image(image) => image.width,
                     Run::Tab(tab) => tab.width.unwrap(),
                     Run::Field(field) => fallback_width(
@@ -653,10 +657,10 @@ fn missing_fonts_keep_an_inline_row_head_after_a_hard_break() {
             (line.head_run, line.head_char, line.tail_run, line.tail_char),
             (1, 0, 1, 1)
         );
-        let segments = docx_layout::resolve_lines::resolve_line_segments(&block.runs, line);
-        assert_eq!(segments.len(), 1);
+        let runs: Vec<_> = line_runs(&block.runs, line).collect();
+        assert_eq!(runs.len(), 1);
         assert_eq!(
-            std::mem::discriminant(&segments[0].run),
+            std::mem::discriminant(runs[0]),
             std::mem::discriminant(&block.runs[1])
         );
         assert_eq!(line.width, 24.0);

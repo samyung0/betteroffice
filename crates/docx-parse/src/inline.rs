@@ -407,6 +407,8 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 xml: child.to_raw_inline_xml(),
                 text: Some(ruby_base_text(child)),
                 preview: None,
+                previews: Vec::new(),
+                text_box: None,
             }),
             "cr" => output.push(RunContent::Break {
                 break_type: Some("textWrapping".to_owned()),

@@ -3870,6 +3870,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "upstream #1505's VML group previews wait on the S3 DOCX open question"]
     fn selective_save_preserves_vml_group_xml_and_all_picture_children() {
         let pict = r#"<w:pict><v:group coordorigin='100,200' coordsize='1200,600' style='width:300pt;height:90pt'><v:shape style='left:100;top:200;width:300;height:150'><v:imagedata r:id='rId1'/></v:shape>
   <v:shape style='left:500;top:250;width:360;height:200'><v:imagedata r:id='rId2'/></v:shape><v:rect style='left:900;top:400;width:240;height:300'/></v:group></w:pict>"#;

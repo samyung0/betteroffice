@@ -245,6 +245,8 @@ pub(crate) fn vml_image_content(
         .next()
 }
 
+// Capy reads one picture per VML group until #1505 is ported (open question, S3).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn vml_image_contents(
     picture: &XmlElement,
     relationships: Option<&RelationshipMap>,

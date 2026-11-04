@@ -273,7 +273,7 @@ test("Word-like DOCX runs merge on export and keep per-character formatting and 
 // budget is the measured size plus 2%, so an updated hash cannot hide growth.
 const goldenSeeds: Array<[string, string, number]> = [
   ["exchange-plan.docx", "5d5d37b03bbe545798fa8dd857fe63ac35c1091c6a2be961e01994bc14644c77", 317_900],
-  ["opaque-objects.docx", "b45ccb6d6b7a89f7e6b6f17999673c226a2811b6faa5d756f14c464361e66f6c", 49_400],
+  ["opaque-objects.docx", "8a9819afa8d61543f77a96638b7944e3a8802b977436f9e34e09f36183eb62f9", 50_200],
   ["book-30p.docx", "e33981cb70104e49efa99b4f4f01d6b383888313ffacffb494bd1983a71dbea7", 264_400],
   ["images-10.docx", "00a3ff428d170c4023eefa7a8df186f42972a1b21765a9bc2f02ec2fda0a6b4e", 69_700],
   ["wordprocessingml-comprehensive.docx", "6dd2ecaffcb73b1e7487bcb08afce2f7f735c2c1ce35946ad30fbbcc4bf7b64b", 83_400],
