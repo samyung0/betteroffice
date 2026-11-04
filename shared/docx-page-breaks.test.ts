@@ -1501,9 +1501,12 @@ describe.each(EVERY)(
     ] as const;
     test.each(
       slots.flatMap(([name, slot, order]) =>
-        (["forward", "backward"] as const).map(
-          (direction) => [name, direction, slot, order] as const
-        )
+        // Backspace at the start of a table-led slot moves the caret into the
+        // table (Q543 B), so only Delete removes the paragraph above a table.
+        (name === "a table"
+          ? (["forward"] as const)
+          : (["forward", "backward"] as const)
+        ).map((direction) => [name, direction, slot, order] as const)
       )
     )(
       "before %s moves it to the paragraph that stays: %s",
