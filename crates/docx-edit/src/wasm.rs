@@ -2772,6 +2772,27 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
+    /// Inserts a line break (`w:br`, Shift+Enter) at `(story, para_id,
+    /// offset)`: one inline unit inside the paragraph, with the formatting at
+    /// the insertion point. Receipt as [`EditSession::insert_text`]'s.
+    pub fn insert_line_break(
+        &self,
+        story: &str,
+        para_id: &str,
+        offset: u32,
+        author_name: Option<String>,
+        author_date: Option<String>,
+    ) -> Result<String, JsValue> {
+        let at = loc_index(self.engine.doc(), story, para_id, offset)?;
+        let ctx = edit_ctx(author_name, author_date)?;
+        let receipt = self
+            .engine
+            .doc()
+            .insert_hard_break(&ctx, Position::new(story, at))
+            .map_err(js_err)?;
+        Ok(landed_receipt(receipt).to_string())
+    }
+
     /// Inserts `text` at `(story, para_id, offset)`, or after the tables and
     /// breaks that open that paragraph slot when the location is ahead of
     /// them. It must contain no paragraph or line breaks, and it inherits the
@@ -4297,6 +4318,34 @@ mod tests {
                 r#"{"caret":{"offset":1,"paraId":"p1","story":"body"},"revisionId":null}"#
             );
         }
+    }
+
+    #[test]
+    fn a_line_break_is_one_inline_unit_inside_the_paragraph() {
+        let session = EditSession::new(24.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p1", "ab", "Normal", "left")
+            .unwrap();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .insert_line_break("body", "p1", 1, None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt["range"]["start"]["offset"], 1);
+        assert_eq!(receipt["range"]["end"]["offset"], 2);
+        assert_eq!(doc.paragraphs("body").unwrap().len(), 1);
+        let shown: Vec<String> = doc
+            .story_segments("body")
+            .unwrap()
+            .into_iter()
+            .map(|segment| match segment.content {
+                crate::SegmentContent::Text(text) => text,
+                crate::SegmentContent::Pilcrow(_) => "¶".into(),
+                crate::SegmentContent::OtherEmbed { kind, .. } => format!("[{kind}]"),
+            })
+            .collect();
+        assert_eq!(shown, ["a", "[break]", "b", "¶"]);
     }
 
     #[test]

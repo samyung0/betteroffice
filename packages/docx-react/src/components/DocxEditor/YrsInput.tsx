@@ -718,6 +718,30 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     suggestingAuthor,
   ]);
 
+  // Shift+Enter: a line break inside the paragraph, as in Word (#1488).
+  const insertLineBreak = useCallback((): void => {
+    if (pointerSelectionBlockedRef.current) return;
+    verticalCaretGoalRef.current.reset();
+    dispatchCaretInput();
+    enqueueInputOperation(() => {
+      if (!session || readOnly) return;
+      const at = deleteSelected() ?? ensureSelection()?.head;
+      if (!at) return;
+      const { range } = session.insertLineBreak(at, suggestingAuthor());
+      session.setSelection({ story: range.story, ...range.end });
+      finishMutation();
+    });
+  }, [
+    deleteSelected,
+    dispatchCaretInput,
+    enqueueInputOperation,
+    ensureSelection,
+    finishMutation,
+    readOnly,
+    session,
+    suggestingAuthor,
+  ]);
+
   const toggleMark = useCallback(
     (mark: YrsRunMark): void => {
       if (pointerSelectionBlockedRef.current) return;
@@ -1025,9 +1049,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (native.inputType === 'insertText' || native.inputType === 'insertReplacementText') {
         event.preventDefault();
         insertText(native.data ?? '');
-      } else if (native.inputType === 'insertParagraph' || native.inputType === 'insertLineBreak') {
+      } else if (native.inputType === 'insertParagraph') {
         event.preventDefault();
         splitParagraph();
+      } else if (native.inputType === 'insertLineBreak') {
+        event.preventDefault();
+        insertLineBreak();
       } else if (native.inputType === 'deleteContentBackward') {
         event.preventDefault();
         deleteDirection('backward');
@@ -1036,7 +1063,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         deleteDirection('forward');
       }
     },
-    [deleteDirection, insertText, splitParagraph]
+    [deleteDirection, insertLineBreak, insertText, splitParagraph]
   );
 
   const handleKeyDown = useCallback(
@@ -1073,7 +1100,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         );
       } else if (event.key === 'Enter') {
         event.preventDefault();
-        splitParagraph();
+        if (event.shiftKey) insertLineBreak();
+        else splitParagraph();
       } else if (event.key === 'Tab' && moveTableCell(event.shiftKey)) {
         event.preventDefault();
       } else if (event.key === 'Backspace') {
@@ -1103,6 +1131,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     },
     [
       deleteDirection,
+      insertLineBreak,
       moveSelection,
       moveTableCell,
       selectAll,

@@ -275,6 +275,19 @@ test('Enter at the visible end of a paragraph ending in a field, or before comme
   }
 });
 
+test('Shift+Enter breaks the line inside the paragraph (#1488)', async () => {
+  const { session, input, view } = await mount();
+  const [seed] = session.paragraphs('body');
+  act(() => session.setSelection({ story: 'body', paraId: seed.paraId, offset: 2 }));
+  fireEvent.keyDown(view.getByTestId('yrs-input'), { key: 'Enter', shiftKey: true });
+  await act(async () => {
+    await input.current!.flushPendingInput();
+  });
+  expect(session.paragraphs('body')).toHaveLength(1);
+  expect(session.storySegments('body').map((segment) => segment.kind)).toEqual(['text', 'embed', 'text', 'pilcrow']);
+  expect(session.selection()?.head).toEqual({ story: 'body', paraId: seed.paraId, offset: 3 });
+});
+
 test('Delete before a field that shows nothing at the story end leaves input working', async () => {
   const { session, input, view } = await mount();
   const [seed] = session.paragraphs('body');

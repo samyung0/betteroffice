@@ -983,6 +983,8 @@ export interface YrsSession extends CollaborationReplica {
    * after them.
    */
   insertText(at: YrsLoc, text: string, suggesting?: YrsAuthor): YrsInsertReceipt;
+  /** Inserts a line break (Shift+Enter) inside the paragraph; the range is where it landed. */
+  insertLineBreak(at: YrsLoc, suggesting?: YrsAuthor): YrsInsertReceipt;
   /**
    * Deletes a range (plain) or marks it as a suggested deletion (suggesting).
    * A range spanning paragraphs also merges them (pilcrow-as-character).
@@ -1851,6 +1853,21 @@ function wrapSession(
               at.paraId,
               at.offset,
               text,
+              suggesting?.name,
+              suggesting?.date
+            )
+          ) as YrsInsertReceipt
+      );
+    },
+    insertLineBreak: (at, suggesting) => {
+      ensureUndo(at.story);
+      return mutate(
+        () =>
+          JSON.parse(
+            session.insert_line_break(
+              at.story,
+              at.paraId,
+              at.offset,
               suggesting?.name,
               suggesting?.date
             )

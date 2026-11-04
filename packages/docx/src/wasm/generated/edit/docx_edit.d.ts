@@ -396,6 +396,12 @@ export class EditSession {
      */
     insert_image(story: string, para_id: string, offset: number, payload_json: string, author_name?: string | null, author_date?: string | null): string;
     /**
+     * Inserts a line break (`w:br`, Shift+Enter) at `(story, para_id,
+     * offset)`: one inline unit inside the paragraph, with the formatting at
+     * the insertion point. Receipt as [`EditSession::insert_text`]'s.
+     */
+    insert_line_break(story: string, para_id: string, offset: number, author_name?: string | null, author_date?: string | null): string;
+    /**
      * Inserts a page-break embed at `(story, para_id, offset)`, occupying one
      * story unit; with an author, a tracked insertion.
      */
@@ -1189,6 +1195,7 @@ export interface InitOutput {
     readonly editsession_history_stories: (a: number) => [number, number];
     readonly editsession_insert_column: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_insert_image: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+    readonly editsession_insert_line_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly editsession_insert_page_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number];
     readonly editsession_insert_row: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_insert_section_break: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
