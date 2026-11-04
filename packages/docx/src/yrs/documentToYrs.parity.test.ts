@@ -3,12 +3,31 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
+import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
 import { preloadEditWasm } from '../wasm/edit';
 import { createYrsSession, type YrsSession } from './index';
 import { documentToYrs } from './documentToYrs';
 
 const WASM = resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../../../apps/demo/public/betteroffice-demo.docx');
+const OPAQUE_OBJECTS = resolve(import.meta.dir, '../../../../poc/fixtures/opaque-objects.docx');
+const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
+const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+const PNG = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg=='), (char) => char.charCodeAt(0));
+
+/** A body paragraph holding a VML horizontal-rule picture (`o:hr="t"`). */
+function vmlRuleDocx(): Uint8Array {
+  const parts = new Map(
+    Object.entries({
+      '[Content_Types].xml': '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRule" Type="${R}/image" Target="media/rule.png"/></Relationships>`,
+      'word/document.xml': `<w:document xmlns:w="${W}" xmlns:r="${R}" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p><w:r><w:pict><v:shape id="rule" style="width:487.05pt;height:2.85pt" o:hrpct="0" o:hralign="center" o:hr="t"><v:imagedata r:id="rIdRule" o:title="rule"/></v:shape></w:pict></w:r></w:p><w:sectPr/></w:body></w:document>`,
+    }).map(([path, xml]) => [path, toBytes(xml)])
+  );
+  parts.set('word/media/rule.png', PNG);
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
 
 function expectEquivalentStories(left: YrsSession, right: YrsSession): void {
   expect(left.storyIds()).toEqual(right.storyIds());
@@ -63,6 +82,22 @@ describe('DOCX engine seeding', () => {
     } finally {
       projected.destroy();
       engine.destroy();
+    }
+  });
+
+  it('seeds a legacy VML text box (#1735) and a VML horizontal rule (#1725) as the engine does', async () => {
+    for (const bytes of [Uint8Array.from(readFileSync(OPAQUE_OBJECTS)), vmlRuleDocx()]) {
+      const projected = await createYrsSession({ clientId: 0 });
+      const engine = await createYrsSession({ clientId: 47004 });
+      try {
+        documentToYrs(projected, await parseDocx(bytes.slice().buffer));
+        engine.seedFromDocx(bytes);
+        expectEquivalentStories(engine, projected);
+        expect(engine.encodeState()).toEqual(projected.encodeState());
+      } finally {
+        projected.destroy();
+        engine.destroy();
+      }
     }
   });
 

@@ -489,12 +489,18 @@ function imagePayload(image: Image): Attrs {
     effectExtentRight: image.padding?.right != null ? emuToPixels(image.padding.right) : null,
     layoutInCell: image.layoutInCell ?? null,
     allowOverlap: image.allowOverlap ?? null,
+    horizontalRule: image.horizontalRule ?? null,
   }) as Attrs;
 }
 
 /** Carries the authored XML a picture or shape replays on save while unedited. */
 function withSourceXml(payload: Attrs, sourceXml: string | undefined): Attrs {
   return sourceXml === undefined ? payload : { ...payload, sourceXml };
+}
+
+/** Leaves out the source paragraph ordinals the native seed never writes into display JSON. */
+function withoutSourceOrdinal(key: string, value: unknown): unknown {
+  return key === 'sourceOrdinal' ? undefined : value;
 }
 
 function shapePayload(shape: Shape): Attrs {
@@ -930,6 +936,8 @@ function runContentToUnits(content: RunContent, marks: readonly MarkDescriptor[]
             kind: content.kind,
             xml: content.xml,
             ...(content.text === undefined ? {} : { text: content.text }),
+            // A legacy VML text box's display-only shape (#1735).
+            ...(content.textBox ? { textBoxJson: JSON.stringify(content.textBox, withoutSourceOrdinal) } : {}),
           },
           content.kind === 'ruby' ? marks : []
         ),
