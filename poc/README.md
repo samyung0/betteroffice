@@ -10,7 +10,7 @@ and a remaining DOCX lowering caveat**.
 
 ## Run it
 
-BetterOffice CI pins Bun 1.3.14. Use that version; older Bun releases fail
+BetterOffice CI pins Bun 1.4.3. Use that version; older Bun releases fail
 upstream tests because their runtime APIs differ.
 
 ```sh
