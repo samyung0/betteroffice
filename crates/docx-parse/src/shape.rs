@@ -245,7 +245,34 @@ pub struct ShapeTextBody {
     pub auto_fit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub margins: Option<RelativeRect>,
+    #[serde(serialize_with = "serialize_sorted")]
     pub content: Vec<serde_json::Value>,
+}
+
+/// Writes JSON values with every object's keys sorted. A serde_json map keeps insertion order
+/// when the build turns on serde_json's `preserve_order` (Capy's collaboration server does) and
+/// sorts its keys otherwise, so the seed is the same bytes in every build only if this sorts.
+fn serialize_sorted<S: serde::Serializer>(
+    values: &[serde_json::Value],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_seq(values.iter().map(Sorted))
+}
+
+struct Sorted<'a>(&'a serde_json::Value);
+
+impl Serialize for Sorted<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0 {
+            serde_json::Value::Array(values) => serializer.collect_seq(values.iter().map(Sorted)),
+            serde_json::Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+                serializer.collect_map(entries.into_iter().map(|(key, value)| (key, Sorted(value))))
+            }
+            value => value.serialize(serializer),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
