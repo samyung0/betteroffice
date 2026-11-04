@@ -10,6 +10,7 @@ export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_start: () => void;
+export const allocationFailure: () => number;
 export const betteroffice_memory_grows: () => number;
 export const memory: WebAssembly.Memory;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -56,6 +57,7 @@ export const xlsxdocument_renderRangePng: (a: number, b: number, c: number) => [
 export const xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
 export const xlsxdocument_saveBytesAt: (a: number, b: number) => [number, number, number, number];
 export const xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
 export const xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];

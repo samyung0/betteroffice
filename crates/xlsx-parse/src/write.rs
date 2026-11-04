@@ -866,10 +866,9 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
 
 /// What one sheet wants written into a chart part it anchors.
 struct ChartClaim<'a> {
-    chart: &'a SheetChart,
     refs: &'a [ChartRef],
     sheet: &'a str,
-    original_refs: std::borrow::Cow<'a, [ChartRef]>,
+    original_refs: &'a [ChartRef],
     original_sheet: &'a str,
 }
 
@@ -899,13 +898,12 @@ fn patch_chart_parts(
             .unwrap_or_default();
         for chart in &sheet.charts {
             let original = source_chart(source, chart, &sheet.name)?;
-            if chart.raw_xml.is_none()
-                && (original.refs.len() != chart.refs.len()
-                    || original
-                        .refs
-                        .iter()
-                        .zip(&chart.refs)
-                        .any(|(original, edited)| original.kind != edited.kind))
+            if original.refs.len() != chart.refs.len()
+                || original
+                    .refs
+                    .iter()
+                    .zip(&chart.refs)
+                    .any(|(original, edited)| original.kind != edited.kind)
             {
                 return Err(ParseError::UnsupportedEdit(format!(
                     "chart {} no longer holds the references it was read from",
@@ -916,15 +914,9 @@ fn patch_chart_parts(
                 .entry(chart.part.as_str())
                 .or_default()
                 .push(ChartClaim {
-                    chart,
                     refs: chart.refs.as_slice(),
                     sheet: sheet.name.as_str(),
-                    original_refs: match &chart.raw_xml {
-                        Some(xml) => {
-                            std::borrow::Cow::Owned(crate::chart::chart_references(xml.as_bytes())?)
-                        }
-                        None => std::borrow::Cow::Borrowed(original.refs.as_slice()),
-                    },
+                    original_refs: original.refs.as_slice(),
                     original_sheet: original_sheet.map_or(&sheet.name, |sheet| &sheet.name),
                 });
             claim_anchor(
@@ -937,9 +929,7 @@ fn patch_chart_parts(
     }
     let mut refreshes = Vec::new();
     for (path, claims) in chart_refs {
-        let moved = claims.iter().any(|claim| {
-            claim.refs != claim.original_refs.as_ref() || claim.chart.raw_xml.is_some()
-        });
+        let moved = claims.iter().any(|claim| claim.refs != claim.original_refs);
         let Some(source) = package.part_bytes(path) else {
             if moved {
                 return Err(missing_part(path));
@@ -1023,21 +1013,13 @@ fn agreed_chart_bytes(
 ) -> Result<Option<Vec<u8>>, ParseError> {
     let mut agreed: Option<(Vec<u8>, &str)> = None;
     for claim in claims {
-        let base = match &claim.chart.raw_xml {
-            Some(xml) => crate::tree::Part::decode(source)?.encode_text(xml),
-            None => source.to_vec(),
-        };
         let bytes = crate::chart::patch_chart_refs(
-            &base,
+            source,
             path,
             claim.refs,
             wb,
             claim.sheet,
-            claim
-                .chart
-                .raw_xml
-                .is_none()
-                .then_some((original, claim.original_sheet)),
+            (original, claim.original_sheet),
         )?;
         match &agreed {
             Some((first, owner)) if *first != bytes => {
@@ -1057,9 +1039,7 @@ fn refreshed_chart_bytes(
     original: &Workbook,
 ) -> Option<Vec<u8>> {
     let plan = crate::chart::ChartRefreshPlan::new(source);
-    let mut refresh = plan
-        .save_refresh(wb, original)
-        .edited(claims.iter().any(|claim| claim.chart.raw_xml.is_some()));
+    let mut refresh = plan.save_refresh(wb, original);
     let mut refreshed = None;
     let mut seen: BTreeMap<_, Vec<&[ChartRef]>> = BTreeMap::new();
     for claim in claims {
@@ -1078,16 +1058,12 @@ fn refreshed_chart_bytes(
             ""
         };
         let references = seen.entry((owner, original_owner)).or_default();
-        if references.contains(&claim.original_refs.as_ref()) {
+        if references.contains(&claim.original_refs) {
             continue;
         }
-        references.push(claim.original_refs.as_ref());
+        references.push(claim.original_refs);
         let bytes = refresh
-            .refresh_changed(
-                claim.sheet,
-                claim.original_sheet,
-                claim.original_refs.as_ref(),
-            )
+            .refresh_changed(claim.sheet, claim.original_sheet, claim.original_refs)
             .unwrap_or_else(|| source.to_vec());
         match &refreshed {
             Some(first) if *first != bytes => return None,

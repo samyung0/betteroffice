@@ -129,6 +129,10 @@ export class XlsxDocument {
     saveBytes(): Uint8Array;
     saveBytesAt(now_serial: number): Uint8Array;
     searchTextJson(args: string): string;
+    /**
+     * what keyboard navigation from a cell reaches (`Workbook::selection_data`).
+     */
+    selectionDataJson(args: string): string;
     selectionFormattingJson(args: string): string;
     /**
      * switch the active sheet by index.
@@ -169,6 +173,12 @@ export class XlsxEffectsReader {
     pendingEffectsJson(state: Uint8Array): string | undefined;
 }
 
+/**
+ * bytes of the last allocation the engine could not get, or 0: Rust aborts
+ * on a failed allocation, so this tells that trap from a panic (upstream #1730).
+ */
+export function allocationFailure(): number;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -182,6 +192,7 @@ export interface InitOutput {
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
+    readonly allocationFailure: () => number;
     readonly betteroffice_memory_grows: () => number;
     readonly memory: WebAssembly.Memory;
     readonly xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -228,6 +239,7 @@ export interface InitOutput {
     readonly xlsxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly xlsxdocument_saveBytesAt: (a: number, b: number) => [number, number, number, number];
     readonly xlsxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_selectionDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_selectionFormattingJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_setActiveSheet: (a: number, b: number) => [number, number];
     readonly xlsxdocument_setRangeNumberFormatJson: (a: number, b: number, c: number) => [number, number, number, number];

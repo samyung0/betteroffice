@@ -4,7 +4,15 @@
  * chrome and this layer stays a deterministic reducer core.
  */
 
-import type { CellAddr, CellRange, Direction, MoveOpts, Selection, SelectionLimits } from './types';
+import type {
+  CellAddr,
+  CellRange,
+  Direction,
+  MoveOpts,
+  Selection,
+  SelectionLimits,
+  SelectionMerges,
+} from './types';
 
 function clamp(value: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, value));
@@ -80,33 +88,53 @@ export function extendTo(sel: Selection, addr: CellAddr, limits?: SelectionLimit
     : { anchor: { ...sel.anchor }, focus };
 }
 
-function delta(direction: Direction, step: number): CellAddr {
-  switch (direction) {
-    case 'up':
-      return { row: -step, col: 0 };
-    case 'down':
-      return { row: step, col: 0 };
-    case 'left':
-      return { row: 0, col: -step };
-    case 'right':
-      return { row: 0, col: step };
-  }
+/** The top-left cell of the merged range holding `addr`, else `addr`. */
+export function mergeAnchor(addr: CellAddr, merges?: SelectionMerges): CellAddr {
+  const merged = merges?.mergeAt(addr.row, addr.col);
+  return merged ? { row: merged.top, col: merged.left } : { ...addr };
 }
 
 /**
  * Step one (or `step`) cells in a direction. When `extend` is set the anchor
  * holds and the focus moves, growing the range; otherwise the selection
- * collapses onto the cell that far from the active cell. The
- * result is clamped to the grid bounds in `opts.limits`.
+ * collapses onto the cell that far from the active cell. Hidden rows and
+ * columns are stepped over, and a merged range counts as one cell: a move
+ * leaves it from its far edge and a collapsed move landing in one lands on its
+ * top-left cell, as in Excel. The result stays inside the grid bounds in
+ * `opts.limits`.
  */
 export function moveFocus(sel: Selection, direction: Direction, opts: MoveOpts): Selection {
-  const { limits } = opts;
-  const step = opts.step ?? 1;
-  const d = delta(direction, step);
+  const { limits, hidden, merges } = opts;
+  const vertical = direction === 'up' || direction === 'down';
+  const back = direction === 'up' || direction === 'left';
   const from = opts.extend ? sel.focus : activeCell(sel);
-  const next: CellAddr = {
-    row: clamp(from.row + d.row, 0, limits.rows - 1),
-    col: clamp(from.col + d.col, 0, limits.cols - 1),
-  };
-  return opts.extend ? extendTo(sel, next) : selectionAt(next);
+  const merged = merges?.mergeAt(from.row, from.col);
+  const start = merged
+    ? vertical
+      ? back
+        ? merged.top
+        : merged.bottom
+      : back
+        ? merged.left
+        : merged.right
+    : vertical
+      ? from.row
+      : from.col;
+  const limit = vertical ? limits.rows : limits.cols;
+  const isHidden = vertical ? hidden?.isRowHidden : hidden?.isColHidden;
+  const step = back ? -1 : 1;
+  let position = clamp(start, 0, limit - 1);
+  for (let remaining = opts.step ?? 1; remaining > 0; remaining--) {
+    let next = position + step;
+    while (next >= 0 && next < limit && isHidden?.(next)) next += step;
+    if (next < 0 || next >= limit) break;
+    position = next;
+  }
+  const moved = position !== start;
+  const landed = !moved
+    ? { row: clamp(from.row, 0, limits.rows - 1), col: clamp(from.col, 0, limits.cols - 1) }
+    : vertical
+      ? { row: position, col: from.col }
+      : { row: from.row, col: position };
+  return opts.extend ? extendTo(sel, landed) : selectionAt(mergeAnchor(landed, merges));
 }

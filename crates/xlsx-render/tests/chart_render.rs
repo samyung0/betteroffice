@@ -45,7 +45,6 @@ fn chart_space() -> ChartSpace {
 
 fn sheet_chart(anchor: ChartAnchor) -> SheetChart {
     SheetChart {
-        raw_xml: None,
         part: "xl/charts/chart1.xml".into(),
         drawing: "xl/drawings/drawing1.xml".into(),
         anchor_index: 0,

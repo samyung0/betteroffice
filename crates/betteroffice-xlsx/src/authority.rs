@@ -8,10 +8,10 @@ use std::sync::Arc;
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
-    MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
-    Workbook as WorkbookModel,
+    AnchorEditAs, AnchorExtent, AnchorPos, AutoFilter, Cell, CellFormat, CellRange, CellRef,
+    CellValue, ChartAnchor, ChartRef, ColStyle, ConditionalFormatting, DateSystem, DefinedName,
+    ErrorValue, FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId,
+    Stylesheet, Table, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -104,6 +104,10 @@ struct WorkbookBase {
     formats: Vec<SheetFormat>,
     col_styles: Vec<Vec<ColStyle>>,
     charts: Vec<Vec<SheetChart>>,
+    /// source auto filters and conditional formats: modeled since 0.5.1, kept
+    /// as authored since schema 8 has no edits for them.
+    auto_filters: Vec<Option<AutoFilter>>,
+    conditional_formats: Vec<Vec<ConditionalFormatting>>,
     hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
@@ -147,6 +151,16 @@ impl WorkbookBase {
                 .sheets
                 .iter()
                 .map(|sheet| sheet.charts.clone())
+                .collect(),
+            auto_filters: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.auto_filter.clone())
+                .collect(),
+            conditional_formats: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.conditional_formats.clone())
                 .collect(),
             hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
             shared_strings: model.shared_strings.clone(),
@@ -1281,6 +1295,13 @@ impl WorkbookAuthority {
             let hidden_dimensions = base_sheet
                 .and_then(|base| self.base.hidden_dimensions.get(base))
                 .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
+            let auto_filter = base_sheet
+                .and_then(|base| self.base.auto_filters.get(base))
+                .and_then(Option::as_ref);
+            let conditional_formats = base_sheet
+                .and_then(|base| self.base.conditional_formats.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             model.sheets.push(materialize_sheet(
                 &sheet_map,
                 &txn,
@@ -1289,6 +1310,8 @@ impl WorkbookAuthority {
                     format,
                     col_styles,
                     charts,
+                    auto_filter,
+                    conditional_formats,
                     hidden_dimensions,
                 },
             )?);
@@ -2586,6 +2609,13 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::RestoreRowDimension { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::SetHyperlink { sheet, .. }
+        | Op::RemoveHyperlink { sheet, .. }
+        | Op::SetAutoFilter { sheet, .. }
+        | Op::RestoreAutoFilter { sheet, .. }
+        | Op::AddConditionalFormat { sheet, .. }
+        | Op::RemoveConditionalFormat { sheet, .. }
+        | Op::SetConditionalFormats { sheet, .. }
         | Op::RestoreColStyles { sheet, .. }
         | Op::RestoreRowStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
@@ -2600,6 +2630,8 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         Op::AddSheet { .. }
         | Op::RemoveSheet { .. }
         | Op::MoveSheet { .. }
+        | Op::SetDefinedName { .. }
+        | Op::DeleteDefinedName { .. }
         | Op::SetDefinedNames { .. } => None,
     }
 }
@@ -2917,6 +2949,8 @@ struct SheetFallbacks<'a> {
     format: SheetFormat,
     col_styles: &'a [ColStyle],
     charts: &'a [SheetChart],
+    auto_filter: Option<&'a AutoFilter>,
+    conditional_formats: &'a [ConditionalFormatting],
     hidden_dimensions: &'a HiddenDimensions,
 }
 
@@ -2926,6 +2960,8 @@ impl Default for SheetFallbacks<'_> {
             format: SheetFormat::default(),
             col_styles: &[],
             charts: &[],
+            auto_filter: None,
+            conditional_formats: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
         }
     }
@@ -2985,6 +3021,8 @@ fn materialize_sheet<T: ReadTxn>(
     }
     sheet.format = fallbacks.format;
     sheet.col_styles = fallbacks.col_styles.to_vec();
+    sheet.auto_filter = fallbacks.auto_filter.cloned();
+    sheet.conditional_formats = fallbacks.conditional_formats.to_vec();
     sheet.freeze_pane = match sheet_map.get(txn, FREEZE_PANE) {
         Some(Out::Any(value)) => freeze_pane_from_any(&value)?,
         _ => return Err("sheet is missing freeze pane".to_string()),

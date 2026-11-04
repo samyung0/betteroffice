@@ -65,6 +65,33 @@ export interface MoveOpts {
   extend?: boolean;
   step?: number;
   limits: SelectionLimits;
+  /** Hidden rows and columns a move steps over. */
+  hidden?: SelectionHidden;
+  /** Merged ranges a move treats as one cell. */
+  merges?: SelectionMerges;
+}
+
+/**
+ * What the engine answers for one keyboard jump (`Workbook::selection_data`):
+ * the data edge a Ctrl/Cmd+arrow reaches, the row's last data cell for End or
+ * the used range's last cell for Ctrl/Cmd+End (`null` when there is none),
+ * and the merged range the jump lands in.
+ */
+export interface SelectionData {
+  merge?: CellRange | null;
+  edge?: CellAddr | null;
+  usedRange?: CellRange | null;
+}
+
+/** The sheet's hidden rows and columns, which keyboard moves step over. */
+export interface SelectionHidden {
+  isRowHidden(row: number): boolean;
+  isColHidden(col: number): boolean;
+}
+
+/** Merged ranges, so keyboard moves treat each one as a single cell. */
+export interface SelectionMerges {
+  mergeAt(row: number, col: number): CellRange | null;
 }
 
 /**

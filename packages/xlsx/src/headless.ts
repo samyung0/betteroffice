@@ -44,6 +44,9 @@ export type {
   MoveOpts,
   KeyInput,
   SelectionAction,
+  SelectionData,
+  SelectionHidden,
+  SelectionMerges,
 } from './selection/index';
 
 export {
@@ -55,8 +58,10 @@ export {
   rangeContains,
   cellCount,
   extendTo,
+  mergeAnchor,
   moveFocus,
   selectAll,
+  selectionDataRequest,
   selectionKeyReducer,
 } from './selection/index';
 

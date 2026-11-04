@@ -8,7 +8,7 @@ const SEEDS: [(&str, &[u8], &str, usize); 4] = [
     (
         "course-guide.xlsx",
         include_bytes!("fixtures/storage/course-guide.xlsx"),
-        "3f2d3e7929a7ef4c4b44256bf065554952e9f678ad7eb3fe70fda21276cea352",
+        "a783da951b22c2882eef8080074442479718181e9a0f169394b9801d4de0e753",
         31_000,
     ),
     (

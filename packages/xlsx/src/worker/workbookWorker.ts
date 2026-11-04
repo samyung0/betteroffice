@@ -13,6 +13,7 @@ import type {
   WorkbookHandle,
 } from '../wasm/loader';
 import {
+  engineOutOfMemory,
   initWasm,
   isPngExportAvailable,
   isProposalsAvailable,
@@ -63,6 +64,7 @@ const SHEET_FIRST = new Set<WorkbookMethod>([
   'captureFormat',
   'applyFormat',
   'mergedRanges',
+  'selectionData',
   'printDisplayList',
 ]);
 
@@ -101,7 +103,8 @@ async function handle(request: WorkbookWorkerRequest): Promise<void> {
   try {
     const value = await answer(request);
     reply({ type: 'reply', id: request.id, ok: true, value }, transfers(value));
-  } catch (error) {
+  } catch (caught) {
+    const error = engineOutOfMemory(caught) ?? caught;
     reply({
       type: 'reply',
       id: request.id,

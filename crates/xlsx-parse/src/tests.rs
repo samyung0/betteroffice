@@ -7259,7 +7259,7 @@ fn patch_refs(part: &[u8], refs: &[xlsx_model::ChartRef]) -> Result<Vec<u8>, Par
         refs,
         &workbook,
         "Data",
-        Some((&workbook, "Data")),
+        (&workbook, "Data"),
     )
 }
 

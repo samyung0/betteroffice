@@ -850,6 +850,7 @@ fn criteria_indexes_cover_final_anchors_and_invalidate_on_writes() {
         },
         &budget,
         &mut changed,
+        &mut RecalcJournal::default(),
     )
     .unwrap();
     assert!(!budget.criteria_index_covers(SheetId(0), at));
@@ -861,6 +862,7 @@ fn criteria_indexes_cover_final_anchors_and_invalidate_on_writes() {
         key(SheetId(0), at),
         number(99.0),
         &budget,
+        &mut RecalcJournal::default(),
     ));
     assert!(!budget.criteria_index_covers(SheetId(0), at));
 }
@@ -1076,6 +1078,7 @@ fn criteria_index_spill_schedules_guard_before_later_readers() {
             cycle_cells: Vec::new(),
             limited_cells: Vec::new(),
             spilled: Vec::new(),
+            journal: RecalcJournal::default(),
         };
         let sheet = SheetId(0);
         let reader = CellRef::new(0, 1);

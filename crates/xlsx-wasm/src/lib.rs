@@ -36,6 +36,14 @@ extern "C" {
     fn performance_now() -> f64;
 }
 
+/// bytes of the last allocation the engine could not get, or 0: Rust aborts
+/// on a failed allocation, so this tells that trap from a panic (upstream #1730).
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = allocationFailure)]
+pub fn allocation_failure() -> f64 {
+    wasm_alloc::allocation_failure() as f64
+}
+
 /// a workbook handle exposed to js; wraps the pure `Session`.
 #[wasm_bindgen]
 pub struct XlsxDocument {
@@ -445,6 +453,14 @@ impl XlsxDocument {
     pub fn apply_format_json(&mut self, args: &str) -> Result<String, JsValue> {
         self.session
             .apply_format_json(args, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// what keyboard navigation from a cell reaches (`Workbook::selection_data`).
+    #[wasm_bindgen(js_name = selectionDataJson)]
+    pub fn selection_data_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .selection_data_json(args)
             .map_err(|e| JsValue::from_str(&e))
     }
 

@@ -2633,17 +2633,19 @@ fn display_lists_do_not_inherit_raster_dimension_caps() {
 }
 
 #[test]
-fn display_lists_reject_excessive_cell_spans() {
+fn display_lists_degrade_excessive_cell_spans() {
+    // upstream #1382: a viewer frame over the cap draws a bounded part.
     let workbook = Workbook::open(&sample_xlsx()).unwrap();
-    let error = workbook
+    let frame = workbook
         .display_list(&Viewport {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 6_000_000.0,
         })
-        .unwrap_err();
-    assert!(matches!(error, Error::DisplayTooLarge { .. }));
+        .unwrap();
+    assert!(frame.truncated);
+    assert!(frame.grid.row_offsets.len() <= 125_001);
 }
 
 #[cfg(feature = "raster")]
@@ -5278,7 +5280,9 @@ fn row_insertion_preserves_unmodeled_ranges_and_anchors_without_corruption() {
     let saved = workbook.save().unwrap();
     let after = package_map(&saved);
     let worksheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
-    assert!(worksheet.contains(r#"<autoFilter ref="A1:B2""#));
+    // since 0.5.1 the standalone engine models the filter and moves it with
+    // the rows (upstream #1653's ops half); validations stay source XML.
+    assert!(worksheet.contains(r#"<autoFilter ref="A2:B3""#));
     assert!(worksheet.contains(r#"<dataValidation type="whole" sqref="B2""#));
     assert!(worksheet.contains(r#"<conditionalFormatting sqref="B2""#));
     // The drawing's anchor and the note move with the inserted row.
@@ -7322,7 +7326,7 @@ fn bump_b2(workbook: &mut Workbook) {
 
 /// The second P1: an imported chart replayed its stored cache, so an ordinary
 /// cell edit never reached it. It must now follow the cells in both backends,
-/// while the bytes a save writes back stay exactly what was imported.
+/// and a save rewrites only the edited series' cache (upstream #1492, taken).
 #[test]
 #[cfg(feature = "raster")]
 fn an_imported_chart_follows_a_cell_edit_without_a_save() {
@@ -7339,8 +7343,17 @@ fn an_imported_chart_follows_a_cell_edit_without_a_save() {
     assert_ne!(before, plotted(&workbook));
     assert_ne!(before_png.bytes, after_png.bytes);
 
-    // rendering live never rewrites the part: only the formulas moving does.
-    assert_eq!(chart_part(&workbook.save().unwrap()), chart_part(&source));
+    // rendering live never rewrites the part; the save refreshes the edited
+    // point of the cache and keeps every other byte.
+    let refreshed = String::from_utf8(chart_part(&source)).unwrap().replacen(
+        "<c:v>12</c:v>",
+        "<c:v>100</c:v>",
+        1,
+    );
+    assert_eq!(
+        chart_part(&workbook.save().unwrap()),
+        refreshed.into_bytes()
+    );
 }
 
 /// A reference this crate cannot resolve safely keeps the values the file was

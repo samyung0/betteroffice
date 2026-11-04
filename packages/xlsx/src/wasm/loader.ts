@@ -6,10 +6,11 @@
  * precompiled module. Callers never see the JSON-string boundary.
  */
 
-import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
+import initWasmModule, { allocationFailure, XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
+import type { SelectionData } from '../selection/types';
 import { refusalOf } from './refusals';
 import { StaleProposalError } from './staleProposal';
 
@@ -104,6 +105,8 @@ export interface ProfiledDisplayList {
 
 export interface CalculationStatus {
   limitedCells: string[];
+  /** The last recalculation ran out of its budget; the cells it could not evaluate keep their saved values. */
+  budgetExhausted?: boolean;
 }
 
 export type NumberFormat =
@@ -259,6 +262,8 @@ export interface CellInputEdit {
   row: number;
   col: number;
   input: string;
+  /** Where a pasted formula was copied from: its relative references shift from there. */
+  copyFrom?: { row: number; col: number };
 }
 
 /**
@@ -395,6 +400,17 @@ export interface WorkbookHandle extends CollaborationReplica {
   captureFormat(sheet: number, range: string): CapturedFormat;
   applyFormat(sheet: number, range: string, format: CapturedFormat): EditResult;
   mergedRanges(sheet: number, range: string): MergedRange[];
+  /**
+   * What keyboard navigation from a cell reaches: the data edge in a
+   * direction, the row's last data cell (`rowEnd`), the used range's last cell
+   * (`usedRange`), or only the merged range a cell lies in (`merge`).
+   */
+  selectionData(
+    sheet: number,
+    row: number,
+    col: number,
+    direction: 'up' | 'down' | 'left' | 'right' | 'rowEnd' | 'usedRange' | 'merge'
+  ): SelectionData;
   historyState(): HistoryState;
   /**
    * render the current sheet viewport to png bytes via the native raster
@@ -434,6 +450,7 @@ export interface WorkbookHandle extends CollaborationReplica {
 
 let initialized = false;
 let initialization: Promise<void> | undefined;
+let engineMemory: WebAssembly.Memory | undefined;
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 
@@ -444,7 +461,8 @@ export function initWasm(
   if (initialized) return Promise.resolve();
   if (initialization) return initialization;
   initialization = initWasmModule({ module_or_path: input }).then(
-    () => {
+    (output) => {
+      engineMemory = output.memory;
       initialized = true;
     },
     (error: unknown) => {
@@ -463,6 +481,22 @@ function requireInitialized(): void {
 function toError(e: unknown): Error {
   if (e instanceof Error) return e;
   return new Error(typeof e === 'string' ? e : String(e));
+}
+
+/**
+ * The error a trap after a failed allocation stands for: past the wasm32
+ * memory limit the workbook is too large (upstream #1730). The engine aborts
+ * when an allocation fails, so the trap alone reads "unreachable". Null for
+ * any other error.
+ */
+export function engineOutOfMemory(error: unknown): Error | null {
+  if (!initialized || !(error instanceof WebAssembly.RuntimeError)) return null;
+  const bytes = allocationFailure();
+  if (!bytes) return null;
+  const memory = Math.round((engineMemory?.buffer.byteLength ?? 0) / 2 ** 20);
+  return new Error(
+    `The workbook is too large: the spreadsheet engine ran out of memory (an allocation of ${bytes} bytes failed with ${memory} MiB of engine memory)`
+  );
 }
 
 /**
@@ -779,6 +813,11 @@ export function openWorkbook(
         doc.mergedRangesJson(JSON.stringify({ sheet, range }))
       );
       return parsed.ranges;
+    },
+    selectionData(sheet, row, col, direction): SelectionData {
+      return parseJson(() =>
+        doc.selectionDataJson(JSON.stringify({ sheet, row, col, direction }))
+      );
     },
     historyState(): HistoryState {
       return parseJson(() => doc.historyStateJson());

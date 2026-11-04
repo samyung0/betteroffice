@@ -21,7 +21,7 @@ use xlsx_model::{
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
-use crate::graph::{DepGraph, ReaderIndex};
+use crate::graph::DepGraph;
 
 #[cfg(feature = "test-counters")]
 thread_local! {
@@ -275,61 +275,18 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     }
 
     let mut expanded: HashSet<Key> = HashSet::new();
-    let mut readers = Readers::new(graph);
-    let mut found = Vec::new();
     while let Some(k) = worklist.pop() {
         if !expanded.insert(k) {
             continue;
         }
         progress();
-        readers.dependents_of(k, &mut found);
-        for (ds, dc) in found.drain(..) {
+        for (ds, dc) in graph.dependents_of(k.0, cell_of(k)) {
             let dk = key(ds, dc);
             recompute.insert(dk);
             worklist.push(dk);
         }
     }
     recompute
-}
-
-/// lookups a walk makes into one sheet by scanning its edges before it
-/// indexes that sheet.
-const SCANNED_LOOKUPS: usize = 16;
-
-/// the readers of a cell for a walk through the graph: a scan per lookup for
-/// short walks, and one [`ReaderIndex`] per sheet the walk keeps returning to,
-/// so a chain of `n` formulas costs `O(n + edges)` rather than `O(n * edges)`.
-struct Readers<'g> {
-    graph: &'g DepGraph,
-    sheets: HashMap<SheetId, SheetReaders<'g>>,
-}
-
-enum SheetReaders<'g> {
-    Scanned(usize),
-    Indexed(ReaderIndex<'g>),
-}
-
-impl<'g> Readers<'g> {
-    fn new(graph: &'g DepGraph) -> Self {
-        Self {
-            graph,
-            sheets: HashMap::new(),
-        }
-    }
-
-    fn dependents_of(&mut self, k: Key, out: &mut Vec<(SheetId, CellRef)>) {
-        let readers = self.sheets.entry(k.0).or_insert(SheetReaders::Scanned(0));
-        if let SheetReaders::Scanned(lookups) = readers {
-            *lookups += 1;
-            if *lookups > SCANNED_LOOKUPS {
-                *readers = SheetReaders::Indexed(self.graph.reader_index(k.0));
-            }
-        }
-        match readers {
-            SheetReaders::Indexed(index) => index.dependents_of(cell_of(k), out),
-            SheetReaders::Scanned(_) => out.extend(self.graph.dependents_of(k.0, cell_of(k))),
-        }
-    }
 }
 
 /// a spilled rectangle that grows or shrinks uncovers cells whose readers were
@@ -467,15 +424,12 @@ fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet
     let mut found: HashSet<Key> = HashSet::new();
     let mut expanded: HashSet<Key> = HashSet::new();
     let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
-    let mut readers = Readers::new(graph);
-    let mut dependents = Vec::new();
     while let Some(node) = worklist.pop() {
         if !expanded.insert(node) {
             continue;
         }
         progress();
-        readers.dependents_of(node, &mut dependents);
-        for (sheet, cell) in dependents.drain(..) {
+        for (sheet, cell) in graph.dependents_of(node.0, cell_of(node)) {
             let dependent = key(sheet, cell);
             if found.insert(dependent) {
                 worklist.push(dependent);
@@ -1284,10 +1238,8 @@ mod tests {
         assert_eq!(value(&wb, s, "C3"), num(7.0));
     }
 
-    /// formulas ahead of every other in the recalculation order that spend its
-    /// whole budget.
-    /// ten formulas of 999,999 cells and their own visits take the whole
-    /// recalculation budget.
+    /// formulas ahead of every other in the recalculation order: ten of
+    /// 999,999 cells and their own visits take the whole budget.
     fn spend_the_budget(wb: &mut Workbook, s: SheetId) {
         for row in 1..=11 {
             put_formula(wb, s, &format!("A{row}"), "ROWS(_xlfn.SEQUENCE(999999))");
@@ -2918,8 +2870,9 @@ mod tests {
     }
 
     /// once the recalculation's budget is spent, error handlers over the
-    /// refused work keep the cached values and uncached cells show `#NUM!`,
-    /// while a formula that charges nothing still computes.
+    /// refused work keep the cached values and uncached cells show `#NUM!`.
+    /// Capy charges every evaluation one visit, so an uncached `1+2` past the
+    /// budget is refused too (upstream #1655 computes it).
     #[test]
     fn a_spent_recalculation_keeps_cached_values_under_error_handlers() {
         let (mut wb, s) = one_sheet();
@@ -2958,8 +2911,8 @@ mod tests {
         };
         assert_eq!(value(&wb, s, "B30"), refused);
         assert_eq!(value(&wb, s, "B31"), refused);
-        assert_eq!(value(&wb, s, "B32"), num(3.0));
-        assert!(!result.limited_cells.contains(&(s, a1("B32"))));
+        assert_eq!(value(&wb, s, "B32"), refused);
+        assert!(result.limited_cells.contains(&(s, a1("B32"))));
     }
 
     /// the result says when the recalculation's own budget ran out, which a

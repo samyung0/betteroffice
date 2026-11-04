@@ -1185,6 +1185,10 @@ pub(super) fn materialize<T: ReadTxn>(
             // Row styles and the sizes hidden rows and columns had are source
             // facts the save compares against, so they follow the live axes.
             let original = &base.sheets[source_index];
+            // 0.5.1 models these, and schema 8 has no edits for them: the save
+            // keeps them as authored, as it did when they were unmodeled XML.
+            sheet.auto_filter = original.auto_filter.clone();
+            sheet.conditional_formats = original.conditional_formats.clone();
             for (&row, &style) in &original.row_styles {
                 if let Some(row) = rows.index_in("base", row.into()) {
                     sheet.row_styles.insert(row, style);

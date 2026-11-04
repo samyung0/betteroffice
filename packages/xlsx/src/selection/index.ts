@@ -12,6 +12,9 @@ export type {
   MoveOpts,
   KeyInput,
   SelectionAction,
+  SelectionData,
+  SelectionHidden,
+  SelectionMerges,
 } from './types';
 
 export {
@@ -23,7 +26,8 @@ export {
   rangeContains,
   cellCount,
   extendTo,
+  mergeAnchor,
   moveFocus,
 } from './model';
 
-export { selectAll, selectionKeyReducer } from './keyboard';
+export { selectAll, selectionDataRequest, selectionKeyReducer } from './keyboard';
