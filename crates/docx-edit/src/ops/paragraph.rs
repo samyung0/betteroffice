@@ -1176,35 +1176,7 @@ impl EditingDoc {
     /// wrote that name text this replica's Undo restored
     /// ([`crate::bookmarks::rebind`]).
     pub fn applying_peer_update<R>(&self, apply: impl FnOnce() -> R) -> R {
-        let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
-        let subscription = {
-            let inserted = Arc::clone(&inserted);
-            self.yrs_doc()
-                .observe_after_transaction(move |txn| {
-                    inserted
-                        .lock()
-                        .unwrap()
-                        .merge_with(txn.insert_set().clone());
-                })
-                .ok()
-        };
-        let result = apply();
-        drop(subscription);
-        let inserted = std::mem::take(&mut *inserted.lock().unwrap());
-        let (markers, touched) = {
-            let txn = yrs::Transact::transact(self.yrs_doc());
-            let items = crate::items_in(&txn, &inserted);
-            let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
-            for &item in &items {
-                if let Some((story, para_id)) = inserted_para_id(&txn, item) {
-                    touched.entry(story).or_default().insert(para_id);
-                }
-            }
-            (crate::bookmarks::writes_markers(&txn, &items), touched)
-        };
-        if !touched.is_empty() {
-            self.rename_duplicates(Some(&touched));
-        }
+        let (result, markers) = renaming_duplicates_inserted_by(self.yrs_doc(), apply);
         if markers {
             crate::bookmarks::rebind(self.yrs_doc());
         }
@@ -1220,84 +1192,124 @@ impl EditingDoc {
     /// Run over a loaded state, which may have been stored before any peer
     /// renamed.
     pub fn rename_duplicate_para_ids(&self) -> Vec<(ParagraphId, ParagraphId)> {
-        self.rename_duplicates(None)
+        rename_duplicates(self.yrs_doc(), None)
     }
+}
 
-    /// [`Self::rename_duplicate_para_ids`] over every story, or only over the
-    /// given ids of the given stories.
-    fn rename_duplicates(
-        &self,
-        only: Option<&HashMap<BranchPtr, HashSet<String>>>,
-    ) -> Vec<(ParagraphId, ParagraphId)> {
-        let mut duplicates: Vec<Vec<(yrs::ID, MapRef)>> = Vec::new();
-        {
-            let txn = yrs::Transact::transact(self.yrs_doc());
-            let stories: Vec<BranchPtr> = match only {
-                Some(only) => only.keys().copied().collect(),
-                None => {
-                    let Some(stories) = txn.get_map(crate::STORIES) else {
-                        return Vec::new();
-                    };
-                    stories
-                        .iter(&txn)
-                        .filter_map(|(_, story)| match story {
-                            Out::YText(story) => {
-                                Some(BranchPtr::from(
-                                    <TextRef as AsRef<yrs::branch::Branch>>::as_ref(&story),
-                                ))
-                            }
-                            _ => None,
-                        })
-                        .collect()
-                }
-            };
-            for story in stories {
-                let wanted = only.and_then(|only| only.get(&story));
-                let mut marks: HashMap<String, Vec<(yrs::ID, MapRef)>> = HashMap::new();
-                let mut next = story.start();
-                while let Some(item) = next {
-                    next = item.right();
-                    if item.is_deleted() {
-                        continue;
-                    }
-                    let ItemContent::Type(branch) = item.content() else {
-                        continue;
-                    };
-                    let map = MapRef::from(BranchPtr::from(branch));
-                    let Some(para_id) = map_string(&map, &txn, PARA_ID) else {
-                        continue;
-                    };
-                    if wanted.is_none_or(|wanted| wanted.contains(&para_id))
-                        && crate::is_pilcrow(&map, &txn)
-                    {
-                        marks.entry(para_id).or_default().push((*item.id(), map));
-                    }
-                }
-                duplicates.extend(marks.into_values().filter(|marks| marks.len() > 1));
+/// Runs `apply` (a peer's update, or an Undo or Redo step, which puts marks
+/// back as new items), then renames the paragraph ids that concurrent splits
+/// duplicated ([`EditingDoc::rename_duplicate_para_ids`]), looking only at the
+/// ids of paragraph marks `apply` inserted or re-identified and only in their
+/// stories. Returns what `apply` returned and whether it wrote markers.
+pub(crate) fn renaming_duplicates_inserted_by<R>(
+    doc: &yrs::Doc,
+    apply: impl FnOnce() -> R,
+) -> (R, bool) {
+    let inserted = Arc::new(std::sync::Mutex::new(yrs::IdSet::new()));
+    let subscription = {
+        let inserted = Arc::clone(&inserted);
+        doc.observe_after_transaction(move |txn| {
+            inserted
+                .lock()
+                .unwrap()
+                .merge_with(txn.insert_set().clone());
+        })
+        .ok()
+    };
+    let result = apply();
+    drop(subscription);
+    let inserted = std::mem::take(&mut *inserted.lock().unwrap());
+    let (markers, touched) = {
+        let txn = yrs::Transact::transact(doc);
+        let items = crate::items_in(&txn, &inserted);
+        let mut touched: HashMap<BranchPtr, HashSet<String>> = HashMap::new();
+        for &item in &items {
+            if let Some((story, para_id)) = inserted_para_id(&txn, item) {
+                touched.entry(story).or_default().insert(para_id);
             }
         }
-        let mut renames = Vec::new();
-        if duplicates.is_empty() {
-            return renames;
-        }
-        let mut txn = yrs::Transact::transact_mut_with(self.yrs_doc(), "system");
-        for mut marks in duplicates {
-            // Renaming the owner would write its id again, and every peer
-            // would echo that write forever.
-            let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
-            marks.sort_by_key(|(id, _)| {
-                let owner = format!("{}.{}", id.client, id.clock) == duplicated;
-                (!owner, id.client, id.clock)
-            });
-            let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
-            for (id, map) in &marks[1..] {
-                let renamed = format!("{}.{}", id.client, id.clock);
-                map.insert(&mut txn, PARA_ID, renamed.as_str());
-                renames.push((kept.clone(), renamed));
-            }
-        }
-        renames
+        (crate::bookmarks::writes_markers(&txn, &items), touched)
+    };
+    if !touched.is_empty() {
+        rename_duplicates(doc, Some(&touched));
     }
+    (result, markers)
+}
+
+/// [`EditingDoc::rename_duplicate_para_ids`] over every story, or only over the
+/// given ids of the given stories.
+fn rename_duplicates(
+    doc: &yrs::Doc,
+    only: Option<&HashMap<BranchPtr, HashSet<String>>>,
+) -> Vec<(ParagraphId, ParagraphId)> {
+    let mut duplicates: Vec<Vec<(yrs::ID, MapRef)>> = Vec::new();
+    {
+        let txn = yrs::Transact::transact(doc);
+        let stories: Vec<BranchPtr> = match only {
+            Some(only) => only.keys().copied().collect(),
+            None => {
+                let Some(stories) = txn.get_map(crate::STORIES) else {
+                    return Vec::new();
+                };
+                stories
+                    .iter(&txn)
+                    .filter_map(|(_, story)| match story {
+                        Out::YText(story) => {
+                            Some(BranchPtr::from(
+                                <TextRef as AsRef<yrs::branch::Branch>>::as_ref(&story),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }
+        };
+        for story in stories {
+            let wanted = only.and_then(|only| only.get(&story));
+            let mut marks: HashMap<String, Vec<(yrs::ID, MapRef)>> = HashMap::new();
+            let mut next = story.start();
+            while let Some(item) = next {
+                next = item.right();
+                if item.is_deleted() {
+                    continue;
+                }
+                let ItemContent::Type(branch) = item.content() else {
+                    continue;
+                };
+                let map = MapRef::from(BranchPtr::from(branch));
+                let Some(para_id) = map_string(&map, &txn, PARA_ID) else {
+                    continue;
+                };
+                if wanted.is_none_or(|wanted| wanted.contains(&para_id))
+                    && crate::is_pilcrow(&map, &txn)
+                {
+                    marks.entry(para_id).or_default().push((*item.id(), map));
+                }
+            }
+            duplicates.extend(marks.into_values().filter(|marks| marks.len() > 1));
+        }
+    }
+    let mut renames = Vec::new();
+    if duplicates.is_empty() {
+        return renames;
+    }
+    let mut txn = yrs::Transact::transact_mut_with(doc, "system");
+    for mut marks in duplicates {
+        // Renaming the owner would write its id again, and every peer
+        // would echo that write forever.
+        let duplicated = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
+        marks.sort_by_key(|(id, _)| {
+            let owner = format!("{}.{}", id.client, id.clock) == duplicated;
+            (!owner, id.client, id.clock)
+        });
+        let kept = map_string(&marks[0].1, &txn, PARA_ID).unwrap_or_default();
+        for (id, map) in &marks[1..] {
+            let renamed = format!("{}.{}", id.client, id.clock);
+            map.insert(&mut txn, PARA_ID, renamed.as_str());
+            renames.push((kept.clone(), renamed));
+        }
+    }
+    renames
 }
 
 /// The story and paragraph id an inserted item gives a paragraph mark: the

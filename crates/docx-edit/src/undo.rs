@@ -186,19 +186,23 @@ impl DocUndoManager {
 
     /// Undoes or redoes one step, re-reads what the fields whose projected
     /// children it put back or removed show
-    /// ([`crate::ops::field_changes::refreshing_fields`]), then re-anchors the
-    /// markers in the text this replica restored as new items
-    /// ([`crate::bookmarks::rebind`]).
+    /// ([`crate::ops::field_changes::refreshing_fields`]), renames the
+    /// paragraph ids the marks it put back duplicate, as a peer's update does
+    /// (#1456), then re-anchors the markers in the text this replica restored
+    /// as new items ([`crate::bookmarks::rebind`]).
     fn step(&mut self, undoing: bool) -> bool {
         lock(&self.changed_stories).clear();
         let inner = &mut self.inner;
-        let applied = crate::ops::field_changes::refreshing_fields(&self.doc, || {
-            if undoing {
-                inner.undo_blocking()
-            } else {
-                inner.redo_blocking()
-            }
-        });
+        let (applied, _) =
+            crate::ops::paragraph::renaming_duplicates_inserted_by(&self.doc, || {
+                crate::ops::field_changes::refreshing_fields(&self.doc, || {
+                    if undoing {
+                        inner.undo_blocking()
+                    } else {
+                        inner.redo_blocking()
+                    }
+                })
+            });
         if applied {
             crate::bookmarks::rebind(&self.doc);
         }

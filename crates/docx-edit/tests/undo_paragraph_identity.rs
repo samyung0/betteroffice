@@ -37,7 +37,6 @@ fn assert_addressable(doc: &EditingDoc) {
 }
 
 #[test]
-#[ignore = "Capy's undo leaves duplicate paragraph ids on the undoing replica (S3 DOCX report, open question)"]
 fn undoing_a_split_after_a_remote_split_keeps_unique_paragraph_keys() {
     let local = EditingDoc::new(1);
     local
@@ -70,7 +69,6 @@ fn undoing_a_split_after_a_remote_split_keeps_unique_paragraph_keys() {
 }
 
 #[test]
-#[ignore = "Capy's undo leaves duplicate paragraph ids on the undoing replica (S3 DOCX report, open question)"]
 fn a_restored_derived_key_stays_with_its_original_pilcrow_on_every_replica() {
     let local = EditingDoc::new(1);
     local
