@@ -79,8 +79,12 @@ fn table_cell_picture_fills_are_clipped_to_spans_below_borders_and_text() {
                 }
         ) || index > last_image
     }));
-    let restored =
-        DeckSession::open_from_update(&session.encode_state_as_update_v1(), 4103).unwrap();
+    let restored = DeckSession::open_from_update_with_source(
+        &session.encode_state_as_update_v1(),
+        include_bytes!("fixtures/table-picture-fill.pptx"),
+        4103,
+    )
+    .unwrap();
     assert_eq!(display_list(&session), display_list(&restored));
 }
 

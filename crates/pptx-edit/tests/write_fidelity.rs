@@ -2296,3 +2296,140 @@ fn picture_insertion_preserves_prefixed_metadata_and_exhausted_numeric_names() {
         b"existing"
     );
 }
+
+/// Upstream #1526 and #1701: a renderer's refit is written to an edited body
+/// unless it equals the autofit the body inherits from its layout or master.
+#[test]
+fn text_edits_write_only_changed_inherited_autofit() {
+    let bare = "<a:normAutofit/>";
+    let stored = "<a:normAutofit fontScale=\"77500\" lnSpcReduction=\"20000\"/>";
+    for (own_autofit, inherited, scale, reduction, materialized, from_master) in [
+        (false, bare, 1.0, 0.0, false, false),
+        (false, bare, 0.775, 0.2, true, false),
+        (false, bare, 1.0, 0.1, true, false),
+        (false, stored, 0.775, 0.2, false, false),
+        (false, stored, 1.0, 0.0, true, false),
+        (true, bare, 1.0, 0.0, true, false),
+        (true, bare, 0.775, 0.2, true, false),
+        (false, bare, 1.0, 0.0, false, true),
+        (false, bare, 0.775, 0.2, true, true),
+    ] {
+        let mut source = fixture_parts(256);
+        for (path, body) in &mut source {
+            if !from_master && path == "ppt/slideLayouts/slideLayout1.xml" {
+                *body = body.replacen(
+                    "<a:bodyPr/>",
+                    &format!("<a:bodyPr>{inherited}</a:bodyPr>"),
+                    1,
+                );
+            } else if from_master && path == "ppt/slideMasters/slideMaster1.xml" {
+                let placeholder = format!(
+                    r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr>{inherited}</a:bodyPr><a:lstStyle/><a:p/></p:txBody></p:sp>"#
+                );
+                *body = body.replace("</p:spTree>", &format!("{placeholder}</p:spTree>"));
+            } else if own_autofit && path == "ppt/slides/slide1.xml" {
+                *body = body.replacen("<a:bodyPr/>", "<a:bodyPr><a:normAutofit/></a:bodyPr>", 1);
+            }
+        }
+        let bytes = zip(source);
+        let before = parts(&bytes);
+        let deck = DeckSession::open(&bytes, 11).unwrap();
+        let story = deck.snapshot().unwrap().slides[0].shapes[0].text_stories[0].clone();
+        deck.insert_text(&context(), &story.id, 0, "Edited ", &TextStyle::default())
+            .unwrap();
+        let autofit = std::collections::HashMap::from([(
+            story.id.clone(),
+            pptx_parse::TextAutofit::Normal {
+                font_scale: Some(scale),
+                line_space_reduction: Some(reduction),
+            },
+        )]);
+        let saved = deck.save_with_autofit_resolver(|_, _| Ok(autofit)).unwrap();
+        let after = parts(&saved);
+        let xml = part_text(&after, "ppt/slides/slide1.xml");
+        assert_eq!(xml.contains("normAutofit"), materialized);
+        if materialized {
+            assert!(xml.contains(&format!("fontScale=\"{}\"", (scale * 100_000.0) as u32)));
+            assert!(xml.contains(&format!(
+                "lnSpcReduction=\"{}\"",
+                (reduction * 100_000.0) as u32
+            )));
+        } else {
+            assert!(xml.contains("<a:bodyPr/>"));
+        }
+        for (path, body) in &before {
+            if path != "ppt/slides/slide1.xml" {
+                assert_eq!(after.get(path), Some(body), "{path}");
+            }
+        }
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        assert!(
+            reopened
+                .story(&story.id)
+                .unwrap()
+                .plain_text()
+                .starts_with("Edited ")
+        );
+        assert_eq!(parts(&reopened.save().unwrap()), after);
+    }
+}
+
+/// Upstream #1507: an added text box saves with `txBox="1"`; an added preset
+/// shape does not, and the slide's existing shapes keep their bytes.
+#[test]
+fn added_text_boxes_save_their_identity_without_changing_existing_shapes() {
+    for text in ["", "Saved note"] {
+        let session = open();
+        let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+        let rect = ShapeRect {
+            x: 100_000,
+            y: 200_000,
+            width: 3_000_000,
+            height: 500_000,
+        };
+        session
+            .add_text_box(
+                &context(),
+                &slide_id,
+                &pptx_edit::ShapeDraft {
+                    name: "Note".to_owned(),
+                    rect,
+                    text: text.to_owned(),
+                    style: TextStyle::default(),
+                },
+            )
+            .unwrap();
+        session
+            .add_shape(
+                &context(),
+                &slide_id,
+                &PresetShapeDraft {
+                    name: "Text Box".to_owned(),
+                    geometry: "rect".to_owned(),
+                    rect,
+                    fill: None,
+                },
+            )
+            .unwrap();
+
+        let saved = session.save().unwrap();
+        let saved_parts = parts(&saved);
+        let slide = part_text(&saved_parts, "ppt/slides/slide2.xml");
+        let mut added = slide.rsplit("<p:sp>");
+        let rectangle = added.next().unwrap();
+        let text_box = added.next().unwrap();
+        assert!(text_box.contains(r#"<p:cNvSpPr txBox="1"/>"#), "{slide}");
+        assert!(text_box.contains(r#"<a:off x="100000" y="200000"/>"#));
+        if !text.is_empty() {
+            assert!(text_box.contains(&format!("<a:t>{text}</a:t>")));
+        }
+        assert!(rectangle.contains("<p:cNvSpPr/>"));
+        assert!(!rectangle.contains("txBox="));
+        for source in SLIDE2.split("<p:sp>").skip(1) {
+            let (shape, _) = source.split_once("</p:sp>").unwrap();
+            assert!(slide.contains(&format!("<p:sp>{shape}</p:sp>")));
+        }
+        let reopened = DeckSession::open(&saved, 12).unwrap();
+        assert_eq!(parts(&reopened.save().unwrap()), saved_parts);
+    }
+}

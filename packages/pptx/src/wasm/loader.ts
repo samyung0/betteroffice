@@ -506,7 +506,9 @@ export function openPresentation(
       return wasmCall(() => doc.mediaBytes(partPath));
     },
     save(): Uint8Array {
-      return wasmCall(() => doc.saveBytes());
+      // Through the renderer, so edited normal-autofit text saves the scale it
+      // is drawn at (upstream #1526).
+      return wasmCall(() => withEmbeddedFonts().saveBytes(doc));
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(

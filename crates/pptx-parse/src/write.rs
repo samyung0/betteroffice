@@ -58,13 +58,11 @@ pub enum SlideWrite {
     Patch {
         part_path: String,
         shapes: Vec<ShapeWrite>,
-        background: Option<BackgroundWrite>,
         layout_part_path: Option<String>,
     },
     Clone {
         part_path: String,
         shapes: Vec<ShapeWrite>,
-        background: Option<BackgroundWrite>,
         layout_part_path: Option<String>,
     },
     /// Mint a new slide part.
@@ -72,16 +70,7 @@ pub enum SlideWrite {
         name: Option<String>,
         layout_part_path: Option<String>,
         shapes: Vec<ShapeAdd>,
-        background: Option<Box<ShapeFill>>,
     },
-}
-
-/// A slide background write: `Set` replaces the slide's `p:bg`, `Clear`
-/// removes it so the layout or master background shows.
-#[derive(Clone, Debug, PartialEq)]
-pub enum BackgroundWrite {
-    Set(Box<ShapeFill>),
-    Clear,
 }
 
 pub enum ShapeWrite {
@@ -269,7 +258,6 @@ pub fn write_pptx_with_edits(
             if let SlideWrite::Patch {
                 part_path,
                 shapes,
-                background,
                 layout_part_path,
             } = slide
             {
@@ -283,7 +271,6 @@ pub fn write_pptx_with_edits(
                 patch_slide(
                     &mut root,
                     shapes,
-                    background.as_ref(),
                     Some(&theme),
                     part_path,
                     package.shape_elements,
@@ -291,7 +278,6 @@ pub fn write_pptx_with_edits(
                     &mut budget,
                 )?;
                 if (layout_part_path.is_some() || has_placeholder_patch(shapes))
-                    && background.is_none()
                     && only_placeholder_edits(shapes)
                 {
                     root.attributes.clone_from(&original_root.attributes);
@@ -345,7 +331,6 @@ pub fn write_pptx_with_edits(
                         SlideWrite::Clone {
                             part_path: source,
                             shapes,
-                            background,
                             layout_part_path,
                         } => {
                             let bytes = package
@@ -406,7 +391,6 @@ pub fn write_pptx_with_edits(
                             patch_slide(
                                 &mut root,
                                 shapes,
-                                background.as_ref(),
                                 Some(&theme),
                                 &part_path,
                                 package.shape_elements,
@@ -419,7 +403,6 @@ pub fn write_pptx_with_edits(
                             name,
                             layout_part_path,
                             shapes,
-                            background,
                         } => {
                             let layout = layout_part_path
                                 .clone()
@@ -444,7 +427,6 @@ pub fn write_pptx_with_edits(
                             let xml = slide_xml(
                                 name.as_deref(),
                                 shapes,
-                                background.as_deref(),
                                 &part_path,
                                 &mut sink,
                                 &mut budget,
@@ -1718,11 +1700,9 @@ impl Prefixes {
 // --- slide patching ---------------------------------------------------------
 
 /// Resolves source ordinals with the original parser filter.
-#[allow(clippy::too_many_arguments)]
 fn patch_slide(
     root: &mut XmlElement,
     shapes: &[ShapeWrite],
-    background: Option<&BackgroundWrite>,
     theme: Option<&Theme>,
     part: &str,
     elements: ShapeElements,
@@ -1730,12 +1710,6 @@ fn patch_slide(
     budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
-    if let Some(background) = background {
-        let common = root
-            .child_mut("cSld")
-            .ok_or_else(|| write_error(part, "slide has no common slide data"))?;
-        patch_background(common, background, &prefixes, part)?;
-    }
     let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
@@ -2034,39 +2008,6 @@ fn remove_in_own(element: &mut XmlElement, nodes: &[TimeNode], removed: &[bool],
         remove_time_nodes(child, nodes, removed, next);
         !(held && child.local_name() == "subTnLst" && child.child_elements().next().is_none())
     });
-}
-
-/// Inserts, replaces or removes the slide's `p:bg` declaration.
-fn patch_background(
-    common: &mut XmlElement,
-    background: &BackgroundWrite,
-    prefixes: &Prefixes,
-    part: &str,
-) -> Result<(), PptxError> {
-    common.children.retain(|child| match child {
-        XmlNode::Element(element) => element.local_name() != "bg",
-        _ => true,
-    });
-    if let BackgroundWrite::Set(fill) = background {
-        common.children.insert(
-            0,
-            XmlNode::Element(background_element(fill, prefixes, part)?),
-        );
-    }
-    Ok(())
-}
-
-/// `<p:bg><p:bgPr>…fill…<a:effectLst/></p:bgPr></p:bg>`, the first `cSld` child.
-fn background_element(
-    fill: &ShapeFill,
-    prefixes: &Prefixes,
-    part: &str,
-) -> Result<XmlElement, PptxError> {
-    Ok(XmlElement::new(prefixes.presentation("bg")).with_child(
-        XmlElement::new(prefixes.presentation("bgPr"))
-            .with_child(fill_element(fill, prefixes, part)?)
-            .with_child(XmlElement::new(prefixes.drawing("effectLst"))),
-    ))
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {
@@ -4727,7 +4668,6 @@ fn picture_shape_element(
 fn slide_xml(
     name: Option<&str>,
     shapes: &[ShapeAdd],
-    background: Option<&ShapeFill>,
     part: &str,
     sink: &mut PartSink<'_>,
     budget: &mut ParseBudget<'_>,
@@ -4789,9 +4729,6 @@ fn slide_xml(
     if let Some(name) = name {
         common.set_attribute("name", name);
     }
-    if let Some(fill) = background {
-        common = common.with_child(background_element(fill, &prefixes, part)?);
-    }
     root = root.with_child(common.with_child(tree)).with_child(
         XmlElement::new(prefixes.presentation("clrMapOvr"))
             .with_child(XmlElement::new(prefixes.drawing("masterClrMapping"))),
@@ -4836,20 +4773,17 @@ mod tests {
             fill: None,
             outline: None,
             paragraphs: Some(vec![ParagraphWrite {
-                source_paragraphs: Vec::new(),
-                source_index: None,
-                preserved_xml: None,
                 rebuild: true,
                 properties_changed: true,
-                alignment: None,
-                level: 0,
-                bullet: None,
                 runs: vec![RunWrite {
                     text: "Ellipse label".to_owned(),
                     properties: RunProperties::default(),
                 }],
+                ..ParagraphWrite::default()
             }]),
+            text_anchor: None,
             picture: None,
+            placeholder: None,
         };
         let mut root = XmlElement::new("p:sld");
         let prefixes = Prefixes::from_root(&mut root);
@@ -5109,7 +5043,6 @@ mod tests {
                 },
             ],
             None,
-            None,
             part,
             ShapeElements::WithConnectors,
             &mut sink,
@@ -5122,105 +5055,6 @@ mod tests {
         assert!(!xml.contains(r#"name="two""#), "{xml}");
         let survivor = xml.split(r#"name="three""#).nth(1).unwrap();
         assert!(survivor.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
-    }
-
-    fn patch_background_fixture(xml: &[u8], background: Option<&BackgroundWrite>) -> String {
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-        let part = "ppt/slides/slide1.xml";
-        let mut root = parse_xml(xml, part, &mut budget).unwrap();
-        let package = PptxPackage::default();
-        let mut replacements = HashMap::new();
-        let mut new_parts = Vec::new();
-        let mut sink = PartSink {
-            package: &package,
-            replacements: &mut replacements,
-            new_parts: &mut new_parts,
-        };
-        patch_slide(
-            &mut root,
-            &[ShapeWrite::Keep { source_index: 0 }],
-            background,
-            None,
-            part,
-            ShapeElements::WithConnectors,
-            &mut sink,
-            &mut budget,
-        )
-        .unwrap();
-        String::from_utf8(serialize_xml(&root)).unwrap()
-    }
-
-    #[test]
-    fn a_new_background_precedes_the_shape_tree() {
-        let xml = patch_background_fixture(
-            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
-            Some(&BackgroundWrite::Set(Box::new(ShapeFill {
-                color: Some(ColorValue::from_attribute("0F1720")),
-                ..ShapeFill::named("solid")
-            }))),
-        );
-        let common = xml.find("<p:cSld>").unwrap();
-        let bg = xml.find("<p:bg>").unwrap();
-        let effects = xml.find("<a:effectLst/>").unwrap();
-        let tree = xml.find("<p:spTree>").unwrap();
-        assert!(common < bg && bg < effects && effects < tree, "{xml}");
-        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
-    }
-
-    #[test]
-    fn clearing_a_background_removes_only_the_declaration() {
-        let xml = patch_background_fixture(
-            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr></p:sp></p:spTree></p:cSld></p:sld>"#,
-            Some(&BackgroundWrite::Clear),
-        );
-        assert!(!xml.contains("<p:bg>"), "{xml}");
-        assert!(xml.contains(r#"name="one""#), "{xml}");
-    }
-
-    #[test]
-    fn an_untouched_background_survives_a_shape_patch() {
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-        let part = "ppt/slides/slide1.xml";
-        let mut root = parse_xml(
-            br#"<p:sld><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="0F1720"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="one"/></p:nvSpPr><p:spPr/></p:sp></p:spTree></p:cSld></p:sld>"#,
-            part,
-            &mut budget,
-        )
-        .unwrap();
-        let package = PptxPackage::default();
-        let mut replacements = HashMap::new();
-        let mut new_parts = Vec::new();
-        let mut sink = PartSink {
-            package: &package,
-            replacements: &mut replacements,
-            new_parts: &mut new_parts,
-        };
-        patch_slide(
-            &mut root,
-            &[ShapeWrite::Patch {
-                source_index: 0,
-                patch: Box::new(ShapePatch {
-                    fill: Some(ShapeFill {
-                        color: Some(ColorValue::from_attribute("DC2626")),
-                        ..ShapeFill::named("solid")
-                    }),
-                    ..ShapePatch::default()
-                }),
-            }],
-            None,
-            None,
-            part,
-            ShapeElements::WithConnectors,
-            &mut sink,
-            &mut budget,
-        )
-        .unwrap();
-
-        let xml = String::from_utf8(serialize_xml(&root)).unwrap();
-        assert!(xml.contains(r#"<a:srgbClr val="0F1720"/>"#), "{xml}");
-        assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
     }
 
     #[test]
@@ -5255,7 +5089,6 @@ mod tests {
                 }),
             }],
             None,
-            None,
             part,
             ShapeElements::WithConnectors,
             &mut sink,
@@ -5266,39 +5099,6 @@ mod tests {
         let xml = String::from_utf8(serialize_xml(&root)).unwrap();
         assert!(xml.contains(r#"useBgFill="1""#), "{xml}");
         assert!(xml.contains(r#"<a:srgbClr val="DC2626"/>"#), "{xml}");
-    }
-
-    #[test]
-    fn an_added_slide_background_precedes_the_shape_tree() {
-        let package = PptxPackage::default();
-        let mut replacements = HashMap::new();
-        let mut new_parts = Vec::new();
-        let mut sink = PartSink {
-            package: &package,
-            replacements: &mut replacements,
-            new_parts: &mut new_parts,
-        };
-        let limits = ParseLimits::default();
-        let mut budget = ParseBudget::new(&limits);
-        let fill = ShapeFill {
-            color: Some(ColorValue::from_attribute("F8FAFC")),
-            ..ShapeFill::named("solid")
-        };
-        let xml = slide_xml(
-            None,
-            &[],
-            Some(&fill),
-            "ppt/slides/slide9.xml",
-            &mut sink,
-            &mut budget,
-        )
-        .unwrap();
-        let xml = String::from_utf8(xml).unwrap();
-        let common = xml.find("<p:cSld>").unwrap();
-        let bg = xml.find("<p:bg>").unwrap();
-        let tree = xml.find("<p:spTree>").unwrap();
-        assert!(common < bg && bg < tree, "{xml}");
-        assert!(xml.contains(r#"<a:srgbClr val="F8FAFC"/>"#), "{xml}");
     }
 
     #[test]
@@ -5324,7 +5124,6 @@ mod tests {
         patch_slide(
             &mut root,
             &[],
-            None,
             None,
             part,
             ShapeElements::WithoutConnectors,
@@ -5823,7 +5622,6 @@ mod tests {
                     ..ShapePatch::default()
                 }),
             }],
-            None,
             None,
             part,
             ShapeElements::WithConnectors,

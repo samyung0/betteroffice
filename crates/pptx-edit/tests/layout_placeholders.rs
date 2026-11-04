@@ -26,7 +26,8 @@ fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
 
 /// The editor's text box and preset shape write no `p:ph`: the saved slide
 /// is byte for byte what the save wrote before placeholders could be added
-/// (the digest is the same with the placeholder change reverted).
+/// (the digest is the same with the placeholder change reverted), plus the
+/// text box's `txBox="1"` (upstream #1507, re-pinned in the 0.5.1 sync).
 #[test]
 fn added_shapes_without_a_placeholder_save_the_same_bytes() {
     let session = DeckSession::open(DEMO, 7).unwrap();
@@ -77,7 +78,7 @@ fn added_shapes_without_a_placeholder_save_the_same_bytes() {
         .collect();
     assert_eq!(
         digest,
-        "376aada64bd38986d3d4e61d8c0f1cd7824ad4127ca8c74aa51bb153342fdd9b"
+        "4f684263ecd175abc8837ba394d438254bc39c6f50d13cb865b7a7528264f09c"
     );
 }
 

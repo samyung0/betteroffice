@@ -343,8 +343,28 @@ export function resizedBounds(
   bounds: FrameBounds,
   handle: ResizeHandle,
   delta: SlidePoint,
-  minimum: number
+  minimum: number,
+  aspectRatioLocked = false
 ): FrameBounds {
+  // A corner of a locked picture scales both axes by the drag projected on
+  // the diagonal, with the opposite corner held (upstream #1510, #1537).
+  if (aspectRatioLocked && handle.length === 2 && bounds.width > 0 && bounds.height > 0) {
+    const dx = handle.includes('w') ? -delta.x : delta.x;
+    const dy = handle.startsWith('n') ? -delta.y : delta.y;
+    const scale = Math.max(
+      1 + (dx * bounds.width + dy * bounds.height) / (bounds.width ** 2 + bounds.height ** 2),
+      minimum / bounds.width,
+      minimum / bounds.height
+    );
+    const width = Math.round(bounds.width * scale);
+    const height = Math.round(bounds.height * scale);
+    return {
+      x: handle.includes('w') ? bounds.x + bounds.width - width : bounds.x,
+      y: handle.startsWith('n') ? bounds.y + bounds.height - height : bounds.y,
+      width,
+      height,
+    };
+  }
   let { x, y, width, height } = bounds;
   if (handle.includes('w')) {
     const dx = Math.min(delta.x, width - minimum);
@@ -391,7 +411,8 @@ export function resizedShapeBox(
     { x: shape.x, y: shape.y, width: shape.width, height: shape.height },
     handle,
     emu,
-    MIN_SHAPE_SIZE_EMU
+    MIN_SHAPE_SIZE_EMU,
+    shape.aspectRatioLocked
   );
   return { x: box.x, y: box.y, width: box.width, height: box.height };
 }

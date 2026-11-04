@@ -722,6 +722,7 @@ fn fallback_shape(
             default_list_style: None,
             paragraphs,
         }),
+        equation: false,
     }))
 }
 

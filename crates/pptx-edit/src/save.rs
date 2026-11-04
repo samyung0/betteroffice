@@ -8,7 +8,7 @@ use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
     DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, PptxPackage,
     RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
-    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
+    SlideLayout, SlideMaster, SlideWrite, TextAutofit, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -47,7 +47,19 @@ impl<'a> SlideContext<'a> {
 impl DeckSession {
     /// Serializes the deck with all edits applied. Untouched slides keep their
     /// exact source part bytes; edited slides are patched at the XML level.
+    /// Edited normal-autofit bodies keep their stored scale; a renderer's
+    /// save writes the scale it refit them to (upstream #1526).
     pub fn save(&self) -> EditResult<Vec<u8>> {
+        self.save_with_autofit_resolver(|_, _| Ok(HashMap::new()))
+    }
+
+    /// `save`, writing the `a:normAutofit` scales `resolve` returns by story
+    /// id for the current and baseline snapshots.
+    #[doc(hidden)]
+    pub fn save_with_autofit_resolver(
+        &self,
+        resolve: impl FnOnce(&DeckSnapshot, &DeckSnapshot) -> EditResult<HashMap<String, TextAutofit>>,
+    ) -> EditResult<Vec<u8>> {
         if !self.package.has_parts() {
             return Err(EditError::Write(
                 "this session carries no source file bytes; open it from the \
@@ -61,7 +73,8 @@ impl DeckSession {
             return pptx_parse::write_pptx(&self.package)
                 .map_err(|error| EditError::Write(error.to_string()));
         }
-        let deck = deck_write(&current, &baseline, &self.package)?;
+        let autofit = resolve(&current, &baseline)?;
+        let deck = deck_write(&current, &baseline, &self.package, &autofit)?;
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
@@ -71,6 +84,7 @@ fn deck_write(
     current: &DeckSnapshot,
     baseline: &DeckSnapshot,
     package: &PptxPackage,
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<DeckWrite> {
     let baseline_slides: HashMap<&str, &SlideSnapshot> = baseline
         .slides
@@ -87,8 +101,15 @@ fn deck_write(
                 part_path: source_part_path(slide)?,
                 shapes: {
                     let context = SlideContext::new(package, slide);
-                    shape_writes(&slide.shapes, &base.shapes, &context, context.source_shapes)?
+                    shape_writes(
+                        &slide.shapes,
+                        &base.shapes,
+                        &context,
+                        context.source_shapes,
+                        autofit,
+                    )?
                 },
+                layout_part_path: None,
             },
             None => SlideWrite::Add {
                 name: slide.name.clone(),
@@ -334,6 +355,7 @@ fn comment_write(comment: &CommentSnapshot, author_id: String, index: u32) -> Co
         y_emu: comment.y_emu,
         status: comment.resolved.then(|| "resolved".to_owned()),
         replies: Vec::new(),
+        source: None,
     }
 }
 
@@ -349,6 +371,7 @@ fn shape_writes(
     baseline: &[ShapeSnapshot],
     context: &SlideContext<'_>,
     source: &[ShapeNode],
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<Vec<ShapeWrite>> {
     let baseline_shapes: HashMap<&str, &ShapeSnapshot> = baseline
         .iter()
@@ -364,12 +387,7 @@ fn shape_writes(
                 let index = addressed_source_index(shape, source)?;
                 ShapeWrite::Patch {
                     source_index: index,
-                    patch: Box::new(shape_patch(
-                        shape,
-                        base,
-                        context,
-                        group_children(source, index),
-                    )?),
+                    patch: Box::new(shape_patch(shape, base, context, &source[index], autofit)?),
                 }
             }
             None => ShapeWrite::Add(Box::new(shape_add(shape)?)),
@@ -392,13 +410,6 @@ fn addressed_source_index(shape: &ShapeSnapshot, source: &[ShapeNode]) -> EditRe
     }
 }
 
-fn group_children(source: &[ShapeNode], index: usize) -> &[ShapeNode] {
-    match source.get(index) {
-        Some(ShapeNode::Group(group)) => &group.children,
-        _ => &[],
-    }
-}
-
 fn source_index(shape_id: &str) -> EditResult<usize> {
     shape_id
         .rfind(":shape:")
@@ -412,7 +423,8 @@ fn shape_patch(
     shape: &ShapeSnapshot,
     base: &ShapeSnapshot,
     context: &SlideContext<'_>,
-    source_children: &[ShapeNode],
+    source: &ShapeNode,
+    autofit: &HashMap<String, TextAutofit>,
 ) -> EditResult<ShapePatch> {
     let mut patch = ShapePatch::default();
     let moved = (shape.x, shape.y) != (base.x, base.y);
@@ -470,15 +482,69 @@ fn shape_patch(
         if base_story == Some(story) {
             continue;
         }
+        let target = text_target(&story.id, &shape.id)?;
+        // A refit equal to the one the layout or master gives stays
+        // inherited; a slide that owns its normal autofit is always written
+        // (upstream #1701).
+        let autofit = autofit
+            .get(&story.id)
+            .filter(|value| {
+                matches!(target, TextTarget::TableCell { .. })
+                    || matches!(node_autofit(source), Some(TextAutofit::Normal { .. }))
+                    || autofit_values(Some(value))
+                        != autofit_values(inherited_autofit(shape, context))
+            })
+            .cloned();
         patch.texts.push(TextWrite {
-            target: text_target(&story.id, &shape.id)?,
+            target,
+            autofit,
             paragraphs: paragraph_writes(story, base_story)?,
         });
     }
     if shape.children != base.children {
-        patch.children = shape_writes(&shape.children, &base.children, context, source_children)?;
+        let children = match source {
+            ShapeNode::Group(group) => group.children.as_slice(),
+            _ => &[],
+        };
+        patch.children = shape_writes(&shape.children, &base.children, context, children, autofit)?;
     }
     Ok(patch)
+}
+
+fn node_autofit(node: &ShapeNode) -> Option<&TextAutofit> {
+    match node {
+        ShapeNode::Shape(shape) => shape.text.as_ref()?.autofit.as_ref(),
+        _ => None,
+    }
+}
+
+/// The autofit of the layout's, then the master's, matching placeholder.
+fn inherited_autofit<'a>(
+    shape: &ShapeSnapshot,
+    context: &SlideContext<'a>,
+) -> Option<&'a TextAutofit> {
+    let placeholder = shape.placeholder.as_ref()?;
+    [
+        context.layout.map(|layout| layout.shapes.as_slice()),
+        context.master.map(|master| master.shapes.as_slice()),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|nodes| find_placeholder(nodes, placeholder).and_then(node_autofit))
+}
+
+/// Font scale and line spacing reduction, with PowerPoint's defaults.
+fn autofit_values(autofit: Option<&TextAutofit>) -> (f64, f64) {
+    match autofit {
+        Some(TextAutofit::Normal {
+            font_scale,
+            line_space_reduction,
+        }) => (
+            font_scale.unwrap_or(1.0),
+            line_space_reduction.unwrap_or(0.0),
+        ),
+        _ => (1.0, 0.0),
+    }
 }
 
 /// The transform a placeholder inherits: the layout's matching placeholder,
@@ -586,6 +652,7 @@ fn paragraph_writes(
         writes.push(ParagraphWrite {
             source_index,
             template_index,
+            source_paragraphs: Vec::new(),
             preserved_xml: None,
             rebuild: true,
             properties_changed,
@@ -657,6 +724,9 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: shape.geometry.clone(),
+        // Only `add_text_box` gives an added shape a story outside a
+        // placeholder, so that is the `txBox="1"` marker (upstream #1507).
+        text_box: shape.placeholder.is_none() && !shape.text_stories.is_empty(),
         x: shape.x,
         y: shape.y,
         width: shape.width,
@@ -682,6 +752,7 @@ fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
     Ok(ShapeAdd {
         name: shape.name.clone(),
         geometry: "rect".to_owned(),
+        text_box: false,
         x: shape.x,
         y: shape.y,
         width: shape.width,

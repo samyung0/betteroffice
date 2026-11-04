@@ -320,6 +320,43 @@ describe('pptx resize handles', () => {
     expect(box.x).toBe(picture.x);
   });
 
+  it('preserves a locked picture aspect ratio on every corner drag', () => {
+    const locked = { ...picture, width: 3_000_000, height: 1_500_000, aspectRatioLocked: true };
+    for (const handle of ['nw', 'ne', 'sw', 'se'] as const) {
+      const box = resizedShapeBox(deck, frame, locked, handle, { x: 80, y: 10 });
+      if (!box) throw new Error('shape should be resizable');
+      expect(box.width / box.height).toBeCloseTo(2, 5);
+      expect(handle.includes('w') ? box.x + box.width : box.x).toBe(
+        handle.includes('w') ? locked.x + locked.width : locked.x
+      );
+      expect(handle.startsWith('n') ? box.y + box.height : box.y).toBe(
+        handle.startsWith('n') ? locked.y + locked.height : locked.y
+      );
+    }
+  });
+
+  for (const handle of ['nw', 'ne', 'sw', 'se'] as const) {
+    it(`scales a locked picture continuously across opposing deltas at ${handle}`, () => {
+      const locked = { ...picture, width: 2_400_000, height: 1_200_000, aspectRatioLocked: true };
+      for (const direction of [-1, 1]) {
+        const boxes = [-399_000, -400_000, -401_000].map((dy) => {
+          const delta = {
+            x: (direction * (handle.includes('w') ? -800_000 : 800_000) * frame.width) / deck.widthEmu,
+            y: (direction * (handle.startsWith('n') ? -dy : dy) * frame.height) / deck.heightEmu,
+          };
+          const box = resizedShapeBox(deck, frame, locked, handle, delta);
+          if (!box) throw new Error('shape should be resizable');
+          expect(box.width / box.height).toBeCloseTo(2, 5);
+          return box;
+        });
+        for (let index = 1; index < boxes.length; index += 1) {
+          expect(Math.abs(boxes[index].width - boxes[index - 1].width)).toBeLessThan(2_000);
+          expect(Math.abs(boxes[index].height - boxes[index - 1].height)).toBeLessThan(2_000);
+        }
+      }
+    });
+  }
+
   it('uses the same EMU floor for preview and commit', () => {
     const box = resizedShapeBox(deck, frame, picture, 'e', { x: -1_000, y: 0 });
     const preview = resizedShapeBounds(deck, frame, picture, 'e', { x: -1_000, y: 0 });

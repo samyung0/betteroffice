@@ -99,6 +99,14 @@ impl PptxRenderer {
         Ok(id)
     }
 
+    /// Saves `document` with the normal-autofit scales this renderer refit
+    /// its edited text to (upstream #1526); `PptxDocument.saveBytes` keeps
+    /// the stored ones.
+    #[wasm_bindgen(js_name = saveBytes)]
+    pub fn save_bytes(&self, document: &PptxDocument) -> Result<Vec<u8>, JsValue> {
+        self.renderer.save(document.session()).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = registerFallbackFont)]
     pub fn register_fallback_font(
         &mut self,

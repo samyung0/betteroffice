@@ -551,3 +551,64 @@ fn a_missing_position_or_size_reads_the_source_file() {
     );
     assert_eq!(moved.children[0].y, child.y);
 }
+
+/// Upstream #1510: a picture's `noChangeAspect` lock reaches the snapshot
+/// from the file, without a seeded key, and every inserted picture is locked.
+#[test]
+fn picture_aspect_locks_come_from_the_file_and_inserted_pictures_are_locked() {
+    fn pictures(session: &DeckSession) -> Vec<ShapeSnapshot> {
+        fn walk(shapes: &[ShapeSnapshot], out: &mut Vec<ShapeSnapshot>) {
+            for shape in shapes {
+                if shape.kind == pptx_edit::ShapeKind::Picture {
+                    out.push(shape.clone());
+                }
+                walk(&shape.children, out);
+            }
+        }
+        let mut out = Vec::new();
+        for slide in session.snapshot().unwrap().slides {
+            walk(&slide.shapes, &mut out);
+        }
+        out
+    }
+    let locked = DeckSession::open(FIXTURE, 711).unwrap();
+    let seeded = pictures(&locked);
+    assert_eq!(seeded.len(), 1);
+    assert!(seeded[0].aspect_ratio_locked);
+    assert_eq!(
+        locked.snapshot().unwrap(),
+        pptx_edit::baseline_snapshot(locked.package()).unwrap()
+    );
+
+    let unlocked = DeckSession::open(include_bytes!("fixtures/blip-shadow.pptx"), 712).unwrap();
+    assert!(!pictures(&unlocked).is_empty());
+    assert!(
+        pictures(&unlocked)
+            .iter()
+            .all(|shape| !shape.aspect_ratio_locked)
+    );
+
+    let slide_id = unlocked.snapshot().unwrap().slides[0].id.clone();
+    let added = unlocked
+        .add_picture(
+            &EditCtx::local("test"),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Inserted".to_owned(),
+                rect: ShapeRect {
+                    x: 10,
+                    y: 20,
+                    width: 3_000,
+                    height: 4_000,
+                },
+                content_type: "image/png".to_owned(),
+                media_bytes: vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+            },
+        )
+        .unwrap();
+    let inserted = pictures(&unlocked)
+        .into_iter()
+        .find(|shape| shape.id == added.shape_id)
+        .unwrap();
+    assert!(inserted.aspect_ratio_locked);
+}

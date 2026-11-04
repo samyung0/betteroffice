@@ -30,6 +30,9 @@ pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
+/// The renderer's autofit refit compares a story with its seed (upstream #1526).
+#[doc(hidden)]
+pub use story::baseline_story;
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "wasm")]

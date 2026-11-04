@@ -191,9 +191,6 @@ fn parse_package(
             background: data.background,
             background_picture: data.background_picture,
             background_reference: data.background_reference,
-            declares_background: root
-                .child("cSld")
-                .is_some_and(|common| common.child("bg").is_some()),
             shapes: data.shapes,
             color_map_override: parse_color_map_override(&root),
             notes,
@@ -1707,7 +1704,6 @@ mod tests {
                 background: None,
                 background_picture: None,
                 background_reference: None,
-                declares_background: false,
                 shapes: vec![chart_shape(id)],
                 color_map_override: None,
                 notes: String::new(),
