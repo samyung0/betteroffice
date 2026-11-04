@@ -32,16 +32,16 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
-async function mount(between: boolean) {
+async function mount(between: boolean, lead = true) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
-  const body = paragraph('Paragraph before the table.') + table('T1') +
+  const body = (lead ? paragraph('Paragraph before the table.') : '') + table('T1') +
     (between ? paragraph('') + table('T2') : '') + paragraph('Paragraph after the table.');
   zip.file('word/document.xml', `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}<w:sectPr/></w:body></w:document>`);
   const session = await createYrsSession();
   sessions.push(session);
   session.openDocx(await zip.generateAsync({ type: 'uint8array' }), true);
-  const target = session.paragraphs('body')[1]!;
+  const target = session.paragraphs('body')[lead ? 1 : 0]!;
   session.setSelection({ story: 'body', paraId: target.paraId, offset: 1 });
   const input = createRef<YrsInputRef>();
   const map = (story = 'body') => createYrsInputPositionMap(story, session.paragraphSpans(story));
@@ -86,6 +86,23 @@ for (const between of [false, true]) {
     for (const text of ['T1-A1', 'T1-B1', 'T1-A2', ...(between ? ['T2-A1', 'T2-B1', 'T2-A2', 'T2-B2'] : [])]) {
       expect(session.storyIds().some(story => session.paragraphs(story).some(para => para.text === text))).toBe(true);
     }
+  });
+}
+
+// Home, a Left arrow from the text, or Right from the paragraph above put the
+// caret at offset 0, before the table; it draws at the start of the text.
+for (const [key, lead] of [['Home', true], ['ArrowLeft', true], ['Home', false]] as const) {
+  test(`backspace after ${key} ${lead ? 'below a table' : 'below a table opening the document'} moves the caret into its last cell`, async () => {
+    const { session, press } = await mount(false, lead);
+    const before = session.storySegments('body');
+    const cellStory = session.storyIds().find(story =>
+      session.paragraphs(story).some(para => para.text === 'T1-B2'))!;
+    const cell = session.paragraphs(cellStory)[0]!;
+    await press(key);
+    expect(session.selection()?.head.offset).toBe(0);
+    await press('Backspace');
+    expect(session.storySegments('body')).toEqual(before);
+    expect(session.selection()?.head).toEqual({ story: cellStory, paraId: cell.paraId, offset: 5 });
   });
 }
 

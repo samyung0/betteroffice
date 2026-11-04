@@ -1244,6 +1244,15 @@ impl EditSession {
             let loc = index_loc(doc, story, index)?;
             Ok(crate::Loc::new(story, loc.para_id, loc.offset))
         };
+        // Before a slot's leading table the caret draws at the start of the
+        // text after it (Home, Left from that text, Right from the paragraph
+        // above all land there), so Backspace does what it does after the
+        // table (Q543 B).
+        if matches!(direction, DeleteDirection::Backward)
+            && let Some(caret) = leading_table_last_cell_end(doc, story, head)?
+        {
+            return Ok((caret, None));
+        }
         let (skipped, adjacent) = adjacent_story_unit(doc, story, head, direction)?;
         match (direction, adjacent) {
             (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
@@ -1303,11 +1312,38 @@ impl EditSession {
                 };
                 Ok((caret, receipt.revision_ids.into_iter().next()))
             }
-            // Only fields that show nothing lie that way: they stay.
-            (_, None) if skipped > 0 => Ok((caret_at(head)?, None)),
+            // Only fields that show nothing lie that way, or nothing at all
+            // before the story's start: the caret stays.
+            (_, None) if skipped > 0 || matches!(direction, DeleteDirection::Backward) => {
+                Ok((caret_at(head)?, None))
+            }
             (_, None) => Err(js_err("there is no character in that direction")),
         }
     }
+}
+
+/// [`table_last_cell_end`] of the table a paragraph slot opens with, when
+/// `head` is that slot's start; `None` otherwise.
+fn leading_table_last_cell_end(
+    doc: &EditingDoc,
+    story: &str,
+    head: u32,
+) -> Result<Option<crate::Loc>, JsValue> {
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    let opens_with_table = segments
+        .para_at(head)
+        .is_some_and(|para| para.start == head && para.node_start > head)
+        && matches!(
+            segments.segment_at(head),
+            Some(Seg {
+                kind: SegKind::Embed { table: true, .. },
+                ..
+            })
+        );
+    if !opens_with_table {
+        return Ok(None);
+    }
+    table_last_cell_end(doc, story, head)
 }
 
 /// The end of the last paragraph of the last cell of the table at story
@@ -4377,6 +4413,66 @@ mod tests {
             json!({ "story": last, "paraId": cell, "offset": 2 })
         );
         assert_eq!(doc.story_segments("body").unwrap(), before);
+    }
+
+    #[test]
+    fn backspace_before_a_slots_leading_table_moves_the_caret_to_the_end_of_its_last_cell() {
+        // With text above the table, and with the table opening the story.
+        for leading_paragraph in [true, false] {
+            let session = EditSession::new(24.0).unwrap();
+            let doc = session.engine.doc();
+            let ctx = EditCtx::local(String::new(), String::new());
+            doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+                .unwrap();
+            let slot_start = if leading_paragraph {
+                doc.split_paragraph(&ctx, Position::new("body", 5)).unwrap();
+                6
+            } else {
+                0
+            };
+            let table = doc
+                .insert_table(&ctx, Position::new("body", slot_start), 2, 2, 15)
+                .unwrap();
+            let last = table.created_story_ids.last().unwrap().clone();
+            let cell = doc.paragraphs(&last).unwrap()[0].para_id.clone();
+            doc.insert_text(&ctx, Position::new(&last, 0), "B2", FormatPolicy::Plain)
+                .unwrap();
+            let paragraphs = doc.paragraphs("body").unwrap();
+            let slot = paragraphs.last().unwrap().para_id.clone();
+            let before = doc.story_segments("body").unwrap();
+            // Offset 0 sits before the table, where Home puts the caret.
+            let receipt: Value = serde_json::from_str(
+                &session
+                    .delete_at("body", &slot, 0, "backward", None, None)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                receipt["caret"],
+                json!({ "story": last, "paraId": cell, "offset": 2 }),
+                "leading paragraph {leading_paragraph}"
+            );
+            assert_eq!(doc.story_segments("body").unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn backspace_at_the_start_of_a_story_leaves_the_caret() {
+        let session = EditSession::new(25.0).unwrap();
+        let doc = session.engine.doc();
+        doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+            .unwrap();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .delete_at("body", "p0", 0, "backward", None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["caret"],
+            json!({ "story": "body", "paraId": "p0", "offset": 0 })
+        );
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "Alpha");
     }
 
     #[test]

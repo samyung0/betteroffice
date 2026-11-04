@@ -609,9 +609,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const paragraphs = session.paragraphs(activeStory);
         const index = paragraphs.findIndex((paragraph) => paragraph.paraId === caret.paraId);
         if (index < 0) return;
+        // At the first paragraph's start, Backspace still goes to the engine when
+        // the paragraph opens with an embed: before a leading table it moves the
+        // caret into the table's last cell (Q543 B).
         const hasTarget =
           direction === 'backward'
-            ? caret.offset > 0 || index > 0
+            ? caret.offset > 0 ||
+              index > 0 ||
+              session.paragraphUnitText(activeStory, caret.paraId).startsWith('\ufffc')
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (!hasTarget) return;
         if (activeStory === 'body' && !isSuggesting && applyResidentDelete) {
