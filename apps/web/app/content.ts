@@ -93,10 +93,6 @@ export const PACKAGES_SECTION = {
 
 export const PACKAGES = [
   {
-    name: "@betteroffice/agents",
-    desc: "Tools for agents to search, read, edit and preview DOCX, XLSX and PPTX files, through a TypeScript SDK or a local MCP server.",
-  },
-  {
     name: "@betteroffice/docx",
     desc: "Framework-free DOCX core: parsing, CRDT editing, page layout and rendering on the Rust engine.",
   },
