@@ -2826,7 +2826,7 @@ function sameJson(a: unknown, b: unknown): boolean {
   );
 }
 
-const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
+const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+(?:~\d+)?|:sdt\d+)$/;
 
 /** Stories a committed op touched; `all` invalidates the whole session. */
 export function noteYrsStoriesDirty(

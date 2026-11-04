@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { Table, TableLook } from '../types/document';
 import type { Style } from '../types/styles';
-import { tableCellParagraphFormatting } from './tableParagraphFormatting';
+import { enclosingCellStory, tableCellParagraphFormatting } from './tableParagraphFormatting';
 
 test('distinguishes an omitted table look from explicit empty and zero settings', () => {
   const style: Style = {
@@ -31,4 +31,10 @@ test('distinguishes an omitted table look from explicit empty and zero settings'
     expect(after(1, 0)).toBe(look ? 170 : 130);
     expect(after(1, 1)).toBe(look ? 180 : 150);
   }
+});
+
+test('an edit-born cell story, suffixed with its client, encloses its controls', () => {
+  expect(enclosingCellStory('body:t0:r1c2~7')).toBe('body:t0:r1c2~7');
+  expect(enclosingCellStory('body:t0:r1c2~7:sdt0')).toBe('body:t0:r1c2~7');
+  expect(enclosingCellStory('body:sdt0')).toBeUndefined();
 });

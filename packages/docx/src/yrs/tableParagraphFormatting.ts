@@ -107,7 +107,8 @@ interface TablePayloadShape {
   rows?: Array<{ trPr?: Attrs; cells?: Array<{ tcPr?: Attrs; story?: string }> }>;
 }
 
-const CELL_STORY = /:t\d+:r\d+c\d+$/;
+// An edit-born cell carries its replica's client (`~{client}`, #1454).
+const CELL_STORY = /:t\d+:r\d+c\d+(?:~\d+)?$/;
 const CONTROL_STORY = /:sdt\d+$/;
 
 /**
