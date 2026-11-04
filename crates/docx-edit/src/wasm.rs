@@ -129,7 +129,10 @@ enum DeleteDirection {
 #[derive(Clone, Copy)]
 enum AdjacentStoryUnit {
     Content(u32),
-    /// A table or block content control, which Delete and Backspace leave.
+    /// A table, which Delete and Backspace leave; Backspace moves into its
+    /// last cell.
+    Table,
+    /// A block content control, which Delete and Backspace leave.
     Container,
     Pilcrow,
 }
@@ -272,6 +275,7 @@ fn adjacent_story_unit(
                 AdjacentStoryUnit::Content(width)
             }
             SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+            SegKind::Embed { table: true, .. } => AdjacentStoryUnit::Table,
             SegKind::Embed {
                 container: true, ..
             } => AdjacentStoryUnit::Container,
@@ -1195,6 +1199,13 @@ impl EditSession {
             head,
             delete_direction(direction)?,
         )?;
+        // Backspace after a table edits nothing and moves the caret into its
+        // last cell, another story: the host's structural path takes it there.
+        if caret.story != story {
+            return Err(js_err(
+                "resident input state is not ready for this paragraph",
+            ));
+        }
         // Backspace past a field that shows nothing leaves the caret ahead of
         // it, where the deleted unit was; the selection's anchors would keep it
         // after the field.
@@ -1250,7 +1261,18 @@ impl EditSession {
                     .map_err(js_err)?;
                 Ok((caret_at(head)?, receipt.revision_ids.into_iter().next()))
             }
-            (_, Some(AdjacentStoryUnit::Container)) => Ok((caret_at(head)?, None)),
+            // Backspace after a table moves the caret to the end of its last
+            // cell, as upstream does (#1680); the table stays.
+            (DeleteDirection::Backward, Some(AdjacentStoryUnit::Table)) => {
+                let caret = match table_last_cell_end(doc, story, head - skipped - 1)? {
+                    Some(caret) => caret,
+                    None => caret_at(head)?,
+                };
+                Ok((caret, None))
+            }
+            (_, Some(AdjacentStoryUnit::Table | AdjacentStoryUnit::Container)) => {
+                Ok((caret_at(head)?, None))
+            }
             (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
                 let paragraphs = doc.paragraphs(story).map_err(js_err)?;
                 let paragraph_index = paragraphs
@@ -1286,6 +1308,35 @@ impl EditSession {
             (_, None) => Err(js_err("there is no character in that direction")),
         }
     }
+}
+
+/// The end of the last paragraph of the last cell of the table at story
+/// index `index`; `None` when that table has no cell.
+fn table_last_cell_end(
+    doc: &EditingDoc,
+    story: &str,
+    index: u32,
+) -> Result<Option<crate::Loc>, JsValue> {
+    let cell = {
+        let txn = doc.yrs_doc().transact();
+        let text = story_ref(&txn, story).map_err(js_err)?;
+        crate::ops::snapshot_range(&text, &txn, index, index + 1)
+            .first()
+            .and_then(|chunk| match &chunk.kind {
+                crate::ops::ChunkKind::Embed(Some(map)) => {
+                    crate::ops::table::last_cell_story(map, &txn)
+                }
+                _ => None,
+            })
+    };
+    let Some(cell) = cell else {
+        return Ok(None);
+    };
+    let segments = doc.segment_index(&cell).map_err(js_err)?;
+    Ok(segments
+        .paras()
+        .last()
+        .map(|para| crate::Loc::new(cell.as_str(), &*para.para_id, para.pilcrow - para.start)))
 }
 
 fn delete_direction(direction: &str) -> Result<DeleteDirection, JsValue> {
@@ -4246,6 +4297,37 @@ mod tests {
                 r#"{"caret":{"offset":1,"paraId":"p1","story":"body"},"revisionId":null}"#
             );
         }
+    }
+
+    #[test]
+    fn backspace_after_a_table_moves_the_caret_to_the_end_of_its_last_cell() {
+        let session = EditSession::new(23.0).unwrap();
+        let doc = session.engine.doc();
+        let ctx = EditCtx::local(String::new(), String::new());
+        doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+            .unwrap();
+        doc.split_paragraph(&ctx, Position::new("body", 5)).unwrap();
+        // The table leads the second paragraph's slot.
+        let table = doc
+            .insert_table(&ctx, Position::new("body", 6), 2, 2, 15)
+            .unwrap();
+        let last = table.created_story_ids.last().unwrap().clone();
+        let cell = doc.paragraphs(&last).unwrap()[0].para_id.clone();
+        doc.insert_text(&ctx, Position::new(&last, 0), "B2", FormatPolicy::Plain)
+            .unwrap();
+        let after = doc.paragraphs("body").unwrap()[1].para_id.clone();
+        let before = doc.story_segments("body").unwrap();
+        let receipt: Value = serde_json::from_str(
+            &session
+                .delete_at("body", &after, 1, "backward", None, None)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt["caret"],
+            json!({ "story": last, "paraId": cell, "offset": 2 })
+        );
+        assert_eq!(doc.story_segments("body").unwrap(), before);
     }
 
     #[test]

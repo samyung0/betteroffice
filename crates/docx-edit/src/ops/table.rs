@@ -270,6 +270,14 @@ fn shared_any<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> OpResult<Any> {
     }
 }
 
+/// The story of a table's last cell: the last one of the last row holding one.
+#[cfg(feature = "wasm")]
+pub(crate) fn last_cell_story<T: ReadTxn>(map: &MapRef, txn: &T) -> Option<String> {
+    let table = read_table(map, txn).ok()?;
+    let cell = table.rows.iter().rev().find_map(|row| row.cells.last())?;
+    Some(cell.story.clone())
+}
+
 fn read_table<T: ReadTxn>(map: &MapRef, txn: &T) -> OpResult<TableData> {
     let tbl_pr = any_map(&shared_any(map, txn, "tblPr")?, "tblPr")?;
     let grid = any_array(&shared_any(map, txn, "grid")?, "grid")?;
