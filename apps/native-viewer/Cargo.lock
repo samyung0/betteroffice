@@ -411,7 +411,6 @@ version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
- "quick-xml",
  "serde",
 ]
 

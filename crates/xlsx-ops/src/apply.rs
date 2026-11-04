@@ -14,9 +14,9 @@ use xlsx_model::{
 use crate::formatting::{mutate_number_format, patch_cell_format};
 use crate::op::{CellState, Op};
 use crate::remap::{
-    remap_auto_filter, remap_charts, remap_defined_names, remap_formulas,
-    remap_hyperlink_locations, remap_hyperlink_range, rename_chart_refs, rename_defined_names,
-    rename_hyperlink_location, rename_sheet_references, strand_chart_refs,
+    remap_charts, remap_defined_names, remap_formulas, remap_hyperlink_locations,
+    remap_hyperlink_range, rename_chart_refs, rename_defined_names, rename_hyperlink_location,
+    rename_sheet_references, strand_chart_refs,
 };
 
 /// the inverse of an applied op: a base-vocabulary op list that, replayed in
@@ -1264,7 +1264,6 @@ fn insert_rows(
     shift_row_heights_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
-    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteRows { sheet, at, count }];
     if !old_row_styles.is_empty() {
@@ -1284,7 +1283,6 @@ fn insert_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
-    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1318,7 +1316,6 @@ fn delete_rows(
         .collect::<BTreeMap<_, _>>();
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
-    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = Vec::new();
     if !old_row_styles.is_empty() {
@@ -1358,7 +1355,6 @@ fn delete_rows(
         sheet,
         hyperlinks: old_hyperlinks,
     });
-    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1386,7 +1382,6 @@ fn insert_cols(
     shift_col_styles_up(s, at, count);
     remap_merges_keep(s, op);
     remap_hyperlinks(s, op);
-    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
     if !old_col_styles.is_empty() {
@@ -1406,7 +1401,6 @@ fn insert_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
-    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);
@@ -1437,7 +1431,6 @@ fn delete_cols(
     shift_col_styles_down(s, at, count);
     let dropped_merges = remap_merges_drop(s, op);
     remap_hyperlinks(s, op);
-    let auto_filter_restore = remap_auto_filter(s, sheet, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
     if !old_col_styles.is_empty() {
@@ -1468,7 +1461,6 @@ fn delete_cols(
         sheet,
         hyperlinks: old_hyperlinks,
     });
-    inv.extend(auto_filter_restore);
     inv.extend(restores);
     inv.extend(defined_name_restore);
     inv.extend(chart_restores);

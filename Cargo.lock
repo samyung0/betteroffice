@@ -524,7 +524,6 @@ dependencies = [
  "betteroffice-xlsx-calc",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
- "quick-xml",
  "serde",
  "serde_json",
 ]

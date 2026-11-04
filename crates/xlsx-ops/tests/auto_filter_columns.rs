@@ -39,26 +39,34 @@ fn saved_filter_after(op: Op) -> String {
     sheet[start..end].to_string()
 }
 
+/// Row and column edits keep the auto filter as authored, as rooms do (Q554 B):
+/// 0.5.1's move of the filter and its criteria (#1653) is reverted.
 #[test]
-fn deleting_a_column_inside_a_filter_moves_later_criteria_left() {
-    assert_eq!(
-        saved_filter_after(Op::DeleteCols {
-            sheet: SheetId(0),
+fn row_and_column_edits_keep_the_filter_as_authored() {
+    let authored = r#"<autoFilter ref="A1:C10"><filterColumn colId="2"><filters><filter val="x"/></filters></filterColumn></autoFilter>"#;
+    let sheet = SheetId(0);
+    for op in [
+        Op::InsertRows {
+            sheet,
+            at: 0,
+            count: 1,
+        },
+        Op::DeleteRows {
+            sheet,
+            at: 1,
+            count: 2,
+        },
+        Op::InsertCols {
+            sheet,
             at: 1,
             count: 1,
-        }),
-        r#"<autoFilter ref="A1:B10"><filterColumn colId="1"><filters><filter val="x"/></filters></filterColumn></autoFilter>"#
-    );
-}
-
-#[test]
-fn inserting_a_column_inside_a_filter_moves_later_criteria_right() {
-    assert_eq!(
-        saved_filter_after(Op::InsertCols {
-            sheet: SheetId(0),
+        },
+        Op::DeleteCols {
+            sheet,
             at: 1,
             count: 1,
-        }),
-        r#"<autoFilter ref="A1:D10"><filterColumn colId="3"><filters><filter val="x"/></filters></filterColumn></autoFilter>"#
-    );
+        },
+    ] {
+        assert_eq!(saved_filter_after(op), authored);
+    }
 }
