@@ -34,7 +34,7 @@ use crate::{
 /// The only deck schema this engine reads. Parsed package data (layouts,
 /// masters, themes, relationships, media) is never stored in the document; it is
 /// derived from the fingerprinted source package.
-const SCHEMA_VERSION: f64 = 5.0;
+const SCHEMA_VERSION: f64 = 6.0;
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;

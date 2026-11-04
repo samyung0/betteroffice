@@ -18,7 +18,7 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The engine reads exactly one deck schema (5.0) and rejects every other version;
+The engine reads exactly one deck schema (6.0) and rejects every other version;
 there are no migrations. The document stores the slide graph, stories and
 comments only. Parsed package data (layouts, masters, themes, relationships and
 media) never enters Yjs: `open_from_update_with_source` derives it from the

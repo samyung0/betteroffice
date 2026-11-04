@@ -277,8 +277,8 @@ const goldenSeeds: Array<[string, string, number]> = [
   ["book-30p.docx", "e33981cb70104e49efa99b4f4f01d6b383888313ffacffb494bd1983a71dbea7", 264_400],
   ["images-10.docx", "00a3ff428d170c4023eefa7a8df186f42972a1b21765a9bc2f02ec2fda0a6b4e", 69_700],
   ["wordprocessingml-comprehensive.docx", "6dd2ecaffcb73b1e7487bcb08afce2f7f735c2c1ce35946ad30fbbcc4bf7b64b", 83_400],
-  ["lecture.pptx", "086f7bda7a389ba626f8b578a1bed78345e07b1dad437a5914ad20b6a728a789", 113_000],
-  ["deck-50.pptx", "02d15d15807bf30eb01e862fc707951d8ed5e94dcd6855da69d457d558951928", 164_500],
+  ["lecture.pptx", "e8f77d42a25347ba356bc763b9ecdb98224247c08132dd74c3da6f0e3d3a52af", 113_000],
+  ["deck-50.pptx", "c303da4210a4c239a58a9171c42074b4ac7d8d15418131292c51a6eab5781db3", 164_500],
 ];
 
 test.each(goldenSeeds)(
