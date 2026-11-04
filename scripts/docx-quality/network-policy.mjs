@@ -4,11 +4,11 @@ import { fileURLToPath } from 'node:url';
 const packages = new URL('../../packages/', import.meta.url);
 const version = (name) =>
   JSON.parse(readFileSync(new URL(`${name}/package.json`, packages), 'utf8')).version.replace(
-    /[.*+?^${}()|[\]\]/g,
-    '\$&',
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
   );
 const fontUrl = new RegExp(
-  `^https://cdn\.jsdelivr\.net/npm/@betteroffice/(?:fonts@${version('fonts')}|fonts-cjk@${version('fonts-cjk')})/assets/[A-Za-z0-9-]+\.(?:ttf|otf)$`,
+  `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}|fonts-cjk@${version('fonts-cjk')})/assets/[A-Za-z0-9-]+\\.(?:ttf|otf)$`,
 );
 
 /** Allow only the jsDelivr font binaries the capture harness requests, fetched without credentials. */

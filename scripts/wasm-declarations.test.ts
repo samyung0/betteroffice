@@ -62,16 +62,11 @@ describe('sortWasmExportDeclarations', () => {
       '    readonly close_display_list: (a: number) => void;',
       '}',
       '',
-    ].join('
-');
+    ].join('\n');
     expect(sortWasmExportDeclarations(glue)).toBe(
       glue.replace(
-        '    readonly memory: WebAssembly.Memory;
-    readonly install_panic_hook: () => void;
-    readonly close_display_list: (a: number) => void;',
-        '    readonly close_display_list: (a: number) => void;
-    readonly install_panic_hook: () => void;
-    readonly memory: WebAssembly.Memory;'
+        '    readonly memory: WebAssembly.Memory;\n    readonly install_panic_hook: () => void;\n    readonly close_display_list: (a: number) => void;',
+        '    readonly close_display_list: (a: number) => void;\n    readonly install_panic_hook: () => void;\n    readonly memory: WebAssembly.Memory;'
       )
     );
   });
