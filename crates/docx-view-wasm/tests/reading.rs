@@ -80,19 +80,31 @@ fn reading_request(mut request: Value, width: f64, padding: f64) -> Value {
         "textSize": 12,
         "contentWidth": width - 2.0 * padding,
     });
+    // The viewer measures with the bundled metric-compatible faces
+    // (packages/fonts), never the fallback metrics.
+    let carlito = docx_layout::register_measure_font(CARLITO).unwrap();
     request["measurement"] = json!({
-        "fontChains": {},
+        "fontChains": { "calibri|0|0": [carlito] },
         "defaults": { "fontSize": 12, "fontFamily": "Calibri" },
-        "authoritativeShaping": false,
+        "authoritativeShaping": true,
     });
     request
 }
 
+const CARLITO: &[u8] = include_bytes!("../../docx-raster/tests/assets/Carlito-Regular.ttf");
+
 fn font_px(run: &Value) -> f64 {
-    let font = run["font"].as_str().unwrap();
+    let font = run["fallbackFont"].as_str().unwrap();
     font.split_whitespace()
         .find_map(|part| part.strip_suffix("px")?.parse().ok())
         .unwrap()
+}
+
+/// A glyph run's left edge and its width, the sum of its advances.
+fn extent(run: &Value) -> (f64, f64) {
+    let glyphs = run["glyphs"].as_array().unwrap();
+    let width = glyphs.iter().map(|g| g["advance"].as_f64().unwrap()).sum();
+    (glyphs[0]["x"].as_f64().unwrap(), width)
 }
 
 #[test]
@@ -113,7 +125,7 @@ fn a_reading_layout_reflows_into_the_column() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|primitive| primitive["kind"] == "text")
+        .filter(|primitive| primitive["kind"] == "glyphRun")
         .collect::<Vec<_>>();
     let run = |text: &str| *runs.iter().find(|run| run["text"] == text).unwrap();
 
@@ -121,11 +133,10 @@ fn a_reading_layout_reflows_into_the_column() {
     assert!((font_px(run("Title")) - 16.0 * (35.0_f64 / 12.0).sqrt()).abs() < 0.1);
     assert_eq!(font_px(run("Body")), 16.0);
     // The 48px first-line indent is halved, inside the 16px padding.
-    assert_eq!(run("Body")["x"].as_f64(), Some(40.0));
+    assert_eq!(extent(run("Body")).0, 40.0);
     // The table's 575px grid fits the 328px column, in one column of text.
     for cell in ["One", "Two", "Three", "Four", "Five"] {
-        let run = run(cell);
-        let right = run["x"].as_f64().unwrap() + run["width"].as_f64().unwrap();
-        assert!(right <= 344.5, "{cell} ends at {right}");
+        let (x, width) = extent(run(cell));
+        assert!(x + width <= 344.5, "{cell} ends at {}", x + width);
     }
 }
