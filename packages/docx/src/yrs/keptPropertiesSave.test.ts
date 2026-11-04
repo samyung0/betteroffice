@@ -821,7 +821,6 @@ describe('Enter at the end of a paragraph', () => {
     'contextualSpacing',
     'outlineLevel',
     'snapToGrid',
-    'defaultTextFormatting',
     '_originalFormatting',
   ];
   const copied = (properties: Record<string, unknown>) =>
@@ -834,7 +833,7 @@ describe('Enter at the end of a paragraph', () => {
     return new Uint8Array(await repackDocx(yrsToDocument(session, base)));
   }
 
-  it('copies every direct property, the mark’s run properties and the kept pPr children', async () => {
+  it('copies every direct property and the kept pPr children', async () => {
     const { session, base } = await open(bytes);
     const [source] = pPrs(await savedDocumentXml(session, base));
     expect(source).toContain('<w:pBdr>');
@@ -842,7 +841,9 @@ describe('Enter at the end of a paragraph', () => {
     const [first, added] = session.paragraphs('body');
     expect(added!.text).toBe('');
     expect(copied(added!.properties)).toEqual(copied(first!.properties));
-    expect(added!.properties.defaultTextFormatting).toMatchObject({ bold: true, color: { rgb: 'FF0000' } });
+    // Its run defaults come from the run before the caret (Q605, #1453): plain "Source" here,
+    // so the mark's bold red stays behind.
+    expect(added!.properties.defaultTextFormatting ?? null).toBeNull();
 
     const saved = await savedBytes(session, base);
     const xml = new TextDecoder().decode((unzipContainer(saved) as Record<string, Uint8Array>)['word/document.xml']);

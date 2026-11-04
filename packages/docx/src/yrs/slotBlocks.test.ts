@@ -156,9 +156,10 @@ describe('paragraph slots that open with a table or page break', () => {
       try {
         const slot = paraId(session, 1);
         const before = session.encodeState();
-        // Backspace right after the table, Delete right before it.
+        // Backspace right after the table puts the caret at the end of its last cell (Q543 B,
+        // #1680); Delete right before it stays put.
         expect(session.deleteAt(caretAt(slot, 1), 'backward', author)).toEqual({
-          caret: caretAt(slot, 1),
+          caret: { story: 'body:t0:r0c0', paraId: 'body:t0:r0c0:p0', offset: 'cell'.length },
           revisionId: null,
         });
         expect(session.deleteAt(caretAt(slot, 0), 'forward', author).caret).toEqual(

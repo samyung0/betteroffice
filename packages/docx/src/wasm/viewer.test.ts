@@ -73,15 +73,11 @@ function pagedPackage(count: number): Uint8Array {
   );
 }
 
-/** Laid-out text lines across all pages. */
-function lineCount(displayList: DisplayList): number {
-  const lines = new Set<string>();
-  displayList.pages.forEach((page, index) => {
-    for (const primitive of page.primitives)
-      if (primitive.kind === 'text' || primitive.kind === 'glyphRun')
-        lines.add(`${index}:${primitive.blockKey}:${primitive.lineIndex}`);
-  });
-  return lines.size;
+/** Glyph runs past the first line of their block: measured text that wrapped. */
+function wrappedGlyphRuns(displayList: DisplayList): number {
+  return displayList.pages
+    .flatMap((page) => page.primitives)
+    .filter((primitive) => primitive.kind === 'glyphRun' && (primitive.lineIndex ?? 0) > 0).length;
 }
 
 describe('DOCX viewer wasm', () => {
@@ -170,11 +166,13 @@ describe('DOCX viewer wasm', () => {
     }
   });
 
-  test('measures with the configured fonts, so long paragraphs wrap', async () => {
+  // Fallback metrics wrap too since upstream #1766 (one em per character, kept by Q604), so the
+  // line count no longer tells them apart: measured text is drawn as glyph runs.
+  test('measures with the configured fonts, so long paragraphs wrap at their glyph widths', async () => {
     const bytes = new Uint8Array(await readFile(fixture));
-    const unwrapped = await openDocumentViewer(bytes);
-    const synthetic = lineCount(unwrapped.displayList());
-    unwrapped.dispose();
+    const unmeasured = await openDocumentViewer(bytes);
+    expect(wrappedGlyphRuns(unmeasured.displayList())).toBe(0);
+    unmeasured.dispose();
     const font = await readFile(
       resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')
     );
@@ -193,7 +191,7 @@ describe('DOCX viewer wasm', () => {
     try {
       const viewer = await openDocumentViewer(bytes);
       try {
-        expect(lineCount(viewer.displayList())).toBeGreaterThan(synthetic);
+        expect(wrappedGlyphRuns(viewer.displayList())).toBeGreaterThan(0);
       } finally {
         viewer.dispose();
       }
