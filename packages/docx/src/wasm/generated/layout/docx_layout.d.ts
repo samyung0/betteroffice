@@ -92,6 +92,16 @@ export function range_rects_by_handle(handle: number, from: number, to: number):
 export function range_rects_json(display_list: string, from: number, to: number): string;
 
 /**
+ * @internal
+ */
+export function range_rects_on_pages_by_handle(handle: number, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
+ * @internal
+ */
+export function range_rects_on_pages_json(display_list: string, from: number, to: number, first_page: number, last_page: number): string;
+
+/**
  * wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
  * range rects against a stored display list. `region` is
  * `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
@@ -144,14 +154,16 @@ export function vertical_move_json(display_list: string, position: number, direc
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
+    readonly __externref_table_alloc: () => number;
     readonly __externref_table_dealloc: (a: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_start: () => void;
     readonly build_display_list_json: (a: number, b: number) => [number, number, number, number];
-    readonly clear_measure_fonts: () => void;
+    readonly clear_measure_fonts: () => [number, number];
     readonly close_display_list: (a: number) => void;
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -164,6 +176,8 @@ export interface InitOutput {
     readonly outline_glyph_json: (a: number, b: number) => [number, number, number, number];
     readonly range_rects_by_handle: (a: number, b: number, c: number) => [number, number, number, number];
     readonly range_rects_json: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly range_rects_on_pages_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly range_rects_on_pages_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];

@@ -92,6 +92,7 @@ export class PptxRenderer {
     [Symbol.dispose](): void;
     fontBytes(font_id: number): Uint8Array;
     hitTestJson(x: number, y: number): string;
+    hitTestSlideJson(document: PptxDocument, id: string, x: number, y: number): string;
     layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     /**
@@ -115,6 +116,7 @@ export class PptxRenderer {
      * `[{"family" (its alias), "typeface", "bold", "italic", "fontId"}]`.
      */
     registerEmbeddedFontsJson(document: PptxDocument): string;
+    registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
      * Saves `document` with the normal-autofit scales this renderer refit
@@ -122,6 +124,9 @@ export class PptxRenderer {
      * the stored ones.
      */
     saveBytes(document: PptxDocument): Uint8Array;
+    setActiveSlide(document: PptxDocument, id: string, key: string): boolean;
+    slideLayoutKey(document: PptxDocument, slide_index: number): string;
+    snapshotWithLayoutKeysJson(document: PptxDocument): string;
 }
 
 export function compileSlideJson(slide_json: string): string;
@@ -222,6 +227,7 @@ export interface InitOutput {
     readonly pptxdocument_version: () => [number, number];
     readonly pptxrenderer_fontBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxrenderer_hitTestSlideJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideAtCaretJson: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
@@ -230,8 +236,12 @@ export interface InitOutput {
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_refuseEmbeddedFont: (a: number, b: number) => void;
     readonly pptxrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
+    readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
+    readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxrenderer_snapshotWithLayoutKeysJson: (a: number, b: number) => [number, number, number, number];
     readonly rendererVersion: () => [number, number];
 }
 
