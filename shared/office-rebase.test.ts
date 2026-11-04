@@ -428,13 +428,11 @@ test("a DOCX table inserted after the capture keeps its cells when the export re
     );
     const current = await docxSession(exported, rebased.state);
     try {
-      const renamed = current.storyIds().filter((id) => id.includes("~"));
-      expect(renamed).toEqual(
-        inserted.createdStoryIds.map((id) => `${id}~1`).sort()
-      );
-      expect(text(current, `${inserted.createdStoryIds[0]}~1`)).toEqual([
-        "new cell",
-      ]);
+      // Edit-born cells carry their client in their ids (#1454), so the
+      // export's renumbered t0 no longer collides with them.
+      const suffixed = current.storyIds().filter((id) => id.includes("~"));
+      expect(suffixed).toEqual([...inserted.createdStoryIds].sort());
+      expect(text(current, inserted.createdStoryIds[0])).toEqual(["new cell"]);
       expect(text(current, "body:t0:r0c0")).toEqual(["e"]);
     } finally {
       current.destroy();
