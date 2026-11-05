@@ -10,6 +10,7 @@ use std::rc::Rc;
 
 use docx_edit::bridge::RenderEnv;
 use docx_edit::*;
+use serde_json::{Value, json};
 use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
 use yrs::{
@@ -315,6 +316,37 @@ fn type_in(peer: &Peer, story: &str, at: u32, what: &str) {
     peer.undo.add_undo_barrier();
 }
 
+/// A layout pass as an editor's (`relayout_frame`), which builds the display list, with no fonts
+/// (the layout's own metrics). The lowered table and its measure.
+fn lay_out(engine: &EngineSession) -> Result<(Value, Value), String> {
+    let request = json!({
+        "bodyStory": "body",
+        "regions": {"sections": [{
+            "sectionId": "main",
+            "pageSize": {"w": 612, "h": 792},
+            "margins": {"top": 72, "right": 72, "bottom": 72, "left": 72, "header": 36, "footer": 36},
+        }]},
+        "measurement": {
+            "fontChains": {},
+            "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+        },
+        "renderEnv": {},
+    })
+    .to_string();
+    engine.relayout_frame(&request, "{}", 0)?;
+    let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&request)?)
+        .map_err(|error| error.to_string())?;
+    let Some(table) = output["measured"].as_array().and_then(|measured| {
+        measured
+            .iter()
+            .find(|entry| entry["block"]["kind"] == "table")
+    }) else {
+        // Every table can be gone in a random schedule.
+        return Ok((Value::Null, Value::Null));
+    };
+    Ok((table["block"].clone(), table["measure"].clone()))
+}
+
 /// #1530, both arrival orders at the room.
 #[test]
 fn undo_brings_a_deleted_table_back_with_the_peers_typing() {
@@ -463,6 +495,97 @@ fn undo_keeps_a_row_the_peer_inserted() {
     net.assert_converged(&cells);
     assert_eq!(rows(left.doc()).len(), 3);
     assert_eq!(text(left.doc(), &row.created_story_ids[0]), "new row");
+}
+
+/// Two people insert rows and the first undoes, with no table delete: the second's `rows` value
+/// still names the cells the Undo removed. Everyone lowers and lays out, the cells read as empty
+/// at a line's height, no caret lands in them, and the document keeps working (Q624).
+#[test]
+fn a_row_naming_removed_cells_reads_as_empty() {
+    let (seed, cells) = table_seed();
+    let net = Net::over(&seed, 2);
+    let (left, right) = (&net.peers[0], &net.peers[1]);
+    let removed = left
+        .doc()
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 1, 0), true)
+        .unwrap();
+    left.undo.add_undo_barrier();
+    net.send(0);
+    let kept = right
+        .doc()
+        .insert_row(&ctx(), &CellLoc::new("body", 0, 2, 0), true)
+        .unwrap();
+    right.undo.add_undo_barrier();
+    net.send(1);
+    assert!(left.undo.undo());
+    net.assert_converged(&cells);
+    assert_eq!(rows(left.doc()).len(), 4);
+    assert!(
+        left.doc()
+            .paragraphs(&removed.created_story_ids[0])
+            .is_err()
+    );
+
+    // Laid out, on both: the row keeps its place and a line's height, as the inner row of real
+    // cells beside it.
+    let (table, measure) = lay_out(&left.engine).unwrap();
+    assert_eq!(lay_out(&right.engine).unwrap().1, measure);
+    let heights: Vec<f64> = measure["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["height"].as_f64().unwrap())
+        .collect();
+    assert_eq!(heights.len(), 4);
+    assert!(heights[2] > 0.0, "{heights:?}");
+    assert_eq!(heights[2], heights[1], "{heights:?}");
+
+    // The cell takes no positions beyond its own open and close, as the editor's projection
+    // counts it.
+    let block = |row: usize, cell: usize| &table["rows"][row]["cells"][cell]["blocks"][0];
+    assert!(block(2, 0).get("pmStart").is_none());
+    assert_eq!(block(2, 0)["runs"], json!([]));
+    let after_row_1 = block(1, 1)["pmEnd"].as_f64().unwrap();
+    assert_eq!(block(3, 0)["pmStart"].as_f64().unwrap(), after_row_1 + 10.0);
+
+    // A click anywhere finds a paragraph someone holds.
+    let (first, last) = (after_row_1 + 2.0, after_row_1 + 8.0);
+    let mut hits = 0;
+    for y in (0..792).step_by(2) {
+        for x in (0..612).step_by(12) {
+            let hit: Value = serde_json::from_str(
+                &left
+                    .engine
+                    .display_hit_test_regions_json(0, f64::from(x), f64::from(y))
+                    .unwrap(),
+            )
+            .unwrap();
+            if let Some(position) = hit["pos"].as_f64() {
+                assert!(
+                    position <= first || position >= last,
+                    "{position} at {x},{y}"
+                );
+                hits += 1;
+            }
+        }
+    }
+    assert!(hits > 0);
+
+    // Find, typing elsewhere, and removing the row all work.
+    assert_eq!(
+        left.doc().search_text("cell3", true, None).unwrap().len(),
+        1
+    );
+    type_in(right, &kept.created_story_ids[0], 0, "still here");
+    let row = CellLoc::new("body", 0, 2, 0);
+    left.doc()
+        .delete_row(&ctx(), &TableRange::new(row.clone(), row))
+        .unwrap();
+    left.undo.add_undo_barrier();
+    net.assert_converged(&cells);
+    assert_eq!(rows(left.doc()).len(), 3);
+    assert_eq!(text(left.doc(), &kept.created_story_ids[0]), "still here");
+    lay_out(&right.engine).unwrap();
 }
 
 /// The peer's typing reaches the undoing replica only after its Undo.
@@ -686,6 +809,7 @@ fn random_schedule(schedule: u64) -> Result<(), String> {
         engine
             .lower_story_json("body", &RenderEnv::default())
             .map_err(|error| error.to_string())?;
+        lay_out(engine)?;
         Ok(cells
             .iter()
             .map(|cell| engine.doc().paragraphs(cell).map_or(0, |p| p.len()))
@@ -716,8 +840,8 @@ fn random_schedules_through_the_room_converge() {
             failures.entry(shape).or_default().push(schedule);
         }
     }
-    // Older than this fix and decided apart: a table's `rows` value naming a story an Undo or
-    // another peer removed makes lowering fail (Q549's report).
-    failures.retain(|shape, _| !shape.contains("was not found"));
+    // Queued apart (Q626, the report's section 8): `grid` lost by Undo of concurrent row
+    // operations, older than this fix. Nothing else may fail.
+    failures.retain(|shape, _| !shape.contains("missing grid"));
     assert!(failures.is_empty(), "{failures:?}");
 }

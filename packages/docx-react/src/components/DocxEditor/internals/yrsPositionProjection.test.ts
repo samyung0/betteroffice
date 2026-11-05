@@ -31,6 +31,7 @@ const segments: Record<string, YrsStorySegment[]> = {
 
 const session = {
   docEpoch: () => 0,
+  hasStory: (story: string) => story in segments,
   storySegments: (story: string) => segments[story] ?? [],
 } as unknown as YrsSession;
 
@@ -51,6 +52,47 @@ describe('YrsPositionProjection', () => {
     }).not.toThrow();
     expect(projection).toBeNull();
     expect(readStory).toBe(false);
+  });
+
+  test('a cell naming a removed story takes no positions and no caret, as the engine lowers it', () => {
+    const removed: Record<string, YrsStorySegment[]> = {
+      body: [
+        {
+          kind: 'embed',
+          embedKind: 'table',
+          payload: {
+            grid: [100, 100],
+            rows: [
+              { cells: [{ story: 'removed', tcPr: {} }, { story: 'cell', tcPr: {} }] },
+            ],
+          },
+          attributes: {},
+        },
+        { kind: 'text', text: 'after', attributes: {} },
+        { kind: 'pilcrow', paraId: 'body:p0', properties: {}, attributes: {} },
+      ],
+      cell: [{ kind: 'pilcrow', paraId: 'cell:p0', properties: {}, attributes: {} }],
+    };
+    const projection = new YrsPositionProjection(
+      {
+        docEpoch: () => 0,
+        hasStory: (story: string) => story in removed,
+        storySegments: (story: string) => {
+          if (!(story in removed)) throw new Error(`story ${story} was not found`);
+          return removed[story];
+        },
+      } as unknown as YrsSession,
+      'body'
+    );
+
+    const table = projection.tableAtStart(0)!;
+    expect(table.cells.map(({ story, start, nodeSize }) => ({ story, start, nodeSize }))).toEqual([
+      { story: 'removed', start: 2, nodeSize: 2 },
+      { story: 'cell', start: 4, nodeSize: 4 },
+    ]);
+    // A position in the empty cell belongs to the story around the table.
+    expect(projection.targetAt(3).story).toBe('body');
+    expect(projection.targetAt(5).story).toBe('cell');
   });
 
   test('maps post-table positions back to the root story input map', () => {

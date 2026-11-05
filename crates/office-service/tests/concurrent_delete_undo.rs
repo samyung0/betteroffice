@@ -2,8 +2,9 @@
 //! (Q549): its seed, its reads and its export hold them, on real files, from the state a room
 //! stored. The state before the Undo holds nothing of the kept text.
 
+use docx_edit::bridge::RenderEnv;
 use docx_edit::{
-    EditCtx as DocxCtx, EngineSession, FormatPolicy, Position, TableLocator, UndoSession,
+    CellLoc, EditCtx as DocxCtx, EngineSession, FormatPolicy, Position, TableLocator, UndoSession,
 };
 use office_service::{Checkpoint, Determinism, Format, export, inspect, seed, sha256_hex};
 use pptx_edit::{DeckSession, EditCtx, TextStyle};
@@ -240,4 +241,101 @@ fn a_document_exports_the_peers_text_after_the_undo() {
     );
     let exported = export(PLAN, checkpoint(Format::Docx, &sha, &stored), DETERMINISM).unwrap();
     assert!(package_text(&exported).contains("QPEERTEXT"));
+}
+
+/// Rows of the body's first table in a lowered story.
+fn lowered_rows(engine: &EngineSession) -> usize {
+    let lowered: serde_json::Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &RenderEnv::default())
+            .unwrap(),
+    )
+    .unwrap();
+    lowered
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|block| block["kind"] == "table")
+        .unwrap()["rows"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+/// Two people insert rows on a real file and the first undoes, with no table delete: the second's
+/// `rows` value names cells the Undo removed (Q624). The saved file holds a paragraph at the end of
+/// every `w:tc`, as the schema asks, and reads back with the row in place; the service reads the
+/// state as it does any other.
+#[test]
+fn a_row_naming_removed_cells_saves_as_empty_cells() {
+    let seed_state = seed(Format::Docx, PLAN).unwrap();
+    let sha = sha256_hex(PLAN);
+    let room = room_of(&seed_state);
+    let open = |client| {
+        let engine = EngineSession::new(client);
+        engine.doc().apply_update_v1(&seed_state).unwrap();
+        engine
+    };
+    let (left, right) = (open(51), open(52));
+    let undo = UndoSession::new();
+    undo.track(left.doc());
+    let ctx = DocxCtx::local("Ada", "2026-11-05T00:00:00Z");
+    let rows_before = lowered_rows(&left);
+
+    let base = left.doc().encode_state_vector_v1();
+    left.doc()
+        .insert_row(&ctx, &CellLoc::new("body", 0, 0, 0), true)
+        .unwrap();
+    undo.add_undo_barrier();
+    let first = left.doc().encode_diff_v1(&base).unwrap();
+    apply(&room, &first);
+    right.doc().apply_update_v1(&first).unwrap();
+
+    let base = right.doc().encode_state_vector_v1();
+    right
+        .doc()
+        .insert_row(&ctx, &CellLoc::new("body", 0, 1, 0), true)
+        .unwrap();
+    let second = right.doc().encode_diff_v1(&base).unwrap();
+    apply(&room, &second);
+    left.doc()
+        .applying_peer_update(|| left.doc().apply_update_v1(&second).unwrap());
+
+    let base = left.doc().encode_state_vector_v1();
+    assert!(undo.undo());
+    let restored = left.doc().encode_diff_v1(&base).unwrap();
+    apply(&room, &restored);
+    right
+        .doc()
+        .applying_peer_update(|| right.doc().apply_update_v1(&restored).unwrap());
+    assert_eq!(lowered_rows(&left), rows_before + 2);
+    assert_eq!(lowered_rows(&right), rows_before + 2);
+
+    let stored = state(&room);
+    inspect(PLAN, checkpoint(Format::Docx, &sha, &stored)).unwrap();
+    let exported = export(PLAN, checkpoint(Format::Docx, &sha, &stored), DETERMINISM).unwrap();
+    let document = ooxml_opc::unzip_parts(&exported)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "word/document.xml")
+        .unwrap()
+        .1;
+    let document = String::from_utf8(document).unwrap();
+    let mut cells = document.split("</w:tc>").collect::<Vec<_>>();
+    cells.pop();
+    assert!(!cells.is_empty());
+    for cell in cells {
+        let last = &cell[cell.rfind('<').unwrap()..];
+        assert!(
+            last == "</w:p>" || (last.starts_with("<w:p") && last.ends_with("/>")),
+            "a cell ends in {last}"
+        );
+    }
+
+    let reopened = EngineSession::new(900);
+    reopened
+        .doc()
+        .apply_update_v1(&seed(Format::Docx, &exported).unwrap())
+        .unwrap();
+    assert_eq!(lowered_rows(&reopened), rows_before + 2);
 }

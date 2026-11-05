@@ -455,15 +455,15 @@ export function yrsCellStory(session: YrsSession, at: YrsCellLoc): string | null
   const payload = tablePayload(session, at);
   if (!payload) return null;
   const { anchors } = tableAnchors(payload);
-  return (
-    anchors.find(
-      (anchor) =>
-        anchor.row <= at.row &&
-        at.row < anchor.row + anchor.rowspan &&
-        anchor.column <= at.column &&
-        at.column < anchor.column + anchor.colspan
-    )?.story ?? null
-  );
+  const story = anchors.find(
+    (anchor) =>
+      anchor.row <= at.row &&
+      at.row < anchor.row + anchor.rowspan &&
+      anchor.column <= at.column &&
+      at.column < anchor.column + anchor.colspan
+  )?.story;
+  // A removed cell story reads as an empty cell, which holds no caret (Q624).
+  return story && session.hasStory(story) ? story : null;
 }
 
 /**

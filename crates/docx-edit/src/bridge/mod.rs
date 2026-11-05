@@ -1596,21 +1596,29 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (mut blocks, content_size) = lower_story(
-                txn,
-                &cell_story,
-                env,
-                comment_index,
-                cell_pm_start + 1,
-                active_stories,
-                list_state,
-                opaque_sequences,
-                CellEdges {
-                    before: true,
-                    after: true,
-                },
-                None,
-            )?;
+            // A `rows` value can name a story an Undo or a peer removed (Epo 2026-11-05, Q624):
+            // the cell reads as empty, as the save reads it, and takes no positions, so no
+            // caret lands in a story nobody holds.
+            let (mut blocks, content_size) = if story_ref(txn, &cell_story).is_ok() {
+                lower_story(
+                    txn,
+                    &cell_story,
+                    env,
+                    comment_index,
+                    cell_pm_start + 1,
+                    active_stories,
+                    list_state,
+                    opaque_sequences,
+                    CellEdges {
+                        before: true,
+                        after: true,
+                    },
+                    None,
+                )?
+            } else {
+                let attrs = lower_paragraph_attrs(&BTreeMap::new(), None, env, list_state);
+                (vec![empty_cell_paragraph(&cell_story, attrs)], 0)
+            };
 
             // `w:allowSpaceOfSameStyleInTable`: same-style cell paragraphs keep
             // their spacing.
@@ -3211,6 +3219,19 @@ fn flush_paragraph_parts(
         }
     }
     blocks
+}
+
+/// The line a cell with no stored story shows, as the save's `<w:p/>` does.
+fn empty_cell_paragraph(story_id: &str, attrs: ParagraphAttrs) -> LayoutBlock {
+    LayoutBlock::Paragraph(ParagraphBlock {
+        sdt_groups: None,
+        id: BlockId::Str(format!("{story_id}:p0")),
+        para_id: None,
+        runs: Vec::new(),
+        attrs: Some(attrs),
+        pm_start: None,
+        pm_end: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

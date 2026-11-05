@@ -283,6 +283,9 @@ export class YrsPositionProjection {
       paragraphs: [],
       tables: [],
     };
+    // A table's `rows` can name a story an Undo removed (Epo 2026-11-05, Q624): an empty cell
+    // with no positions, as the engine lowers it, and no target for a caret.
+    if (!this.session.hasStory(storyId)) return story;
     this.stories.set(storyId, story);
 
     const segments = this.session.storySegments(storyId);
