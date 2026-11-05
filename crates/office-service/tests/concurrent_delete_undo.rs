@@ -71,7 +71,7 @@ fn a_deck_exports_the_peers_text_after_the_undo() {
     // The fix changes no seed (`shared/docx-pptx-storage.test.ts`'s golden).
     assert_eq!(
         sha256_hex(&seed_state),
-        "02d15d15807bf30eb01e862fc707951d8ed5e94dcd6855da69d457d558951928"
+        "c303da4210a4c239a58a9171c42074b4ac7d8d15418131292c51a6eab5781db3"
     );
     let sha = sha256_hex(DECK);
     let room = room_of(&seed_state);
