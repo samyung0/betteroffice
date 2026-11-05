@@ -40,6 +40,7 @@ import {
   performYrsHistoryAction,
   yrsCellLocFromStory,
   yrsCellStory,
+  yrsSelectionBesideCell,
   yrsSelectionNearTable,
   yrsSelectionText,
   yrsTableSelectionRange,
@@ -326,6 +327,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [story]
   );
 
+  // The paragraph beside the caret's table, noted while the table stands: when a
+  // peer deletes it the caret stays nearby, not at the top of the document (Q632).
+  const besideTableRef = useRef<{ story: string; near: YrsLoc | null } | null>(null);
+
   const ensureSelection = useCallback((): YrsSelection | null => {
     if (!session) return null;
     const current = session.selection();
@@ -341,11 +346,23 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       currentMap?.paragraphs.some((paragraph) => paragraph.paraId === current.anchor.paraId) &&
       currentMap.paragraphs.some((paragraph) => paragraph.paraId === current.head.paraId)
     ) {
+      if (besideTableRef.current?.story !== current.head.story) {
+        besideTableRef.current = {
+          story: current.head.story,
+          near: yrsSelectionBesideCell(session, current.head.story),
+        };
+      }
       return current;
     }
+    const near = besideTableRef.current?.near;
     const first = inputPositionMap(story)?.paragraphs[0];
-    if (!first) return null;
-    const loc = { story, paraId: first.paraId, offset: 0 };
+    const loc =
+      near &&
+      session.hasStory(near.story) &&
+      inputPositionMap(near.story)?.paragraphs.some(({ paraId }) => paraId === near.paraId)
+        ? near
+        : first && { story, paraId: first.paraId, offset: 0 };
+    if (!loc) return null;
     session.setSelection(loc);
     return { anchor: loc, head: loc };
   }, [belongsToRootStory, inputPositionMap, session, story]);

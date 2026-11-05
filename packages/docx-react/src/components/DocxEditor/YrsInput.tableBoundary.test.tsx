@@ -89,6 +89,24 @@ for (const between of [false, true]) {
   });
 }
 
+// Q632: the caret stays beside a table deleted under it, even when an earlier
+// table's removal left the cell's story naming an old index.
+for (const moved of [false, true]) {
+  test(`a table deleted under the caret leaves it beside the table${moved ? ', its index moved' : ''}`, async () => {
+    const { session, input, press } = await mount(moved);
+    if (moved) session.deleteTable({ story: 'body', tableIndex: 0 });
+    const held = moved ? 'T2-A1' : 'T1-A1';
+    const cellStory = session.storyIds().find(story =>
+      session.hasStory(story) && session.paragraphs(story).some(para => para.text === held))!;
+    session.setSelection({ story: cellStory, paraId: session.paragraphs(cellStory)[0]!.paraId, offset: 1 });
+    await press('End');
+    session.deleteTable({ story: 'body', tableIndex: 0 });
+    act(() => input.current!.insertText('Z'));
+    await act(async () => { await input.current!.flushPendingInput(); });
+    expect(session.paragraphs('body').map(para => para.text)).toContain('ZParagraph after the table.');
+  });
+}
+
 // Home, a Left arrow from the text, or Right from the paragraph above put the
 // caret at offset 0, before the table; it draws at the start of the text.
 for (const [key, lead] of [['Home', true], ['ArrowLeft', true], ['Home', false]] as const) {

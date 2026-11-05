@@ -690,6 +690,25 @@ export function yrsSelectionNearTable(session: YrsSession, table: YrsTableLoc) {
 }
 
 /**
+ * The paragraph beside the table holding a cell's story. The table is found by
+ * the story, since its id keeps the index the table was born at.
+ */
+export function yrsSelectionBesideCell(session: YrsSession, story: string) {
+  const parent = yrsCellLocFromStory(story)?.story;
+  if (parent === undefined) return null;
+  let tableIndex = 0;
+  for (const segment of session.storySegments(parent)) {
+    if (segment.kind !== 'embed' || segment.embedKind !== 'table') continue;
+    const rows = (segment.payload.rows ?? []) as TablePayloadRow[];
+    if (rows.some((row) => row.cells.some((cell) => cell.story === story))) {
+      return yrsSelectionNearTable(session, { story: parent, tableIndex });
+    }
+    tableIndex += 1;
+  }
+  return null;
+}
+
+/**
  * Run native history without leaving the live caret inside a cell story that
  * the structural transaction may delete. A surviving cell selection is
  * restored after the transaction; otherwise the caret stays beside the table.
