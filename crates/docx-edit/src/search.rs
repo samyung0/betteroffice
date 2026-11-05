@@ -5,7 +5,7 @@ use std::fmt;
 use serde::Serialize;
 use yrs::{Any, Map, ReadTxn, Transact};
 
-use crate::{EditingDoc, SegmentContent, read_state::table_cell_stories};
+use crate::{EditError, EditingDoc, SegmentContent, read_state::table_cell_stories};
 
 /// Paragraph-local UTF-16 offsets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -196,10 +196,12 @@ impl EditingDoc {
                     let mut parts = Vec::new();
                     let mut offset = 0;
                     let mut text = String::new();
-                    for segment in self
-                        .story_segments(&story)
-                        .map_err(|error| TextSearchError(error.to_string()))?
-                    {
+                    let segments = match self.story_segments(&story) {
+                        // A table's `rows` can name a story an Undo removed (Q624): an empty cell.
+                        Err(EditError::StoryNotFound(_)) => continue,
+                        segments => segments.map_err(|error| TextSearchError(error.to_string()))?,
+                    };
+                    for segment in segments {
                         if let SegmentContent::Text(value) = segment.content {
                             text.push_str(&value);
                             continue;

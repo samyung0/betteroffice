@@ -1,4 +1,4 @@
-use crate::block::ItemPtr;
+use crate::block::{ItemContent, ItemPtr};
 use crate::branch::{Branch, BranchPtr};
 use crate::id_set::DeleteSet;
 use crate::iter::TxnIterator;
@@ -121,6 +121,11 @@ struct Inner<M> {
     undoing: bool,
     redoing: bool,
     last_change: u64,
+    /// Patched for BetterOffice (Q549): see [UndoManager::adopt_concurrent_edits].
+    adopting: bool,
+    /// A peer's items that landed in content an Undo or Redo already restored, waiting for
+    /// [UndoManager::forward_concurrent_edits].
+    to_forward: IdSet,
     observer_added: Observer<UndoFn<M>>,
     observer_updated: Observer<UndoFn<M>>,
     observer_popped: Observer<UndoFn<M>>,
@@ -154,6 +159,8 @@ where
             undoing: false,
             redoing: false,
             last_change: 0,
+            adopting: false,
+            to_forward: IdSet::new(),
             observer_added: Observer::new(),
             observer_updated: Observer::new(),
             observer_popped: Observer::new(),
@@ -222,8 +229,187 @@ where
                 .unwrap_or(inner.options.tracked_origins.len() == 1) // tracked origins contain only undo manager itself
     }
 
+    /// Patched for BetterOffice (Epo 2026-11-04, Q549): this manager also keeps what a peer's
+    /// update does inside the content a step of its stacks deleted, so an Undo brings that
+    /// content back with the peer's edits. Yjs deletes an item that lands in a deleted parent
+    /// on arrival and the commit collects it; no step lists it, so no Undo restores it. Here,
+    /// before the commit's collection, in a transaction this manager does not track:
+    /// - an item inserted and deleted under a parent a step deleted joins that step's
+    ///   deletions and is kept;
+    /// - a map value landing there replaces, in the step, the value before it; only the last
+    ///   value of a key comes back;
+    /// - what the update names as deleted inside such a parent, without naming the parent
+    ///   itself and without a later value of its key, leaves the step: the peer deleted it on
+    ///   purpose, while a peer's delete of the whole parent does not stop this replica's Undo.
+    ///
+    /// An item landing in content an Undo already restored waits for
+    /// [Self::forward_concurrent_edits]. Replicas differ only in what they keep, which reaches
+    /// another replica only as the ordinary items an Undo, Redo or forward writes.
+    pub fn adopt_concurrent_edits(&mut self) {
+        self.inner_mut().adopting = true;
+    }
+
+    /// Patched for BetterOffice (Q549): copies a peer's items that landed in content an Undo or
+    /// Redo of this manager already restored into that copy, in a transaction of `origin`,
+    /// which this manager must not track: it is not a step. Returns whether it wrote. A host
+    /// calls it after applying a peer's update.
+    pub fn forward_concurrent_edits<O>(&mut self, origin: O) -> bool
+    where
+        O: Into<Origin>,
+    {
+        let inner = self.inner_mut();
+        if inner.to_forward.is_empty() {
+            return false;
+        }
+        let forward = std::mem::take(&mut inner.to_forward);
+        let Some(doc) = inner.docs.values().next().cloned() else {
+            return false;
+        };
+        let mut txn = doc.transact_mut_with(origin.into());
+        let mut items = HashSet::<ItemPtr>::new();
+        let mut order = Vec::<ItemPtr>::new();
+        let mut blocks = forward.blocks();
+        while let Some(slice) = blocks.next(&txn) {
+            if let BlockSlice::Item(slice) = slice {
+                let ptr = txn.store.materialize(slice);
+                if items.insert(ptr) {
+                    order.push(ptr);
+                }
+            }
+        }
+        let empty = IdSet::new();
+        let mut wrote = false;
+        for mut ptr in order {
+            wrote |= ptr
+                .redo(
+                    &mut txn,
+                    &items,
+                    &empty,
+                    &inner.undo_stack,
+                    &inner.redo_stack,
+                )
+                .is_some();
+        }
+        wrote
+    }
+
+    /// See [Self::adopt_concurrent_edits].
+    fn adopt(inner: &mut Inner<M>, txn: &mut TransactionMut) {
+        if txn.delete_set.is_empty() && txn.redundant_deletes.is_empty() {
+            return;
+        }
+        let mut landed = txn.insert_set.intersect(&txn.delete_set);
+        if landed.is_empty() && txn.redundant_deletes.is_empty() {
+            return;
+        }
+        // What the update deleted on purpose inside deleted content.
+        let named = txn.redundant_deletes.clone();
+        let mut on_purpose = IdSet::new();
+        let mut blocks = named.blocks();
+        while let Some(slice) = blocks.next(txn) {
+            if let BlockSlice::Item(slice) = slice {
+                let parent = deleted_parent(slice.ptr);
+                // A map value with one after it was replaced, not removed: what replaced it
+                // takes it out of the step below, if that can come back at all.
+                let replaced = slice.ptr.parent_sub.is_some() && slice.ptr.right.is_some();
+                if !replaced && parent.is_some_and(|parent| !named.contains(parent.id())) {
+                    on_purpose.insert(slice.id(), slice.len());
+                }
+            }
+        }
+        if !on_purpose.is_empty() {
+            for step in inner
+                .undo_stack
+                .0
+                .iter_mut()
+                .chain(inner.redo_stack.0.iter_mut())
+            {
+                step.deletions.diff_with(&on_purpose);
+            }
+            inner.to_forward.diff_with(&on_purpose);
+            landed.diff_with(&on_purpose);
+        }
+        let mut blocks = landed.blocks();
+        while let Some(slice) = blocks.next(txn) {
+            let BlockSlice::Item(slice) = slice else {
+                continue;
+            };
+            let item = slice.ptr;
+            // Its writer's collection took the content: nothing to bring back.
+            if matches!(item.content, ItemContent::Deleted(_)) {
+                continue;
+            }
+            let Some(parent) = deleted_parent(item) else {
+                continue;
+            };
+            // The nearest ancestor this manager can bring back: one an Undo already restored,
+            // or one a step holds.
+            let mut holder = None;
+            let mut forward = false;
+            let mut ancestor = Some(parent);
+            while let Some(current) = ancestor {
+                let last = last_copy(txn, current);
+                if last != current && !last.is_deleted() {
+                    forward = true;
+                    break;
+                }
+                let id = *last.id();
+                if inner.undo_stack.is_deleted(&id) || inner.redo_stack.is_deleted(&id) {
+                    holder = Some(id);
+                    break;
+                }
+                if !current.is_deleted() {
+                    break;
+                }
+                ancestor = current.parent.as_branch().and_then(|branch| branch.item);
+            }
+            if forward {
+                inner.to_forward.insert(slice.id(), slice.len());
+                item.keep(true);
+            } else if let Some(id) = holder {
+                let step = inner
+                    .undo_stack
+                    .0
+                    .iter_mut()
+                    .chain(inner.redo_stack.0.iter_mut())
+                    .rev()
+                    .find(|step| step.deletions.contains(&id));
+                let Some(step) = step else {
+                    continue;
+                };
+                if item.parent_sub.is_some() {
+                    // Only a key's last value comes back; one a writer's collection emptied
+                    // has nothing to bring back and does not count.
+                    let mut later = item.right;
+                    while let Some(value) = later {
+                        if !matches!(value.content, ItemContent::Deleted(_)) {
+                            break;
+                        }
+                        later = value.right;
+                    }
+                    if later.is_some() {
+                        continue;
+                    }
+                    let mut earlier = item.left;
+                    while let Some(value) = earlier {
+                        if step.deletions.contains(value.id()) {
+                            step.deletions.remove_range(&value.block_range());
+                            break;
+                        }
+                        earlier = value.left;
+                    }
+                }
+                step.deletions.insert(slice.id(), slice.len());
+                item.keep(true);
+            }
+        }
+    }
+
     fn handle_after_transaction(inner: &mut Inner<M>, txn: &mut TransactionMut) {
         if Self::should_skip(inner, txn) {
+            if inner.adopting {
+                Self::adopt(inner, txn);
+            }
             return;
         }
         let target = txn.doc().guid();
@@ -716,8 +902,16 @@ where
             }
         }
 
-        for &ptr in redo_order.iter() {
-            let mut ptr = ptr;
+        // Patched for BetterOffice (Q549): an item a step adopted may sit in a parent an earlier
+        // Undo copied, between items of that copy: it finds them restored when it comes last.
+        let (later, first): (Vec<ItemPtr>, Vec<ItemPtr>) =
+            redo_order.into_iter().partition(|ptr| {
+                ptr.parent
+                    .as_branch()
+                    .and_then(|branch| branch.item)
+                    .is_some_and(|parent| parent.redone.is_some())
+            });
+        for mut ptr in first.into_iter().chain(later) {
             change_performed |= ptr
                 .redo(&mut txn, &to_redo, &item.insertions, stack, other)
                 .is_some();
@@ -747,6 +941,26 @@ where
             false
         }
     }
+}
+
+/// The item's parent, when it is a deleted nested type.
+fn deleted_parent(item: ItemPtr) -> Option<ItemPtr> {
+    item.parent
+        .as_branch()
+        .and_then(|branch| branch.item)
+        .filter(|parent| parent.is_deleted())
+}
+
+/// The last copy this replica's Undo or Redo made of `item`, or `item`.
+fn last_copy(txn: &TransactionMut, item: ItemPtr) -> ItemPtr {
+    let mut current = item;
+    while let Some(id) = current.redone.as_ref() {
+        match txn.store.blocks.get_item(id) {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    current
 }
 
 impl<M: std::fmt::Debug> std::fmt::Debug for UndoManager<M> {

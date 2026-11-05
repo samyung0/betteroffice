@@ -140,6 +140,8 @@ impl DocUndoManager {
             doc.yrs_doc(),
             &doc.yrs_doc().get_or_insert_map(crate::bookmarks::ROOT),
         );
+        // A peer's edits inside what a step deleted come back with it (Q549).
+        inner.adopt_concurrent_edits();
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
         let popped = {
             let changed_stories = Arc::clone(&changed_stories);
@@ -207,6 +209,22 @@ impl DocUndoManager {
             crate::bookmarks::rebind(&self.doc);
         }
         applied
+    }
+
+    /// A peer's edits that arrived after an Undo restored their table or story go into the
+    /// restored copy: a system edit, outside Undo, with the passes an Undo gets (Q549).
+    /// Whether it wrote.
+    pub fn forward_concurrent_edits(&mut self) -> bool {
+        let inner = &mut self.inner;
+        let (wrote, _) = crate::ops::paragraph::renaming_duplicates_inserted_by(&self.doc, || {
+            crate::ops::field_changes::refreshing_fields(&self.doc, || {
+                inner.forward_concurrent_edits("system")
+            })
+        });
+        if wrote {
+            crate::bookmarks::rebind(&self.doc);
+        }
+        wrote
     }
 
     pub fn can_undo(&self) -> bool {
@@ -331,6 +349,14 @@ impl UndoSession {
             .borrow_mut()
             .as_mut()
             .is_some_and(DocUndoManager::redo)
+    }
+
+    /// [`DocUndoManager::forward_concurrent_edits`], after a peer's update.
+    pub fn forward_concurrent_edits(&self) -> bool {
+        self.manager
+            .borrow_mut()
+            .as_mut()
+            .is_some_and(DocUndoManager::forward_concurrent_edits)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -557,6 +583,43 @@ mod tests {
             assert!(undo.redo());
             assert_eq!(text(&doc, BODY), expected);
         }
+    }
+
+    /// Q549: a peer's update landing in a deleted cell passes the editor's apply path (the
+    /// typing inference and the field pass), and an Undo restores it.
+    #[test]
+    fn a_peer_update_landing_in_a_deleted_cell_passes_the_editors_apply() {
+        let seed = seed();
+        let table = seed
+            .insert_table(&EditCtx::local("", ""), Position::new(BODY, 0), 1, 1, 15)
+            .unwrap();
+        let cell = table.created_story_ids[0].clone();
+        let state = seed.encode_state_as_update_v1();
+        let (left, right) = (EditingDoc::new(200), EditingDoc::new(300));
+        left.apply_update_v1(&state).unwrap();
+        right.apply_update_v1(&state).unwrap();
+        let undo = UndoSession::new();
+        undo.track(&left);
+        left.delete_table(&EditCtx::local("", ""), &crate::TableLocator::new(BODY, 0))
+            .unwrap();
+        undo.add_undo_barrier();
+        let base = right.encode_state_vector_v1();
+        right
+            .insert_text(
+                &EditCtx::local("", ""),
+                Position::new(&cell, 0),
+                "PEER",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        let update = right.encode_diff_v1(&base).unwrap();
+        left.applying_peer_update(|| {
+            crate::ops::field_changes::refreshing_fields(left.yrs_doc(), || {
+                crate::presence::apply_update_with_typing_inference(&left, &update).unwrap()
+            })
+        });
+        assert!(undo.undo());
+        assert_eq!(text(&left, &cell), "PEER");
     }
 
     #[test]

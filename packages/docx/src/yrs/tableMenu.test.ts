@@ -329,6 +329,23 @@ describe('the DOCX table menu', () => {
     }
   }
 
+  // Before: "selection anchor no longer resolves" from every read, which took the editor down.
+  for (const typed of [false, true]) {
+    it(`leaves no selection when a peer deletes the table under the caret${typed ? ', typing kept for Undo' : ''}`, async () => {
+      const [left, right] = await peers(61601, 61602);
+      const story = 'body:t0:r0c0';
+      const caret = { story, paraId: right.paragraphs(story)[0].paraId, offset: 1 };
+      right.setSelection(caret);
+      if (typed) right.insertText(caret, 'typed');
+      left.deleteTable({ story: 'body', tableIndex: 0 });
+      right.applyUpdate(left.encodeStateAsUpdate(right.encodeStateVector()));
+      expect(right.selection()).toBeNull();
+      const placed = { story: 'body', paraId: right.paragraphs('body')[0].paraId, offset: 0 };
+      right.setSelection(placed);
+      expect(right.selection()?.head).toEqual(placed);
+    });
+  }
+
   it('keeps a peer’s added row when the table is aligned at the same time', async () => {
     const left = await open(61500);
     const right = await createYrsSession({ clientId: 61501 });

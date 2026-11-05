@@ -704,7 +704,9 @@ export class EditSession {
     /**
      * This peer's current selection as `{"anchor":{"story","paraId","offset"},
      * "head":{…}}`, or `"null"` before [`EditSession::set_selection`] is
-     * called. Errors when an endpoint no longer resolves.
+     * called or once its story is gone or an endpoint no longer resolves (a
+     * peer deleted the table holding the caret), for the editor to place the
+     * caret again.
      */
     selection(): string;
     /**

@@ -455,6 +455,8 @@ pub struct TransactionMut<'doc> {
     pub(crate) delete_set: IdSet,
     /// Describes the set of inserted items by ids.
     pub(crate) insert_set: IdSet,
+    /// Patched for BetterOffice (Q549): see [Self::redundant_deletes].
+    pub(crate) redundant_deletes: IdSet,
     pub(crate) cleanups: IdSet,
     /// All types that were directly modified (property added or child inserted/deleted).
     /// New types are not included in this Set.
@@ -516,6 +518,7 @@ impl<'doc> TransactionMut<'doc> {
             before_state: OnceCell::new(),
             merge_blocks: Vec::default(),
             delete_set: IdSet::new(),
+            redundant_deletes: IdSet::new(),
             insert_set: IdSet::new(),
             cleanups: IdSet::new(),
             after_state: OnceCell::new(),
@@ -569,6 +572,13 @@ impl<'doc> TransactionMut<'doc> {
     /// Data about insertions performed in the scope of current transaction.
     pub fn insert_set(&self) -> &IdSet {
         &self.insert_set
+    }
+
+    /// Patched for BetterOffice (Epo 2026-11-04, Q549): what the updates this transaction
+    /// applied name as deleted that this replica held deleted already. The transaction's
+    /// [Self::delete_set] leaves them out, so its own update does not tell a peer of them.
+    pub fn redundant_deletes(&self) -> &IdSet {
+        &self.redundant_deletes
     }
 
     /// Data about deletions performed in the scope of current transaction.
@@ -689,6 +699,14 @@ impl<'doc> TransactionMut<'doc> {
                                 let block = block.as_mut();
                                 index += 1;
                                 if block.clock_start() < clock_end {
+                                    // Patched for BetterOffice (Q549).
+                                    if block.is_deleted() {
+                                        let start = block.clock_start().max(clock);
+                                        let end =
+                                            (block.clock_start() + block.len()).min(clock_end);
+                                        self.redundant_deletes
+                                            .insert(ID::new(*client, start), end - start);
+                                    }
                                     if !block.is_deleted() {
                                         if let Some(item) = block.as_item() {
                                             if item.id.clock + item.len() > clock_end {

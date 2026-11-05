@@ -116,9 +116,11 @@ function tableNodeSize(
     for (const rawCell of cells) {
       const cell = asRecord(rawCell);
       const childStory = typeof cell?.story === 'string' ? cell.story : null;
-      const contentSize = childStory
-        ? indexStory(session, childStory, cellPmStart + 1, paragraphs, activeStories)
-        : 0;
+      // A removed cell story reads as an empty cell with no positions (Q624).
+      const contentSize =
+        childStory && session.hasStory(childStory)
+          ? indexStory(session, childStory, cellPmStart + 1, paragraphs, activeStories)
+          : 0;
       cellPmStart += contentSize + 2;
     }
     rowPmStart = cellPmStart + 1;

@@ -2085,11 +2085,13 @@ impl EditSession {
     /// resident engine) receive.
     pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
         let doc = self.engine.doc();
-        doc.applying_peer_update(|| {
+        let applied = doc.applying_peer_update(|| {
             crate::ops::field_changes::refreshing_fields(doc.yrs_doc(), || {
                 self.apply_update_with_inference(update)
             })
-        })
+        });
+        self.undo.forward_concurrent_edits();
+        applied
     }
 
     /// Applies an update produced by this document's dedicated local worker.
@@ -2319,23 +2321,23 @@ impl EditSession {
 
     /// This peer's current selection as `{"anchor":{"story","paraId","offset"},
     /// "head":{…}}`, or `"null"` before [`EditSession::set_selection`] is
-    /// called. Errors when an endpoint no longer resolves.
+    /// called or once its story is gone or an endpoint no longer resolves (a
+    /// peer deleted the table holding the caret), for the editor to place the
+    /// caret again.
     pub fn selection(&self) -> Result<String, JsValue> {
         let selection = self.selection.borrow();
         let Some(selection) = selection.as_ref() else {
             return Ok("null".to_owned());
         };
         let txn = self.engine.doc().yrs_doc().transact();
-        let anchor_index = selection
-            .anchor
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection anchor no longer resolves"))?
-            .index;
-        let head_index = selection
-            .head
-            .get_offset(&txn)
-            .ok_or_else(|| js_err("selection head no longer resolves"))?
-            .index;
+        let (Ok(_), Some(anchor), Some(head)) = (
+            story_ref(&txn, &selection.story),
+            selection.anchor.get_offset(&txn),
+            selection.head.get_offset(&txn),
+        ) else {
+            return Ok("null".to_owned());
+        };
+        let (anchor_index, head_index) = (anchor.index, head.index);
         drop(txn);
         let anchor = index_loc(self.engine.doc(), &selection.story, anchor_index)?;
         let head = index_loc(self.engine.doc(), &selection.story, head_index)?;
