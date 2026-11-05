@@ -107,6 +107,8 @@ impl DeckUndoManager {
         inner.expand_scope(doc, &stories);
         inner.expand_scope(doc, &comments);
         inner.expand_scope(doc, &meta);
+        // A peer's edits inside what a step deleted come back with it (Q549).
+        inner.adopt_concurrent_edits();
         Ok(Self {
             inner,
             clock,
@@ -133,6 +135,12 @@ impl DeckUndoManager {
 
     pub fn redo(&mut self) -> bool {
         self.inner.redo_blocking()
+    }
+
+    /// A peer's edits that arrived after an Undo restored their slide or shape go into the
+    /// restored copy: a system edit, outside Undo (Q549). Whether it wrote.
+    pub(crate) fn forward_concurrent_edits(&mut self) -> bool {
+        self.inner.forward_concurrent_edits("pptx:system")
     }
 
     /// In automatic capture a local edit other than typing is its own step.

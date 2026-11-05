@@ -2085,11 +2085,13 @@ impl EditSession {
     /// resident engine) receive.
     pub fn apply_peer_update(&self, update: &[u8]) -> Result<String, JsValue> {
         let doc = self.engine.doc();
-        doc.applying_peer_update(|| {
+        let applied = doc.applying_peer_update(|| {
             crate::ops::field_changes::refreshing_fields(doc.yrs_doc(), || {
                 self.apply_update_with_inference(update)
             })
-        })
+        });
+        self.undo.forward_concurrent_edits();
+        applied
     }
 
     /// Applies an update produced by this document's dedicated local worker.

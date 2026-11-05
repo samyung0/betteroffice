@@ -253,7 +253,17 @@ Undo and garbage collection:
   is placed by each replica's block boundaries, so peers and reloads read it
   elsewhere (tests in `crates/pptx-edit/tests/yrs_undo.rs`, which CI runs);
 - `UndoManager::clear_undo` and `clear_redo` (`src/undo.rs`) clear only their
-  own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`).
+  own stack (tested in `crates/pptx-edit/tests/yrs_undo.rs`);
+- `UndoManager::adopt_concurrent_edits` and `forward_concurrent_edits`
+  (`src/undo.rs`), `TransactionMut::redundant_deletes` (`src/transaction.rs`),
+  and in `UndoManager::try_process` and `Item::redo` (`src/block.rs`) an item
+  restored into a copy an earlier Undo made comes after that copy's items and
+  a value its writer's collection emptied blocks nothing: a manager that opts
+  in keeps what a peer's update does inside content one of its steps deleted,
+  so an Undo brings that content back with the peer's edits (Epo 2026-11-04,
+  Q549; tests in `crates/pptx-edit/tests/yrs_undo_concurrent_delete.rs` and
+  `concurrent_delete_undo.rs`, and `crates/docx-edit/tests/concurrent_delete_undo.rs`,
+  which CI runs).
 
 Read-only accessors, for structure walks and guards that compute no index:
 

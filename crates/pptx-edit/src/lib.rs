@@ -259,14 +259,28 @@ impl DeckSession {
         let snapshot = deck::validated_snapshot(&staged, &self.package)?;
         deck::validate_remote_meta(&self.doc, &staged)?;
 
-        let diff = staged
-            .transact()
-            .encode_state_as_update_v1(&self.doc.transact().state_vector());
-        let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
+        // The update itself, once it validates: `staged` holds no undo history, so its
+        // collection takes what lands in deleted content, which this replica's Undo keeps
+        // (Q549). An update waiting on structs goes through as what `staged` could place.
+        let waiting = {
+            let txn = staged.transact();
+            txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
+        };
+        let update = if waiting {
+            staged
+                .transact()
+                .encode_state_as_update_v1(&self.doc.transact().state_vector())
+        } else {
+            bytes.to_vec()
+        };
+        let update = decode_update_v1(&update).map_err(EditError::InvalidUpdate)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(diff)
+            .apply_update(update)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
+        if self.undo.borrow_mut().forward_concurrent_edits() {
+            return deck::snapshot_doc(&self.doc, &self.package);
+        }
         Ok(snapshot)
     }
 

@@ -492,6 +492,13 @@ impl ItemPtr {
                         .map(|slice| txn.store.materialize(slice));
                     redone = parent_block.and_then(|ptr| ptr.redone);
                 }
+                // Patched for BetterOffice (Q549): an item this step adopted names the parent
+                // an earlier Undo copied; the step restores that copy too, first.
+                if let Some(mut last) =
+                    parent_block.filter(|last| last.is_deleted() && redo_items.contains(last))
+                {
+                    parent_block = Some(last.redo(txn, redo_items, items_to_delete, s1, s2)?);
+                }
             }
         }
         let parent_branch = BranchPtr::from(if let Some(item) = parent_block.as_deref() {
@@ -523,10 +530,20 @@ impl ItemPtr {
                 while let Some(left_item) = left.as_deref() {
                     if let Some(left_right) = left_item.right {
                         let id = left_right.id();
+                        // Patched for BetterOffice (Q549): in content being restored, a
+                        // value whose content its writer's collection took cannot come back
+                        // and does not block the one before it.
                         if left_right.redone.is_some()
                             || (left_right.is_deleted()
                                 && left_right.origin == Some(self_ptr.last_id())
                                 && left_right.right.is_some())
+                            || (left_right.is_deleted()
+                                && matches!(left_right.content, ItemContent::Deleted(_))
+                                && self_ptr
+                                    .parent
+                                    .as_branch()
+                                    .and_then(|branch| branch.item)
+                                    .is_some_and(|parent| parent.is_deleted()))
                             || items_to_delete.contains(id)
                             || s1.is_deleted(id)
                             || s2.is_deleted(id)

@@ -251,12 +251,23 @@ fn random_schedules_leave_no_item_without_its_parent() {
                 }
             }
         }
-        for from in &peers {
-            for to in &peers {
-                if !std::ptr::eq(from, to) {
-                    sync(from, to);
+        // Applying a peer's update can write: its edits forwarded into what an Undo restored
+        // (Q549). Until nothing is new, and the room hears that too.
+        for _ in 0..3 {
+            for from in &peers {
+                for to in &peers {
+                    if !std::ptr::eq(from, to) {
+                        sync(from, to);
+                    }
                 }
             }
+        }
+        for peer in &peers {
+            let known = room.transact().state_vector();
+            let diff = peer.yrs_doc().transact().encode_diff_v1(&known);
+            room.transact_mut()
+                .apply_update(Update::decode_v1(&diff).unwrap())
+                .unwrap();
         }
         check("final");
         let deck = peers[0].snapshot().unwrap();
