@@ -163,7 +163,11 @@ test('a ribbon host lays out the named controls, and a hidden one is false', () 
       {...formatting}
       showFontPicker={false}
       ribbon={(controls) => {
-        seen.push(...Object.keys(controls).filter((name) => controls[name]));
+        seen.push(
+          ...Object.entries(controls)
+            .filter(([, control]) => control)
+            .map(([name]) => name)
+        );
         return controls.bold;
       }}
     />
