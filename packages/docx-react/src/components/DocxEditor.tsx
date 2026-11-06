@@ -28,7 +28,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 
 import { cn } from '../lib/utils';
-import { type SelectionFormatting } from './Toolbar';
+import { type SelectionFormatting, type ToolbarProps } from './Toolbar';
 import type {
   DocxEditorCollaborationOptions,
   SelectionState,
@@ -235,6 +235,8 @@ export interface DocxEditorProps {
    * are not shown.
    */
   singleRowToolbar?: boolean;
+  /** The toolbar as a ribbon the host lays out (`ToolbarProps.ribbon`). */
+  ribbon?: ToolbarProps['ribbon'];
   /**
    * The host draws the menu bar: called with the menus (labels in the editor's
    * locale, state, shortcuts) whenever they change, and with `run` for clicks.
@@ -666,6 +668,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showOutlineButton = true,
     icons,
     singleRowToolbar = false,
+    ribbon,
     onMenus,
     colorPalette,
     fontFamilies,
@@ -2078,6 +2081,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               imageContext={state.pmImageContext}
               readOnly={readOnly}
               singleRow={singleRowToolbar}
+              ribbon={ribbon}
               hostMenus={onMenus}
               hostMenuActions={hostMenuActions}
               colorPalette={colorPalette}

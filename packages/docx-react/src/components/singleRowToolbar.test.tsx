@@ -7,6 +7,7 @@ if (ownsDom) GlobalRegistrator.register();
 import { en } from '@betteroffice/docx-i18n';
 import type { ComponentProps } from 'react';
 import { EditorToolbar } from './EditorToolbar';
+import { Toolbar } from './Toolbar';
 import { DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { FindReplaceDialog } from './dialogs/FindReplaceDialog';
 import { ZoomControl } from './ui/ZoomControl';
@@ -662,4 +663,20 @@ test('Format › Table holds the six table items with their state and runs them'
   paused.reported.run('table-autofit');
   paused.reported.run('table-align:left');
   expect(onTableAction).not.toHaveBeenCalled();
+});
+
+test('a ribbon host lays out the named controls, and an unusable one is empty', () => {
+  const seen: string[] = [];
+  const { getByTestId } = render(
+    <Toolbar
+      ribbon={(controls) => {
+        seen.push(...Object.keys(controls).filter((name) => controls[name]));
+        return controls.bold;
+      }}
+    />
+  );
+  expect(getByTestId('formatting-bar').dataset.layout).toBe('ribbon');
+  expect(getByTestId('toolbar-bold')).toBeTruthy();
+  expect(seen).toEqual(expect.arrayContaining(['bold', 'styleGallery', 'lists']));
+  expect(seen).not.toContain('tableMore');
 });

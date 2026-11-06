@@ -1,7 +1,12 @@
 import type { ReactNode } from 'react';
 import type { Theme, Document } from '@betteroffice/docx/types/document';
 import { EditorToolbar } from '../EditorToolbar';
-import { ToolbarSeparator, type SelectionFormatting, type FormattingAction } from '../Toolbar';
+import {
+  ToolbarSeparator,
+  type SelectionFormatting,
+  type FormattingAction,
+  type ToolbarProps,
+} from '../Toolbar';
 import type { FontOption } from '../ui/FontPicker';
 import type { TableAction } from '../ui/TableToolbar';
 import type { TableContextInfo } from './types';
@@ -45,6 +50,7 @@ export function DocxEditorToolbar({
   // Flags
   readOnly,
   singleRow,
+  ribbon,
   hostMenus,
   hostMenuActions,
   colorPalette,
@@ -102,6 +108,7 @@ export function DocxEditorToolbar({
   imageContext: ImageContext | null;
   readOnly: boolean;
   singleRow: boolean;
+  ribbon?: ToolbarProps['ribbon'];
   /** The host draws the menu bar from this model; the row drops its ☰. */
   hostMenus?: (model: DocxMenuModel | null) => void;
   hostMenuActions: HostMenuActions;
@@ -189,6 +196,7 @@ export function DocxEditorToolbar({
         tableContext={tableContext}
         onTableAction={onTableAction}
         singleRow={singleRow}
+        ribbon={ribbon}
         leading={singleRow && !hostMenus && <EditorToolbar.MenuBar folded />}
         hostMenus={!!hostMenus}
         onAddComment={hostMenus ? hostMenuActions.onAddComment : undefined}

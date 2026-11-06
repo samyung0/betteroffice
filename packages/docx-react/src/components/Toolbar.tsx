@@ -26,7 +26,7 @@ import { AlignmentButtons } from './ui/AlignmentButtons';
 import { ListButtons, createDefaultListState } from './ui/ListButtons';
 import type { ListState } from './ui/ListButtons';
 import { LineSpacingPicker } from './ui/LineSpacingPicker';
-import { StylePicker } from './ui/StylePicker';
+import { StyleGallery, StylePicker } from './ui/StylePicker';
 import { MaterialSymbol } from './ui/MaterialSymbol';
 import { useToolbarRowScroll } from './useToolbarRowScroll';
 import { ZoomControl } from './ui/ZoomControl';
@@ -158,6 +158,12 @@ export interface ToolbarProps {
   onAddComment?: () => void;
   /** The host's colours for the colour pickers (`DocxEditor` `colorPalette`). */
   colorPalette?: readonly ColorPaletteColor[];
+  /**
+   * Ribbon mode: the host lays out the toolbar's controls, by name, in its tabs
+   * and groups; the bar keeps its focus handling. A control that doesn't apply
+   * now (a table's outside a table) is false.
+   */
+  ribbon?: (controls: RibbonControls) => ReactNode;
   /** Whether to show font family picker (default: true) */
   showFontPicker?: boolean;
   /**
@@ -266,6 +272,9 @@ export interface ToolbarProps {
   /** Callback when a table action is triggered */
   onTableAction?: (action: TableAction) => void;
 }
+
+/** A ribbon host's view of the toolbar's controls, by name. */
+export type RibbonControls = Record<string, ReactNode>;
 
 /**
  * Props for individual toolbar buttons
@@ -460,11 +469,12 @@ export function Toolbar(explicitProps: ToolbarProps) {
     onAddComment,
     colorPalette,
     onInsertImage,
+    ribbon,
   } = props;
 
   const barRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
-  useToolbarRowScroll(rowRef, singleRow && !inline);
+  useToolbarRowScroll(rowRef, singleRow && !inline && !ribbon);
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
@@ -823,6 +833,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const textColorPicker = showTextColorPicker && (
     <ColorPicker
       mode="text"
+      splitButton={!ribbon}
       value={currentFormatting.color?.replace(/^#/, '')}
       onChange={handleTextColorChange}
       theme={theme}
@@ -834,6 +845,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const highlightPicker = showHighlightColorPicker && (
     <ColorPicker
       mode="highlight"
+      splitButton={!ribbon}
       value={currentFormatting.highlight}
       onChange={handleHighlightColorChange}
       theme={theme}
@@ -1048,6 +1060,173 @@ export function Toolbar(explicitProps: ToolbarProps) {
       {clearButton}
     </>
   );
+
+  if (ribbon) {
+    const alignButton = (value: ParagraphAlignment, icon: string, label: string) => (
+      <ToolbarButton
+        onClick={() => handleAlignmentChange(value)}
+        active={(currentFormatting.alignment || 'left') === value}
+        disabled={disabled}
+        title={label}
+        ariaLabel={label}
+      >
+        <MaterialSymbol name={icon} size={ICON_SIZE} />
+      </ToolbarButton>
+    );
+    const inTable = !!tableContext?.isInTable && !!onTableAction;
+    return (
+      <div
+        ref={barRef}
+        className={className}
+        style={style}
+        role="toolbar"
+        aria-label={t('toolbar.ariaLabel')}
+        data-testid="formatting-bar"
+        data-layout="ribbon"
+        onMouseDown={handleBarMouseDown}
+        onMouseUp={handleBarMouseUp}
+      >
+        {ribbon({
+          alignCenter: alignButton('center', 'format_align_center', t('alignment.center')),
+          alignJustify: alignButton('both', 'format_align_justify', t('alignment.justify')),
+          alignLeft: alignButton('left', 'format_align_left', t('alignment.alignLeft')),
+          alignRight: alignButton('right', 'format_align_right', t('alignment.alignRight')),
+          alignment: alignmentButtons,
+          bold: boldButton,
+          clearFormatting: clearButton,
+          fontFamily: showFontPicker && (
+            <FontPicker
+              value={currentFormatting.fontFamily || 'Arial'}
+              onChange={handleFontFamilyChange}
+              fonts={normalizedFonts}
+              documentFonts={documentFonts}
+              disabled={disabled}
+              className="oox-ribbon-box"
+              width={136}
+              placeholder="Arial"
+            />
+          ),
+          fontSize: showFontSizePicker && (
+            <FontSizePicker
+              value={
+                currentFormatting.fontSize !== undefined
+                  ? halfPointsToPoints(currentFormatting.fontSize)
+                  : 11
+              }
+              onChange={handleFontSizeChange}
+              disabled={disabled}
+              width={36}
+              placeholder="11"
+              showSteps={false}
+            />
+          ),
+          highlight: highlightPicker,
+          imageProperties: imageContext && onOpenImageProperties && (
+            <ToolbarButton
+              onClick={onOpenImageProperties}
+              disabled={disabled}
+              title={t('formattingBar.imagePropertiesShortcut')}
+              ariaLabel={t('formattingBar.imageProperties')}
+            >
+              <MaterialSymbol name="tune" size={ICON_SIZE} />
+            </ToolbarButton>
+          ),
+          imageTransform: imageContext && onImageTransform && (
+            <ImageTransformDropdown onTransform={onImageTransform} disabled={disabled} />
+          ),
+          imageWrap: imageContext && onImageWrapType && (
+            <ImageWrapDropdown
+              imageContext={imageContext}
+              onChange={onImageWrapType}
+              disabled={disabled}
+            />
+          ),
+          italic: italicButton,
+          lineSpacing: lineSpacingPicker,
+          lists: listButtons,
+          strike: strikeButton,
+          styleGallery: showStylePicker && (
+            <StyleGallery
+              value={currentFormatting.styleId || 'Normal'}
+              onChange={handleStyleChange}
+              styles={documentStyles}
+              theme={theme}
+              disabled={disabled}
+            />
+          ),
+          stylePicker: showStylePicker && (
+            <StylePicker
+              value={currentFormatting.styleId || 'Normal'}
+              onChange={handleStyleChange}
+              styles={documentStyles}
+              theme={theme}
+              disabled={disabled}
+              width={120}
+            />
+          ),
+          subscript: (
+            <ToolbarButton
+              onClick={() => handleFormat('subscript')}
+              active={currentFormatting.subscript}
+              disabled={disabled}
+              title={t('formattingBar.subscriptShortcut')}
+              ariaLabel={t('formattingBar.subscript')}
+            >
+              <MaterialSymbol name="subscript" size={ICON_SIZE} />
+            </ToolbarButton>
+          ),
+          superscript: (
+            <ToolbarButton
+              onClick={() => handleFormat('superscript')}
+              active={currentFormatting.superscript}
+              disabled={disabled}
+              title={t('formattingBar.superscriptShortcut')}
+              ariaLabel={t('formattingBar.superscript')}
+            >
+              <MaterialSymbol name="superscript" size={ICON_SIZE} />
+            </ToolbarButton>
+          ),
+          tableBorderColor: inTable && (
+            <TableBorderColorPicker
+              onAction={handleTableAction}
+              disabled={disabled}
+              theme={theme}
+              value={resolveColorToHex(tableContext?.cellBorderColor, theme)}
+              palette={colorPalette}
+            />
+          ),
+          tableBorderWidth: inTable && (
+            <TableBorderWidthPicker onAction={handleTableAction} disabled={disabled} />
+          ),
+          tableBorders: inTable && (
+            <TableBorderPicker onAction={handleTableAction} disabled={disabled} />
+          ),
+          tableCellFill: inTable && (
+            <TableCellFillPicker
+              onAction={handleTableAction}
+              disabled={disabled}
+              theme={theme}
+              value={tableContext?.cellBackgroundColor}
+              palette={colorPalette}
+            />
+          ),
+          tableMore: inTable && (
+            <TableMoreDropdown
+              onAction={handleTableAction}
+              disabled={disabled}
+              tableContext={tableContext}
+            />
+          ),
+          textColor: textColorPicker,
+          underline: underlineButton,
+          // Zoom edits nothing: it stays usable while the editor is read-only.
+          zoom: showZoomControl && (
+            <ZoomControl value={zoom} onChange={onZoomChange} compact showSteps={false} />
+          ),
+        })}
+      </div>
+    );
+  }
 
   if (singleRow && !inline) {
     return (

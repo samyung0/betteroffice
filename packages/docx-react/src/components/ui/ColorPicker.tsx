@@ -724,6 +724,7 @@ export function ColorPicker({
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0 }}>
             <MaterialSymbol name={iconName} size={18} />
             <div
+              data-color-bar
               style={{
                 ...S_COLOR_BAR,
                 backgroundColor: resolvedColor === 'transparent' ? '#fff' : resolvedColor,

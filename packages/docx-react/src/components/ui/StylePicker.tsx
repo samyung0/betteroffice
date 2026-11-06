@@ -148,6 +148,51 @@ export function paragraphStyleOptions(styles: Style[] | undefined): StyleOption[
 // COMPONENT
 // ============================================================================
 
+/** The tiles a ribbon's gallery starts from; its arrow lists every style. */
+const GALLERY_STYLES = ['Normal', 'Title', 'Heading1'];
+
+/**
+ * The ribbon's styles: tiles for the usual styles the document has, and the
+ * selection's when it is another, with the picker's list behind an arrow, as
+ * Word's gallery.
+ */
+export function StyleGallery({ value, onChange, styles, theme, disabled }: StylePickerProps) {
+  const { t } = useTranslation();
+  const options = React.useMemo(() => paragraphStyleOptions(styles), [styles]);
+  const current = value || 'Normal';
+  const tiles = [
+    ...GALLERY_STYLES.flatMap((id) => options.filter((style) => style.styleId === id)),
+    ...options.filter((style) => !GALLERY_STYLES.includes(style.styleId)),
+  ].slice(0, GALLERY_STYLES.length);
+  const selected = options.find((style) => style.styleId === current);
+  if (selected && !tiles.includes(selected)) tiles[tiles.length - 1] = selected;
+  return (
+    <div className="oox-ribbon-gallery" role="group" aria-label={t('styles.selectAriaLabel')}>
+      {tiles.map((style, index) => (
+        <button
+          key={style.styleId}
+          type="button"
+          aria-pressed={style.styleId === current}
+          data-slot={index}
+          disabled={disabled}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => onChange?.(style.styleId)}
+        >
+          {style.nameKey ? t(style.nameKey) : style.name}
+        </button>
+      ))}
+      <StylePicker
+        value={current}
+        onChange={onChange}
+        styles={styles}
+        theme={theme}
+        disabled={disabled}
+        width={20}
+      />
+    </div>
+  );
+}
+
 export function StylePicker({
   value,
   onChange,
