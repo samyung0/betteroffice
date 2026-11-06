@@ -70,7 +70,13 @@ export function EditableCombobox({
     const listWidth = Math.max(rect.width, width, menuWidth);
     setPosition({
       top: rect.bottom + 4,
-      left: optionAlign === 'center' ? rect.left + (rect.width - listWidth) / 2 : rect.left,
+      left: Math.max(
+        8,
+        Math.min(
+          optionAlign === 'center' ? rect.left + (rect.width - listWidth) / 2 : rect.left,
+          window.innerWidth - listWidth - 8
+        )
+      ),
       width: listWidth,
     });
   }, [open, width, menuWidth, optionAlign]);
@@ -181,6 +187,7 @@ export function EditableCombobox({
           disabled={disabled}
           tabIndex={-1}
           aria-label={label}
+          aria-haspopup="listbox"
           title={label}
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => {
@@ -215,7 +222,7 @@ export function EditableCombobox({
             left: position.left,
             zIndex: 10000,
             width: position.width,
-            maxHeight: 260,
+            maxHeight: `min(260px, calc(100vh - ${position.top + 8}px))`,
             overflowY: 'auto',
             ...menuSurfaceStyle,
             ...menuStyle,
