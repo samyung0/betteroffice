@@ -24,6 +24,41 @@ export interface YrsToolbarSelection {
   range: YrsStoryRange;
   startParagraphIndex: number;
   endParagraphIndex: number;
+  /** The selected image, as the toolbar's picture controls read it. */
+  imageContext?: YrsImageContext | null;
+}
+
+export interface YrsImageContext {
+  pos: number;
+  wrapType: string;
+  displayMode: string;
+  cssFloat: string | null;
+  transform: string | null;
+  alt: string | null;
+  borderWidth: number | null;
+  borderColor: string | null;
+  borderStyle: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+/** An image node's attrs for the toolbar; a value it never set is null. */
+export function yrsImageContext(pos: number, attrs: Record<string, unknown>): YrsImageContext {
+  const text = (value: unknown) => (typeof value === 'string' ? value : null);
+  const count = (value: unknown) => (typeof value === 'number' ? value : null);
+  return {
+    pos,
+    wrapType: text(attrs.wrapType) ?? 'inline',
+    displayMode: text(attrs.displayMode) ?? 'inline',
+    cssFloat: text(attrs.cssFloat),
+    transform: text(attrs.transform),
+    alt: text(attrs.alt),
+    borderWidth: count(attrs.borderWidth),
+    borderColor: text(attrs.borderColor),
+    borderStyle: text(attrs.borderStyle),
+    width: count(attrs.width),
+    height: count(attrs.height),
+  };
 }
 
 /** Resolve the session's sticky selection into the paragraph-addressed toolbar range. */

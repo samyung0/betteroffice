@@ -181,7 +181,11 @@ export function useSelectionTracker({
   canvasA11yNotifyRef?: React.RefObject<(() => void) | null>;
 }) {
   const handleSelectionChange = useCallback(
-    (selectionState: SelectionState | null, authoritativeTableContext?: TableContextInfo | null) => {
+    (
+      selectionState: SelectionState | null,
+      authoritativeTableContext?: TableContextInfo | null,
+      imageContext?: PmImageContext | null
+    ) => {
       canvasA11yNotifyRef?.current?.();
       const pmTableCtx: TableContextInfo | null = authoritativeTableContext ?? null;
 
@@ -269,7 +273,7 @@ export function useSelectionTracker({
         paragraphHangingIndent: paragraphFormatting.hangingIndent ?? false,
         paragraphTabs: paragraphFormatting.tabs?.filter((tab) => tab.alignment !== 'clear') ?? null,
         pmTableContext: pmTableCtx,
-        pmImageContext: null,
+        pmImageContext: imageContext ?? null,
       });
 
       recomputeFloatingCommentBtn();
@@ -300,7 +304,11 @@ export function useSelectionTracker({
 
   const handleYrsSelectionChange = useCallback(
     (selection: YrsToolbarSelection) => {
-      handleSelectionChange(yrsSelectionState(selection), selection.tableContext);
+      handleSelectionChange(
+        yrsSelectionState(selection),
+        selection.tableContext,
+        selection.imageContext
+      );
     },
     [handleSelectionChange]
   );

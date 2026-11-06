@@ -119,6 +119,7 @@ import type { FormattingAction } from '../Toolbar';
 import {
   applyYrsToolbarFormatting,
   currentYrsToolbarSelection,
+  yrsImageContext,
   setSelectedParagraphAttrs,
   storedYrsToolbarFormatting,
   withStoredYrsFormatting,
@@ -838,16 +839,25 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         if (session && inputMap) {
           const toolbarSelection = currentYrsToolbarSelection(session, inputMap);
           if (toolbarSelection) {
-            const nextToolbarSelection = withStoredYrsFormatting(
-              toolbarSelection,
-              yrsInputRef.current?.storedFormatting() ?? null
-            );
+            const imagePos = Math.min(selection.anchor, selection.head);
+            const image =
+              liveStory === 'body' && Math.abs(selection.anchor - selection.head) === 1
+                ? getYrsPositionProjectionRef.current('body')?.nodeAt(imagePos)
+                : null;
+            const nextToolbarSelection = {
+              ...withStoredYrsFormatting(
+                toolbarSelection,
+                yrsInputRef.current?.storedFormatting() ?? null
+              ),
+              imageContext: image?.kind === 'image' ? yrsImageContext(imagePos, image.attrs) : null,
+            };
             const key = JSON.stringify([
               nextToolbarSelection.context,
               nextToolbarSelection.tableContext,
               nextToolbarSelection.range.story,
               nextToolbarSelection.startParagraphIndex,
               nextToolbarSelection.endParagraphIndex,
+              nextToolbarSelection.imageContext,
             ]);
             if (lastYrsToolbarSelectionKeyRef.current !== key) {
               lastYrsToolbarSelectionKeyRef.current = key;
