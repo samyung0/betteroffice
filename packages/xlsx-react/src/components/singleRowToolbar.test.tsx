@@ -3,6 +3,7 @@ import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { en } from '@betteroffice/xlsx-i18n';
 import { type ComponentProps, Fragment } from 'react';
 import { type FormattingAction, RIBBON_CONTROL_NAMES, type RibbonControls, Toolbar } from './Toolbar';
+import { EditableCombobox } from './ui/EditableCombobox';
 import {
   DRAWN_ICON_NAMES,
   IconSetContext,
@@ -213,4 +214,11 @@ test('every plain toolbar control is a named ribbon control or a menu command', 
     'Vertical alignment',
     'Text wrapping',
   ]);
+});
+
+test("a box's arrow says it has a list, which a ribbon over the page keeps open", () => {
+  const { getByRole } = render(
+    <EditableCombobox value="100" options={[{ label: '100', value: '100' }]} label="Zoom" />
+  );
+  expect(getByRole('button', { name: 'Zoom' }).getAttribute('aria-haspopup')).toBe('listbox');
 });

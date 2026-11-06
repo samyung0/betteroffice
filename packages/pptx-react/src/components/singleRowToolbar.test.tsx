@@ -6,6 +6,7 @@ import type { ParagraphFormatting } from '../paragraphFormatting';
 import type { FormattingAction } from './Toolbar';
 import { RIBBON_CONTROL_NAMES, type RibbonControls, Toolbar } from './Toolbar';
 import { IconSetContext, TOOLBAR_ICON_NAMES, type IconProps, type IconSet } from './ui/ToolbarIcon';
+import { EditableCombobox } from './ui/EditableCombobox';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
@@ -292,4 +293,11 @@ test('every plain toolbar control is a named ribbon control or a menu command', 
     'Insert image',
     'Shape',
   ]);
+});
+
+test("a box's arrow says it has a list, which a ribbon over the page keeps open", () => {
+  const { getByRole } = render(
+    <EditableCombobox value="100" options={[{ label: '100', value: '100' }]} label="Zoom" />
+  );
+  expect(getByRole('button', { name: 'Zoom' }).getAttribute('aria-haspopup')).toBe('listbox');
 });
