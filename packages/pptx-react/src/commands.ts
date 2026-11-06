@@ -123,6 +123,8 @@ export const PPTX_COMMAND_EDITS: Record<PptxCommandId, boolean> = {
 
 /** What a host menu needs to draw the commands, reported on every change. */
 export interface PptxCommandState {
+  /** The shape `insert.shape` armed; a second press with it disarms. */
+  activeShape: string | null;
   enabled: Record<PptxCommandId, boolean>;
   /**
    * Toggles that are on: bold, italic, underline, strikethrough, superscript,

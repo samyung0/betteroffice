@@ -3037,11 +3037,11 @@ function PptxEditorContent({
       if (value === 'fit') setZoom('fit');
       else if (Number.isFinite(scale) && scale >= 0.25 && scale <= 4) setZoom(scale);
       else return false;
-    } else if (id === 'insert.textBox') changeTool('textBox');
+    } else if (id === 'insert.textBox') changeTool(activeTool === 'textBox' ? 'select' : 'textBox');
     else if (id === 'insert.image') pictureInputRef.current?.click();
     else if (id === 'insert.shape') {
       if (!SHAPE_PRESETS.some((preset) => preset.geometry === value)) return false;
-      changeTool(`shape:${value as PptxShapePreset}`);
+      changeTool(activeTool === `shape:${value}` ? 'select' : `shape:${value as PptxShapePreset}`);
     } else if (id === 'slide.new') addSlide();
     else if (id === 'slide.newWithLayout') {
       const layout = slideLayouts.find((option) => (option.partPath ?? '') === value);
@@ -3096,6 +3096,7 @@ function PptxEditorContent({
     checked: PPTX_COMMAND_IDS.filter(
       (id) =>
         (id === 'view.speakerNotes' && speakerNotes) ||
+        (id === 'insert.textBox' && activeTool === 'textBox') ||
         (textActive &&
         ((id === 'format.bold' && selectionFormatting.bold) ||
           (id === 'format.italic' && selectionFormatting.italic) ||
@@ -3112,6 +3113,7 @@ function PptxEditorContent({
           (id in alignCommands &&
             alignCommands[id as keyof typeof alignCommands] === selectionAlignment)))
     ),
+    activeShape: activeTool.startsWith('shape:') ? activeTool.slice('shape:'.length) : null,
     lineSpacing: textActive ? (paragraphState?.lineSpacing ?? null) : null,
     listStyle: textActive ? (paragraphState?.listPreset ?? null) : null,
     zoom: zoom === 'fit' ? 'fit' : String(zoom),
@@ -3220,9 +3222,10 @@ function PptxEditorContent({
             {t('proposals.title')} <span data-testid="pptx-proposals-count">{proposals.length}</span>
           </button>
         )}
-        {remotePeers.length > 0 ? (
+        {/* A ribbon's host draws who is in the room. */}
+        {remotePeers.length > 0 && !ribbon ? (
           <div
-            style={ribbon ? styles.ribbonPresence : styles.presenceStrip}
+            style={styles.presenceStrip}
             role="list"
             aria-label="Collaborators"
           >
@@ -4202,14 +4205,6 @@ const styles: Record<string, CSSProperties> = {
     maxWidth: '35%',
     padding: '0 10px 0 2px',
     overflowX: 'auto',
-  },
-  ribbonPresence: {
-    position: 'absolute',
-    top: 4,
-    right: 36,
-    zIndex: 1,
-    display: 'flex',
-    gap: 4,
   },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   narrowWorkspace: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 },
