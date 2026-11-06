@@ -226,3 +226,18 @@ function paragraph(overrides: Partial<ParagraphFormatting>): ParagraphFormatting
     ...overrides,
   };
 }
+
+test('a ribbon host lays out the named controls, whatever is selected', () => {
+  const seen: string[] = [];
+  const { getByTestId } = render(
+    <Toolbar
+      ribbon={(controls) => {
+        seen.push(...Object.keys(controls).filter((name) => controls[name]));
+        return controls.bold;
+      }}
+    />
+  );
+  expect(getByTestId('pptx-formatting-toolbar').dataset.layout).toBe('ribbon');
+  expect(getByTestId('pptx-bold')).toBeTruthy();
+  expect(seen).toEqual(expect.arrayContaining(['fill', 'arrange', 'select', 'align']));
+});

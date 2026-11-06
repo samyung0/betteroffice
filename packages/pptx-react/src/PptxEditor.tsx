@@ -59,6 +59,7 @@ import type {
   ShapeFormattingAction,
   ShapeZOrder,
   SlideLayoutOption,
+  ToolbarProps,
 } from './components/Toolbar';
 import { SHAPE_PRESETS } from './components/Toolbar';
 import { ToolbarButton, toolbarFont } from './components/ui/ToolbarPrimitives';
@@ -211,6 +212,8 @@ export interface PptxEditorProps {
   readOnly?: boolean;
   /** A flat toolbar row of `--pptx-toolbar-height` (40px) instead of the rounded rail. */
   singleRowToolbar?: boolean;
+  /** The toolbar as a ribbon the host lays out (`ToolbarProps.ribbon`). */
+  ribbon?: ToolbarProps['ribbon'];
   /** Replaces every toolbar icon; without it the built-in drawings stay. */
   icons?: IconSet;
   /** The agent proposals button and panel, when the engine supports them. */
@@ -440,6 +443,7 @@ function PptxEditorContent({
   prepareImage,
   readOnly = false,
   singleRowToolbar = false,
+  ribbon,
   showProposals = true,
   showPresentButton = true,
   showFontPicker = true,
@@ -3163,7 +3167,15 @@ function PptxEditorContent({
         }
       }}
     >
-      <div style={singleRowToolbar ? styles.singleRowShell : styles.toolbarShell}>
+      <div
+        style={
+          ribbon
+            ? styles.ribbonShell
+            : singleRowToolbar
+              ? styles.singleRowShell
+              : styles.toolbarShell
+        }
+      >
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
           // Vertical alignment is a text box's, so a table cell has none.
@@ -3193,10 +3205,11 @@ function PptxEditorContent({
           // Read-only keeps the row, disabled, so the slide stays put.
           disabled={readOnly || !model || slideCount === 0}
           singleRow={singleRowToolbar}
+          ribbon={ribbon}
           showFontPicker={showFontPicker}
           showFontSizePicker={showFontSizePicker}
           showZoomControl={showZoomControl}
-          style={styles.toolbar}
+          style={ribbon ? undefined : styles.toolbar}
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
@@ -4156,6 +4169,11 @@ const styles: Record<string, CSSProperties> = {
     padding: '4px 0 5px',
     background: 'var(--pptx-surface, #ffffff)',
     borderBottom: '1px solid var(--pptx-divider, #e2e8f0)',
+  },
+  ribbonShell: {
+    position: 'relative',
+    flex: '0 0 auto',
+    background: 'var(--pptx-surface, #ffffff)',
   },
   singleRowShell: {
     display: 'flex',
