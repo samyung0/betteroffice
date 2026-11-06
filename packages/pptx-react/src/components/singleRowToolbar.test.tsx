@@ -1,10 +1,10 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, test } from 'bun:test';
-import type { ComponentProps } from 'react';
+import { type ComponentProps, Fragment } from 'react';
 import { LocaleProvider } from '../i18n';
 import type { ParagraphFormatting } from '../paragraphFormatting';
 import type { FormattingAction } from './Toolbar';
-import { Toolbar } from './Toolbar';
+import { RIBBON_CONTROL_NAMES, type RibbonControls, Toolbar } from './Toolbar';
 import { IconSetContext, TOOLBAR_ICON_NAMES, type IconProps, type IconSet } from './ui/ToolbarIcon';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
@@ -240,4 +240,56 @@ test('a ribbon host lays out the named controls, whatever is selected', () => {
   expect(getByTestId('pptx-formatting-toolbar').dataset.layout).toBe('ribbon');
   expect(getByTestId('pptx-bold')).toBeTruthy();
   expect(seen).toEqual(expect.arrayContaining(['fill', 'arrange', 'select', 'align']));
+});
+
+test('every plain toolbar control is a named ribbon control or a menu command', () => {
+  const everything = {
+    textSelectionActive: true,
+    shapeSelectionActive: true,
+    shapeArrangeActive: true,
+    onFormat: () => {},
+    onShapeFormat: () => {},
+    onInsertSlide: () => {},
+    onZoomChange: () => {},
+    onUndo: () => {},
+    onRedo: () => {},
+    onToolChange: () => {},
+    onInsertImage: () => {},
+    slideLayouts: [{ partPath: 'layout1.xml' }],
+    currentShapeFormatting: { adjustments: { adj: 0.5 } },
+  };
+  const names = (container: Element) =>
+    new Set(
+      [...container.querySelectorAll('button, input')].map((node) =>
+        (node.getAttribute('aria-label') ?? node.getAttribute('title') ?? node.textContent)?.replace(
+          / \(.*\)$/,
+          ''
+        )
+      )
+    );
+  const plain = names(render(<Toolbar singleRow {...everything} />).container);
+  cleanup();
+  let given: Partial<RibbonControls> = {};
+  const ribbon = names(
+    render(
+      <Toolbar
+        {...everything}
+        ribbon={(controls) => {
+          given = controls;
+          return RIBBON_CONTROL_NAMES.map((name) => <Fragment key={name}>{controls[name]}</Fragment>);
+        }}
+      />
+    ).container
+  );
+  expect(RIBBON_CONTROL_NAMES.filter((name) => !given[name])).toEqual([]);
+  // A new upstream control lands here until it is named, or its menu command is listed.
+  expect([...plain].filter((name) => !ribbon.has(name))).toEqual([
+    'New slide',
+    'New slide with layout',
+    'Undo',
+    'Redo',
+    'Text box',
+    'Insert image',
+    'Shape',
+  ]);
 });

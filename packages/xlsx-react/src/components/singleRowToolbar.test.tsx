@@ -1,8 +1,8 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, expect, mock, test } from 'bun:test';
 import { en } from '@betteroffice/xlsx-i18n';
-import type { ComponentProps } from 'react';
-import { type FormattingAction, Toolbar } from './Toolbar';
+import { type ComponentProps, Fragment } from 'react';
+import { type FormattingAction, RIBBON_CONTROL_NAMES, type RibbonControls, Toolbar } from './Toolbar';
 import {
   DRAWN_ICON_NAMES,
   IconSetContext,
@@ -171,4 +171,46 @@ test('a ribbon host lays out the named controls, and a hidden one is false', () 
   expect(getByRole('button', { name: en.toolbar.bold })).toBeTruthy();
   expect(seen).toContain('paintFormatBig');
   expect(seen).not.toContain('fontFamily');
+});
+
+test('every plain toolbar control is a named ribbon control or a menu command', () => {
+  const everything = { ...formatting, onZoomChange: noop };
+  const names = (container: Element) =>
+    new Set(
+      [...container.querySelectorAll('button, input')].map((node) =>
+        (node.getAttribute('aria-label') ?? node.getAttribute('title') ?? node.textContent)?.replace(
+          / \(.*\)$/,
+          ''
+        )
+      )
+    );
+  const plain = names(render(<Toolbar singleRow {...everything} />).container);
+  cleanup();
+  let given: Partial<RibbonControls> = {};
+  const ribbon = names(
+    render(
+      <Toolbar
+        {...everything}
+        ribbon={(controls) => {
+          given = controls;
+          return RIBBON_CONTROL_NAMES.map((name) => <Fragment key={name}>{controls[name]}</Fragment>);
+        }}
+      />
+    ).container
+  );
+  expect(RIBBON_CONTROL_NAMES.filter((name) => !given[name])).toEqual([]);
+  // A new upstream control lands here until it is named, or its menu command is listed.
+  expect([...plain].filter((name) => !ribbon.has(name))).toEqual([
+    'Search menus',
+    'Undo',
+    'Redo',
+    'Format as currency',
+    'Format as percent',
+    'More number formats',
+    'Merge all',
+    'Merge cells',
+    'Horizontal alignment',
+    'Vertical alignment',
+    'Text wrapping',
+  ]);
 });

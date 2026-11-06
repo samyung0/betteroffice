@@ -34,6 +34,8 @@ export {
   Toolbar,
   PptxToolbar,
   SHAPE_PRESETS,
+  RIBBON_CONTROL_NAMES,
+  type RibbonControlName,
   type RibbonControls,
   type ToolbarProps,
   type SelectionFormatting,

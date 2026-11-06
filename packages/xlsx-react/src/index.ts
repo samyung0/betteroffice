@@ -22,6 +22,8 @@ export {
 export {
   Toolbar,
   XlsxToolbar,
+  RIBBON_CONTROL_NAMES,
+  type RibbonControlName,
   type RibbonControls,
   type ToolbarProps,
   type SelectionFormatting,

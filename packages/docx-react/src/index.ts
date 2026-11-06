@@ -20,7 +20,11 @@ export {
   type EditorMode,
 } from './components/DocxEditor';
 export { ICON_NAMES, type IconName, type IconSet } from './components/ui/Icons';
-export type { RibbonControls } from './components/Toolbar';
+export {
+  RIBBON_CONTROL_NAMES,
+  type RibbonControlName,
+  type RibbonControls,
+} from './components/Toolbar';
 export type {
   DocxMenuModel,
   HostMenu,

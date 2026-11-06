@@ -273,8 +273,40 @@ export interface ToolbarProps {
   onTableAction?: (action: TableAction) => void;
 }
 
-/** A ribbon host's view of the toolbar's controls, by name. */
-export type RibbonControls = Record<string, ReactNode>;
+/** What a ribbon host can lay out; its `RibbonControls` holds one node per name. */
+export const RIBBON_CONTROL_NAMES = [
+  'alignCenter',
+  'alignJustify',
+  'alignLeft',
+  'alignRight',
+  'alignment',
+  'bold',
+  'clearFormatting',
+  'fontFamily',
+  'fontSize',
+  'highlight',
+  'imageProperties',
+  'imageTransform',
+  'imageWrap',
+  'italic',
+  'lineSpacing',
+  'lists',
+  'strike',
+  'styleGallery',
+  'stylePicker',
+  'subscript',
+  'superscript',
+  'tableBorderColor',
+  'tableBorderWidth',
+  'tableBorders',
+  'tableCellFill',
+  'tableMore',
+  'textColor',
+  'underline',
+  'zoom',
+] as const;
+export type RibbonControlName = (typeof RIBBON_CONTROL_NAMES)[number];
+export type RibbonControls = Record<RibbonControlName, ReactNode>;
 
 /**
  * Props for individual toolbar buttons

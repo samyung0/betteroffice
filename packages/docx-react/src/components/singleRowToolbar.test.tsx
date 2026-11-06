@@ -5,9 +5,9 @@ const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
 import { en } from '@betteroffice/docx-i18n';
-import type { ComponentProps } from 'react';
+import { type ComponentProps, Fragment } from 'react';
 import { EditorToolbar } from './EditorToolbar';
-import { Toolbar } from './Toolbar';
+import { RIBBON_CONTROL_NAMES, type RibbonControls, Toolbar } from './Toolbar';
 import { DefaultPlaceholder, ParseError } from './DocxEditorHelpers';
 import { FindReplaceDialog } from './dialogs/FindReplaceDialog';
 import { ZoomControl } from './ui/ZoomControl';
@@ -679,4 +679,48 @@ test('a ribbon host lays out the named controls, and an unusable one is empty', 
   expect(getByTestId('toolbar-bold')).toBeTruthy();
   expect(seen).toEqual(expect.arrayContaining(['bold', 'styleGallery', 'lists']));
   expect(seen).not.toContain('tableMore');
+});
+
+test('every plain toolbar control is a named ribbon control or a menu command', () => {
+  const everything = {
+    onFormat: () => {},
+    onUndo: () => {},
+    onRedo: () => {},
+    onZoomChange: () => {},
+    onInsertTable: () => {},
+    onInsertImage: () => {},
+    onAddComment: () => {},
+    imageContext: { wrapType: 'inline', displayMode: 'inline', cssFloat: null },
+    onImageWrapType: () => {},
+    onImageTransform: () => {},
+    onOpenImageProperties: () => {},
+    tableContext: { isInTable: true },
+    onTableAction: () => {},
+  };
+  const names = (container: Element) =>
+    new Set(
+      [...container.querySelectorAll('button, input')].map((node) =>
+        (node.getAttribute('aria-label') ?? node.getAttribute('title') ?? node.textContent)?.replace(
+          / \(.*\)$/,
+          ''
+        )
+      )
+    );
+  const plain = names(render(<Toolbar singleRow {...everything} />).container);
+  cleanup();
+  let given: Partial<RibbonControls> = {};
+  const ribbon = names(
+    render(
+      <Toolbar
+        {...everything}
+        ribbon={(controls) => {
+          given = controls;
+          return RIBBON_CONTROL_NAMES.map((name) => <Fragment key={name}>{controls[name]}</Fragment>);
+        }}
+      />
+    ).container
+  );
+  expect(RIBBON_CONTROL_NAMES.filter((name) => !given[name])).toEqual([]);
+  // A new upstream control lands here until it is named, or its menu command is listed.
+  expect([...plain].filter((name) => !ribbon.has(name))).toEqual(['Undo', 'Redo', 'Insert link', 'Comment', 'Image']);
 });

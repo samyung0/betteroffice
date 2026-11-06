@@ -94,8 +94,24 @@ export interface SelectionShape {
   canUnmerge?: boolean;
 }
 
-/** A ribbon host's view of the toolbar's controls, by name. */
-export type RibbonControls = Record<string, ReactNode>;
+/** What a ribbon host can lay out; its `RibbonControls` holds one node per name. */
+export const RIBBON_CONTROL_NAMES = [
+  'bold',
+  'borders',
+  'decreaseDecimal',
+  'fillColor',
+  'fontFamily',
+  'fontSize',
+  'increaseDecimal',
+  'italic',
+  'paintFormat',
+  'paintFormatBig',
+  'strikethrough',
+  'textColor',
+  'zoom',
+] as const;
+export type RibbonControlName = (typeof RIBBON_CONTROL_NAMES)[number];
+export type RibbonControls = Record<RibbonControlName, ReactNode>;
 
 export interface ToolbarProps {
   currentFormatting?: SelectionFormatting;
