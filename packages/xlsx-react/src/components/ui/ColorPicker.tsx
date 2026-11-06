@@ -82,6 +82,7 @@ export function ColorPicker({
           <ToolbarIcon name={mode === 'text' ? 'textColor' : 'fillColor'} size={20} />
           <span
             aria-hidden="true"
+            data-color-bar
             style={{
               position: 'absolute',
               left: 5,

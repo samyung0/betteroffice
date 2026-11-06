@@ -21,6 +21,8 @@ export interface EditableComboboxProps {
   onCommit?: (value: string) => void;
   disabled?: boolean;
   width?: number;
+  /** The box's height. */
+  height?: number;
   inputStyle?: CSSProperties;
   testId?: string;
   /** False draws the value and chevron without a box, as a dropdown trigger. */
@@ -42,6 +44,7 @@ export function EditableCombobox({
   onCommit,
   disabled = false,
   width = 72,
+  height = 28,
   inputStyle,
   testId,
   bordered = true,
@@ -111,7 +114,7 @@ export function EditableCombobox({
         display: 'inline-flex',
         alignItems: 'center',
         width,
-        height: 28,
+        height,
         border: bordered ? `1px solid ${toolbarColors.border}` : 0,
         borderRadius: 'var(--xlsx-input-radius, 4px)',
         background: bordered ? 'var(--xlsx-input-bg, #ffffff)' : 'transparent',
@@ -159,7 +162,7 @@ export function EditableCombobox({
         style={{
           appearance: 'none',
           width: chevron ? `calc(100% - 22px)` : '100%',
-          height: 26,
+          height: height - 2,
           padding: '0 2px 0 7px',
           border: 0,
           outline: 0,
@@ -190,7 +193,7 @@ export function EditableCombobox({
             display: 'grid',
             placeItems: 'center',
             width: 21,
-            height: 26,
+            height: height - 2,
             padding: 0,
             border: 0,
             background: 'transparent',

@@ -94,6 +94,9 @@ export interface SelectionShape {
   canUnmerge?: boolean;
 }
 
+/** A ribbon host's view of the toolbar's controls, by name. */
+export type RibbonControls = Record<string, ReactNode>;
+
 export interface ToolbarProps {
   currentFormatting?: SelectionFormatting;
   selectionShape?: SelectionShape;
@@ -117,6 +120,11 @@ export interface ToolbarProps {
    */
   singleRow?: boolean;
   showSearchMenus?: boolean;
+  /**
+   * Ribbon mode: the host lays out the toolbar's controls, by name, in its tabs
+   * and groups. A control the host hid (`showFontPicker`) is false.
+   */
+  ribbon?: (controls: RibbonControls) => ReactNode;
   /** False leaves "Custom number format…" out of the number format menu. */
   showCustomNumberFormat?: boolean;
   showFontPicker?: boolean;
@@ -370,6 +378,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     fontSizes = DEFAULT_FONT_SIZES,
     disabled = false,
     singleRow = false,
+    ribbon,
     showSearchMenus = true,
     showCustomNumberFormat = true,
     showFontPicker = true,
@@ -381,7 +390,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   } = useToolbarProps(explicitProps);
   const rootRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLDivElement>(null);
-  const rowEdges = useToolbarRowScroll(rowRef, singleRow);
+  const rowEdges = useToolbarRowScroll(rowRef, singleRow && !ribbon);
   const [rootWidth, setRootWidth] = useState(Number.POSITIVE_INFINITY);
   const formattingEnabled = !disabled && Boolean(onFormat);
   const mergeEnabled = !disabled && Boolean(onMerge);
@@ -641,6 +650,27 @@ export function Toolbar(explicitProps: ToolbarProps) {
     />
   );
 
+  const decimalButtons = {
+    decrease: (
+      <ToolbarButton
+        title={t('toolbar.decreaseDecimal')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('decreaseDecimal')}
+      >
+        <ToolbarIcon name="decimalDecrease" />
+      </ToolbarButton>
+    ),
+    increase: (
+      <ToolbarButton
+        title={t('toolbar.increaseDecimal')}
+        disabled={!formattingEnabled}
+        onClick={() => apply('increaseDecimal')}
+      >
+        <ToolbarIcon name="decimalIncrease" />
+      </ToolbarButton>
+    ),
+  };
+
   const numberButtons = (
     <>
       <ToolbarButton
@@ -657,20 +687,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         <span style={{ fontSize: 15 }}>%</span>
       </ToolbarButton>
-      <ToolbarButton
-        title={t('toolbar.decreaseDecimal')}
-        disabled={!formattingEnabled}
-        onClick={() => apply('decreaseDecimal')}
-      >
-        <ToolbarIcon name="decimalDecrease" />
-      </ToolbarButton>
-      <ToolbarButton
-        title={t('toolbar.increaseDecimal')}
-        disabled={!formattingEnabled}
-        onClick={() => apply('increaseDecimal')}
-      >
-        <ToolbarIcon name="decimalIncrease" />
-      </ToolbarButton>
+      {decimalButtons.decrease}
+      {decimalButtons.increase}
       <ToolbarDropdown
         title={t('toolbar.moreNumberFormats')}
         disabled={!formattingEnabled}
@@ -691,7 +709,18 @@ export function Toolbar(explicitProps: ToolbarProps) {
       title={t('toolbar.fontFamily')}
       disabled={!formattingEnabled}
       menuWidth={210}
-      style={singleRow ? { maxWidth: 160 } : { width: 120, justifyContent: 'space-between' }}
+      style={
+        ribbon
+          ? {
+              width: 112,
+              height: 26,
+              justifyContent: 'space-between',
+              border: `1px solid ${toolbarColors.border}`,
+            }
+          : singleRow
+            ? { maxWidth: 160 }
+            : { width: 120, justifyContent: 'space-between' }
+      }
       trigger={
         <>
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -729,7 +758,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
         if (Number.isFinite(size) && size >= 1 && size <= 400)
           apply({ type: 'fontSize', value: size });
       }}
-      width={singleRow ? 40 : 50}
+      width={ribbon ? 36 : singleRow ? 40 : 50}
+      height={ribbon ? 26 : undefined}
       chevron={!singleRow}
       optionAlign={singleRow ? 'center' : 'left'}
       // The single row's list as the note toolbar's: 56px wide, 4px padding.
@@ -739,8 +769,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
     />
   );
 
-  const textButtons = (
-    <>
+  const textButtons = {
+    bold: (
       <ToolbarButton
         title={t('toolbar.bold')}
         active={currentFormatting.bold}
@@ -749,6 +779,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         <ToolbarIcon name="bold" />
       </ToolbarButton>
+    ),
+    italic: (
       <ToolbarButton
         title={t('toolbar.italic')}
         active={currentFormatting.italic}
@@ -757,6 +789,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         <ToolbarIcon name="italic" />
       </ToolbarButton>
+    ),
+    strikethrough: (
       <ToolbarButton
         title={t('toolbar.strikethrough')}
         active={currentFormatting.strikethrough}
@@ -765,8 +799,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         <ToolbarIcon name="strikethrough" />
       </ToolbarButton>
-    </>
-  );
+    ),
+  };
 
   const textColorPicker = (
     <ColorPicker
@@ -879,6 +913,55 @@ export function Toolbar(explicitProps: ToolbarProps) {
     </>
   );
 
+  if (ribbon) {
+    return (
+      <div
+        ref={rootRef}
+        className={className}
+        role="toolbar"
+        aria-label={t('toolbar.actionsLabel')}
+        data-testid="xlsx-formatting-toolbar"
+        data-layout="ribbon"
+        style={{ color: toolbarColors.text, ...style }}
+      >
+        {ribbon({
+          bold: textButtons.bold,
+          borders: bordersDropdown,
+          decreaseDecimal: decimalButtons.decrease,
+          fillColor: fillColorPicker,
+          fontFamily: showFontPicker && fontFamilyPicker,
+          fontSize: showFontSizePicker && fontSizeBox,
+          increaseDecimal: decimalButtons.increase,
+          italic: textButtons.italic,
+          paintFormat: paintButton,
+          paintFormatBig: (
+            <ToolbarButton
+              title={t('toolbar.paintFormat')}
+              active={currentFormatting.paintFormat}
+              disabled={!formattingEnabled}
+              onClick={() => apply('paintFormat')}
+              testId="xlsx-paint-big"
+              style={{
+                flexDirection: 'column',
+                gap: 3,
+                minWidth: 46,
+                height: 58,
+                padding: '0 4px',
+                fontSize: 12,
+              }}
+            >
+              <ToolbarIcon name="formatPaint" />
+              <span>{t('toolbar.paintFormat')}</span>
+            </ToolbarButton>
+          ),
+          strikethrough: textButtons.strikethrough,
+          textColor: textColorPicker,
+          zoom: showZoomControl && zoomControl,
+        })}
+      </div>
+    );
+  }
+
   if (singleRow) {
     // Google Sheets' order: history, zoom, number formats, font, size, text,
     // cell (fill, borders, merge), alignment.
@@ -903,7 +986,9 @@ export function Toolbar(explicitProps: ToolbarProps) {
         label: t('toolbar.groups.text'),
         node: (
           <>
-            {textButtons}
+            {textButtons.bold}
+            {textButtons.italic}
+            {textButtons.strikethrough}
             {textColorPicker}
           </>
         ),
@@ -1084,7 +1169,11 @@ export function Toolbar(explicitProps: ToolbarProps) {
       node: (
         <>
           <ToolbarSeparator />
-          <ToolbarGroup label={t('toolbar.groups.text')}>{textButtons}</ToolbarGroup>
+          <ToolbarGroup label={t('toolbar.groups.text')}>
+            {textButtons.bold}
+            {textButtons.italic}
+            {textButtons.strikethrough}
+          </ToolbarGroup>
         </>
       ),
     },

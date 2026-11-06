@@ -154,3 +154,21 @@ test('the alignment popovers stack one pressed button per alignment and apply th
     [{ type: 'verticalAlignment', value: 'top' }],
   ]);
 });
+
+test('a ribbon host lays out the named controls, and a hidden one is false', () => {
+  const seen: string[] = [];
+  const { getByRole, getByTestId } = render(
+    <Toolbar
+      {...formatting}
+      showFontPicker={false}
+      ribbon={(controls) => {
+        seen.push(...Object.keys(controls).filter((name) => controls[name]));
+        return controls.bold;
+      }}
+    />
+  );
+  expect(getByTestId('xlsx-formatting-toolbar').dataset.layout).toBe('ribbon');
+  expect(getByRole('button', { name: en.toolbar.bold })).toBeTruthy();
+  expect(seen).toContain('paintFormatBig');
+  expect(seen).not.toContain('fontFamily');
+});

@@ -84,6 +84,7 @@ import type {
   SelectionFormatting,
   TextWrapping,
   VerticalAlignment,
+  ToolbarProps,
 } from './components/Toolbar';
 import {
   ToolbarButton,
@@ -280,6 +281,8 @@ export interface XlsxEditorProps {
    * 40px row (save, PNG export and print in its menu) over a 40px formula bar.
    */
   singleRowToolbar?: boolean;
+  /** The toolbar as a ribbon the host lays out (`ToolbarProps.ribbon`). */
+  ribbon?: ToolbarProps['ribbon'];
   /** Called with what a host menu shows enabled and checked, whenever it changes. */
   onCommandStateChange?: (state: XlsxCommandState) => void;
   showCustomNumberFormat?: boolean;
@@ -801,6 +804,7 @@ function XlsxEditorContent({
   sending = false,
   onNotice,
   singleRowToolbar = false,
+  ribbon,
   onCommandStateChange,
   showCustomNumberFormat = true,
   showSearchMenus = true,
@@ -3519,6 +3523,7 @@ function XlsxEditorContent({
           onFormat={formatSelection}
           onMerge={mergeSelection}
           singleRow={singleRowToolbar}
+          ribbon={ribbon}
           showSearchMenus={showSearchMenus}
           showCustomNumberFormat={showCustomNumberFormat}
           showFontPicker={showFontPicker}

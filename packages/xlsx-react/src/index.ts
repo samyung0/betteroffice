@@ -22,6 +22,7 @@ export {
 export {
   Toolbar,
   XlsxToolbar,
+  type RibbonControls,
   type ToolbarProps,
   type SelectionFormatting,
   type SelectionShape,
