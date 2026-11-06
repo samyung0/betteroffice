@@ -34,6 +34,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 import type { ResidentFrameApplyResult } from './hooks/useDisplayList';
 import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGate';
+import { setHeldInput } from './inputOperationQueue';
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
@@ -64,11 +65,14 @@ export interface YrsInputRef {
   blur(): void;
   isFocused(): boolean;
   flushPendingInput(): Promise<void>;
-  beginPointerSelection(): boolean;
-  /** Ends the block of a pointer selection that turned out to place no caret. */
-  cancelPointerSelection(): void;
-  /** Input from now on waits until `released` settles, which must not reject. */
-  holdInput(released: Promise<void>): void;
+  /** Whether input accepted so far has yet to land, a composition included. */
+  inputPending(): boolean;
+  /**
+   * Input from now on waits until `release`, for a press that cannot be placed yet.
+   * `drained` settles once what was accepted before it has landed at its own caret,
+   * and `end` is how a flush ends the hold rather than wait for it.
+   */
+  holdInput(end: () => void): { drained: Promise<void>; release: () => void };
   setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -260,8 +264,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   ref
 ) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const pointerSelectionBlockedRef = useRef(false);
-  const [pointerSelectionBlocked, setPointerSelectionBlocked] = useState(false);
+  // The press input waits behind, if any.
+  const inputHoldRef = useRef<{ end: () => void } | null>(null);
+  const [placementPending, setPlacementPending] = useState(false);
+  // Its session is being destroyed: input lands there at once, past the resident worker.
+  const drainingRef = useRef(false);
+  // Queued input can run after its press opened another story, so it reads what the
+  // latest render says.
+  const latestRef = useRef({ locToDisplayPosition, onDirectInput, onStateChange, story });
+  latestRef.current = { locToDisplayPosition, onDirectInput, onStateChange, story };
   const composingRef = useRef(false);
   const compositionPendingRef = useRef(false);
   const compositionCommitRef = useRef('');
@@ -314,7 +325,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const [positionStyle, setPositionStyle] = useState<CSSProperties>({ left: 0, top: 0, height: 1 });
   const [selectionEpoch, setSelectionEpoch] = useState(0);
 
+  // Any operation seals the open text batch: keys after it must land after it.
   const enqueueInputOperation = useCallback((operation: () => void | Promise<void>): void => {
+    pendingResidentTextRef.current = null;
     inputOperationQueueRef.current?.enqueue(operation);
   }, []);
 
@@ -327,7 +340,10 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [author, isSuggesting]);
 
   const belongsToRootStory = useCallback(
-    (candidate: string): boolean => candidate === story || candidate.startsWith(`${story}:`),
+    (candidate: string): boolean => {
+      const root = latestRef.current.story;
+      return candidate === root || candidate.startsWith(`${root}:`);
+    },
     [story]
   );
 
@@ -359,13 +375,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       return current;
     }
     const near = besideTableRef.current?.near;
-    const first = inputPositionMap(story)?.paragraphs[0];
+    const root = latestRef.current.story;
+    const first = inputPositionMap(root)?.paragraphs[0];
     const loc =
       near &&
       session.hasStory(near.story) &&
       inputPositionMap(near.story)?.paragraphs.some(({ paraId }) => paraId === near.paraId)
         ? near
-        : first && { story, paraId: first.paraId, offset: 0 };
+        : first && { story: root, paraId: first.paraId, offset: 0 };
     if (!loc) return null;
     session.setSelection(loc);
     return { anchor: loc, head: loc };
@@ -374,8 +391,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const displaySelection = useCallback((): YrsDisplaySelection | null => {
     const current = ensureSelection();
     if (!current) return null;
-    const anchor = locToDisplayPosition(current.anchor);
-    const head = locToDisplayPosition(current.head);
+    const anchor = latestRef.current.locToDisplayPosition(current.anchor);
+    const head = latestRef.current.locToDisplayPosition(current.head);
     return anchor == null || head == null ? null : { anchor, head };
   }, [ensureSelection, locToDisplayPosition]);
 
@@ -384,7 +401,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       const selection = displaySelection();
       if (!selection) return;
       setSelectionEpoch((epoch) => epoch + 1);
-      onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
+      latestRef.current.onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
     [displaySelection, onStateChange]
   );
@@ -406,7 +423,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
       onCaretInput?.();
-      onDirectInput();
+      latestRef.current.onDirectInput();
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
     [emitSelection, onCaretInput, onDirectInput]
@@ -426,7 +443,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   // Body-story only: painted-caret coverage for other stories is unproven, and
   // an unhonored dispatch hold would blank the caret per keystroke there.
   const dispatchCaretInput = useCallback((): void => {
-    if (!session || readOnly || pointerSelectionBlockedRef.current) return;
+    if (!session || readOnly) return;
     if (session.selection()?.head.story !== 'body') return;
     onCaretInputDispatched?.();
   }, [onCaretInputDispatched, readOnly, session]);
@@ -495,9 +512,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   }, [ensureSelection, inputPositionMap, session, suggestingAuthor]);
 
   const insertText = useCallback(
-    (text: string, acceptedComposition = false): void => {
+    (text: string): void => {
       verticalCaretGoalRef.current.reset();
-      if (!session || readOnly || (pointerSelectionBlockedRef.current && !acceptedComposition) || text.length === 0) return;
+      if (!session || readOnly || text.length === 0) return;
       dispatchCaretInput();
       const applyText = async (inputText: string) => {
         const current = ensureSelection();
@@ -559,7 +576,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           /^[\x20-\x7e]+$/u.test(inputText) &&
           !inputText.includes('\r') &&
           !inputText.includes('\n') &&
-          applyResidentInput
+          applyResidentInput &&
+          !drainingRef.current
         ) {
           const applied = await applyResidentInput(inputText);
           if (applied) finishResidentMutation(applied);
@@ -576,9 +594,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         !text.includes('\r') &&
         !text.includes('\n');
       if (!canBatchResidentText) {
-        // Seal any earlier text batch so a synchronous structural operation
-        // remains an ordering barrier for later input.
-        pendingResidentTextRef.current = null;
         enqueueInputOperation(() => applyText(text));
         return;
       }
@@ -590,11 +605,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       }
 
       const batch = { text };
-      pendingResidentTextRef.current = batch;
       enqueueInputOperation(async () => {
         if (pendingResidentTextRef.current === batch) pendingResidentTextRef.current = null;
         await applyText(batch.text);
       });
+      pendingResidentTextRef.current = batch;
     },
     [
       applyResidentInput,
@@ -613,7 +628,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const deleteDirection = useCallback(
     (direction: 'backward' | 'forward'): void => {
-      if (pointerSelectionBlockedRef.current) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       enqueueInputOperation(async () => {
@@ -640,7 +654,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
               session.paragraphUnitText(activeStory, caret.paraId).startsWith('\ufffc')
             : caret.offset < map.paragraphs[index].length || index + 1 < paragraphs.length;
         if (!hasTarget) return;
-        if (activeStory === 'body' && !isSuggesting && applyResidentDelete) {
+        if (activeStory === 'body' && !isSuggesting && applyResidentDelete && !drainingRef.current) {
           const applied = await applyResidentDelete(direction);
           if (applied) {
             finishResidentMutation(applied);
@@ -670,7 +684,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   );
 
   const splitParagraph = useCallback((): void => {
-    if (pointerSelectionBlockedRef.current) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
@@ -746,7 +759,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   // Shift+Enter: a line break inside the paragraph, as in Word (#1488).
   const insertLineBreak = useCallback((): void => {
-    if (pointerSelectionBlockedRef.current) return;
     verticalCaretGoalRef.current.reset();
     dispatchCaretInput();
     enqueueInputOperation(() => {
@@ -770,7 +782,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const toggleMark = useCallback(
     (mark: YrsRunMark): void => {
-      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         const current = ensureSelection();
@@ -812,7 +823,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const undoRedo = useCallback(
     (redo: boolean): void => {
-      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         if (performYrsHistoryAction(session, redo)) finishMutation();
@@ -823,7 +833,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const setAlignment = useCallback(
     (alignment: 'left' | 'center' | 'right' | 'both'): void => {
-      if (pointerSelectionBlockedRef.current) return;
       enqueueInputOperation(() => {
         if (!session || readOnly) return;
         const current = ensureSelection();
@@ -1094,10 +1103,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>): void => {
-      if (pointerSelectionBlockedRef.current) {
-        event.preventDefault();
-        return;
-      }
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
@@ -1170,7 +1175,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
 
   const handleCompositionStart = useCallback(
     (event: React.CompositionEvent<HTMLTextAreaElement>) => {
-      if (readOnly || pointerSelectionBlockedRef.current) return;
+      if (readOnly) return;
       verticalCaretGoalRef.current.reset();
       composingRef.current = true;
       compositionPendingRef.current = false;
@@ -1204,7 +1209,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         if (textareaRef.current) textareaRef.current.value = '';
         compositionPendingRef.current = false;
         compositionCommitRef.current = '';
-        insertText(text, true);
+        insertText(text);
         for (const resolve of compositionWaitersRef.current) resolve();
         compositionWaitersRef.current.clear();
       });
@@ -1271,7 +1276,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
       const selected = writeSelectionToClipboard(event);
       // Read-only, or a selection plain text cannot carry, only copies.
-      if (!selected?.plain || readOnly || pointerSelectionBlockedRef.current) return;
+      if (!selected?.plain || readOnly) return;
       verticalCaretGoalRef.current.reset();
       dispatchCaretInput();
       enqueueInputOperation(() => {
@@ -1302,6 +1307,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       await new Promise<void>((resolve) => compositionWaitersRef.current.add(resolve));
       assertCurrent();
     }
+    // Waits for no geometry: what was typed behind a held press lands at the old caret.
+    inputHoldRef.current?.end();
     pendingResidentTextRef.current = null;
     await queue?.flush();
     assertCurrent();
@@ -1319,8 +1326,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   useEffect(() => () => onPendingChangeRef.current?.(false), [session]);
 
   useEffect(() => {
-    pointerSelectionBlockedRef.current = false;
-    setPointerSelectionBlocked(false);
+    inputHoldRef.current?.end();
     composingRef.current = false;
     compositionPendingRef.current = false;
     compositionCommitRef.current = '';
@@ -1364,34 +1370,62 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
       flushPendingInput,
-      beginPointerSelection() {
+      inputPending: () =>
+        Boolean(inputOperationQueueRef.current?.hasPending()) ||
+        composingRef.current ||
+        compositionPendingRef.current,
+      holdInput(end) {
         advanceInteractionEpoch();
-        pendingResidentTextRef.current = null;
-        pointerSelectionBlockedRef.current = true;
-        setPointerSelectionBlocked(true);
-        return !inputOperationQueueRef.current?.hasPending() && !composingRef.current && !compositionPendingRef.current;
-      },
-      cancelPointerSelection() {
-        pointerSelectionBlockedRef.current = false;
-        setPointerSelectionBlocked(false);
-      },
-      holdInput(released) {
-        inputOperationQueueRef.current?.hold(released);
+        const queue = inputOperationQueueRef.current;
+        let open = () => {};
+        const released = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        // Input accepted so far stays ahead of the hold, a composition's commit
+        // included; what comes next waits behind it, the open text batch sealed.
+        const enter = (): Promise<void> => {
+          pendingResidentTextRef.current = null;
+          const drained = queue?.idle() ?? Promise.resolve();
+          queue?.hold(released);
+          return drained;
+        };
+        const drained =
+          composingRef.current || compositionPendingRef.current
+            ? new Promise<void>((resolve) => compositionWaitersRef.current.add(resolve)).then(enter)
+            : enter();
+        const hold = { end };
+        inputHoldRef.current = hold;
+        setPlacementPending(true);
+        if (session) {
+          setHeldInput(session, () => {
+            drainingRef.current = true;
+            end();
+            return queue?.idle() ?? Promise.resolve();
+          });
+        }
+        return {
+          drained,
+          release() {
+            if (inputHoldRef.current === hold) {
+              inputHoldRef.current = null;
+              setPlacementPending(false);
+              if (session) setHeldInput(session, null);
+            }
+            open();
+          },
+        };
       },
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
-        if (pointerSelectionBlockedRef.current && (inputOperationQueueRef.current?.hasPending() || composingRef.current || compositionPendingRef.current)) return;
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
         if (session && anchorLoc && headLoc) {
-          advanceInteractionEpoch();
+          // A held press's placement leaves the moves pressed after it in the queue.
+          if (!inputHoldRef.current) advanceInteractionEpoch();
           verticalCaretGoalRef.current.reset();
           setSelection(anchorLoc, headLoc);
-          pointerSelectionBlockedRef.current = false;
-          setPointerSelectionBlocked(false);
         }
       },
       selectWordAtDisplay(position, targetStory = story) {
-        if (pointerSelectionBlockedRef.current) return;
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1407,7 +1441,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         }
       },
       selectParagraphAtDisplay(position, targetStory = story) {
-        if (pointerSelectionBlockedRef.current) return;
         if (!session) return;
         const loc = displayPositionToLoc(position, targetStory);
         if (!loc) return;
@@ -1432,13 +1465,12 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       storedFormatting,
       insertText,
       deleteSelection() {
-        if (!readOnly && !pointerSelectionBlockedRef.current && deleteSelectionStep()) {
+        if (!readOnly && deleteSelectionStep()) {
           advanceInteractionEpoch();
           finishMutation();
         }
       },
       selectAll() {
-        if (pointerSelectionBlockedRef.current) return;
         advanceInteractionEpoch();
         selectAll();
       },
@@ -1579,13 +1611,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       className="paged-editor__yrs-input paged-editor__hidden-pm ProseMirror"
       data-testid="yrs-input"
       data-yrs-story={story}
-      data-pointer-placement={pointerSelectionBlocked ? 'pending' : 'ready'}
+      data-pointer-placement={placementPending ? 'pending' : 'ready'}
       data-selection-head={displaySelection()?.head}
       aria-label="Document input"
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
-      readOnly={readOnly || pointerSelectionBlocked || !session}
+      readOnly={readOnly || !session}
       rows={1}
       style={{ ...BASE_STYLE, ...positionStyle }}
       onBeforeInput={handleBeforeInput}

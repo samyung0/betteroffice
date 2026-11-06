@@ -52,8 +52,54 @@ interface ImageInfo {
 /** What placing a press needs of its mouse event; a held press has outlived its event. */
 type PagesPress = Pick<React.MouseEvent, 'clientX' | 'clientY' | 'detail' | 'stopPropagation'>;
 
+/**
+ * A press waiting to be placed. Scrolling, zoom or a sidebar can move the page under
+ * it meanwhile, so it keeps its place on the nearest page as fractions of that page.
+ */
+interface HeldPress {
+  detail: number;
+  drained: boolean;
+  page: { index: string; x: number; y: number } | null;
+  release: () => void;
+}
+
 /** The geometry's engine can fail to load: past this a held press gives the input back. */
-export const HELD_PRESS_MS = 30_000;
+export const HELD_PRESS_MS = 10_000;
+
+function pressPage(host: HTMLElement | null, clientX: number, clientY: number): HeldPress['page'] {
+  let nearest: HeldPress['page'] = null;
+  let least = Infinity;
+  const pages = host?.querySelectorAll<HTMLElement>(
+    '.canvas-page[data-page-index], canvas[data-page-index]'
+  );
+  for (const page of pages ?? []) {
+    const rect = page.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const distance = Math.max(rect.top - clientY, clientY - rect.bottom, 0);
+    if (distance >= least) continue;
+    least = distance;
+    nearest = {
+      index: page.dataset.pageIndex ?? '',
+      x: (clientX - rect.left) / rect.width,
+      y: (clientY - rect.top) / rect.height,
+    };
+  }
+  return nearest;
+}
+
+function pageClientPoint(
+  host: HTMLElement | null,
+  page: NonNullable<HeldPress['page']>
+): { clientX: number; clientY: number } | null {
+  const rect = host
+    ?.querySelector<HTMLElement>(
+      `.canvas-page[data-page-index="${page.index}"], canvas[data-page-index="${page.index}"]`
+    )
+    ?.getBoundingClientRect();
+  return rect && rect.width > 0 && rect.height > 0
+    ? { clientX: rect.left + page.x * rect.width, clientY: rect.top + page.y * rect.height }
+    : null;
+}
 
 export interface UsePagesPointerOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
@@ -207,9 +253,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     position: number;
   } | null>(null);
   const [pendingPartCaretVersion, setPendingPartCaretVersion] = useState(0);
-  // A press before the page geometry is ready, as right after opening: it takes the
-  // caret once the geometry arrives, and input typed meanwhile waits behind it.
-  const heldPressRef = useRef<{ press: PagesPress; release: () => void } | null>(null);
+  // A press before the page geometry is ready, as right after opening, or while earlier
+  // input is landing: it takes the caret once both are done, what was typed before it
+  // lands at the old caret, and what is typed meanwhile waits behind it.
+  const heldPressRef = useRef<HeldPress | null>(null);
+  // A placed held press whose part opens first: the input waits for that part's caret.
+  const partCaretReleaseRef = useRef<(() => void) | null>(null);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -349,7 +398,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   // the reader has it by now and starts no drag.
   const placePress = useCallback(
     (e: PagesPress, held: boolean) => {
-      const cancelSelection = () => yrsInputRef.current?.cancelPointerSelection();
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const hit = point?.hit ?? null;
       const region = hit?.region ?? null;
@@ -358,10 +406,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // the note up. The caret the click asked for is placed once the editor
       // is on that note's story.
       const note = noteEditFromHit(hit);
-      if (isNoteAreaHit(hit) && !note) {
-        cancelSelection();
-        return;
-      }
+      if (isNoteAreaHit(hit) && !note) return;
       if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
         e.stopPropagation();
         const pending =
@@ -375,7 +420,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         pendingPartCaretRef.current = pending;
         onNoteClick(note);
         if (pending) setPendingPartCaretVersion((version) => version + 1);
-        else cancelSelection();
         return;
       }
       // A press on a band outside the open part leaves that part open, so the
@@ -400,12 +444,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
                 };
           pendingPartCaretRef.current = pending;
           onHeaderFooterDoubleClick(region, (point?.pageIndex ?? 0) + 1);
-          if (pending) {
-            setPendingPartCaretVersion((version) => version + 1);
-            return;
-          }
+          if (pending) setPendingPartCaretVersion((version) => version + 1);
         }
-        cancelSelection();
         return;
       }
       if (partEdit && !hitBelongsToPart(partEdit, hit) && onBodyClick) {
@@ -417,15 +457,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         pendingPartCaretRef.current = pending;
         onBodyClick();
         if (pending) setPendingPartCaretVersion((version) => version + 1);
-        else cancelSelection();
         return;
       }
 
       const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) {
-        cancelSelection();
-        return;
-      }
+      if (!projection) return;
 
       const imageRegion = partImageRegion(partEdit);
       if (displayListQueries && point && imageRegion) {
@@ -483,9 +519,40 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   );
 
   const dropHeldPress = useCallback(() => {
-    heldPressRef.current?.release();
+    const held = heldPressRef.current;
     heldPressRef.current = null;
+    held?.release();
+    partCaretReleaseRef.current?.();
+    partCaretReleaseRef.current = null;
   }, []);
+
+  const hostElement = () => canvasHostRef?.current ?? pagesContainerRef.current;
+
+  // What a flush or a teardown ends: a wait for the geometry has no limit but the timer,
+  // while a wait for earlier input ends with that input.
+  const geometryRef = useRef(displayListQueries);
+  geometryRef.current = displayListQueries;
+  const endHeldPress = useCallback(() => {
+    if (!geometryRef.current) dropHeldPress();
+  }, [dropHeldPress]);
+
+  // Once the geometry is here and what came before the press has landed.
+  const placeHeldPress = (): void => {
+    const held = heldPressRef.current;
+    if (!held?.drained || !displayListQueries) return;
+    heldPressRef.current = null;
+    let placed = false;
+    try {
+      const point = held.page && pageClientPoint(hostElement(), held.page);
+      if (point) placePress({ ...point, detail: held.detail, stopPropagation: () => {} }, true);
+      placed = true;
+    } finally {
+      if (placed && pendingPartCaretRef.current) partCaretReleaseRef.current = held.release;
+      else held.release();
+    }
+  };
+  const placeHeldPressRef = useRef(placeHeldPress);
+  placeHeldPressRef.current = placeHeldPress;
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
@@ -499,47 +566,56 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearTableInsertTimer();
       e.preventDefault();
       if (readOnly) return;
-      if (!displayListQueries) {
-        // The last press wins; only the first holds the input.
-        const press = {
-          clientX: e.clientX,
-          clientY: e.clientY,
-          detail: e.detail,
-          stopPropagation: () => {},
-        };
-        if (heldPressRef.current) {
-          heldPressRef.current.press = press;
-          return;
-        }
-        let release = () => {};
-        yrsInputRef.current?.holdInput(
-          new Promise((resolve) => {
-            release = resolve;
-          })
-        );
-        const timer = setTimeout(dropHeldPress, HELD_PRESS_MS);
-        heldPressRef.current = {
-          press,
-          release: () => {
-            clearTimeout(timer);
-            release();
-          },
-        };
+      const input = yrsInputRef.current;
+      if (displayListQueries && !heldPressRef.current && !input?.inputPending()) {
+        placePress(e, false);
         return;
       }
-      if (yrsInputRef.current?.beginPointerSelection() === false) return;
-      placePress(e, false);
+      // No click may follow, on a drag off the pages: the input takes the keys from here.
+      focusInput();
+      if (!partEdit) setIsFocused(true);
+      const page = pressPage(hostElement(), e.clientX, e.clientY);
+      const earlier = heldPressRef.current;
+      if (earlier) {
+        // The last press wins; only the first holds the input.
+        earlier.page = page;
+        earlier.detail = e.detail;
+        return;
+      }
+      const hold = input?.holdInput(endHeldPress);
+      const timer = setTimeout(dropHeldPress, HELD_PRESS_MS);
+      const held: HeldPress = {
+        detail: e.detail,
+        drained: !hold,
+        page,
+        release: () => {
+          clearTimeout(timer);
+          hold?.release();
+        },
+      };
+      heldPressRef.current = held;
+      void hold?.drained.then(() => {
+        held.drained = true;
+        placeHeldPressRef.current();
+      });
     },
-    [clearTableInsertTimer, displayListQueries, dropHeldPress, placePress, readOnly, yrsInputRef]
+    [
+      canvasHostRef,
+      clearTableInsertTimer,
+      displayListQueries,
+      dropHeldPress,
+      endHeldPress,
+      focusInput,
+      pagesContainerRef,
+      partEdit,
+      placePress,
+      readOnly,
+      setIsFocused,
+      yrsInputRef,
+    ]
   );
 
-  useEffect(() => {
-    const held = heldPressRef.current;
-    if (!held || !displayListQueries) return;
-    heldPressRef.current = null;
-    placePress(held.press, true);
-    held.release();
-  }, [displayListQueries, placePress]);
+  useEffect(() => placeHeldPressRef.current(), [displayListQueries]);
 
   // A press for a session or mode that is gone places nothing and holds nothing.
   useEffect(() => dropHeldPress, [dropHeldPress, readOnly, yrsSession]);
@@ -548,29 +624,31 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     const pending = pendingPartCaretRef.current;
     if (!pending) return;
     pendingPartCaretRef.current = null;
-    if (
-      pending.session !== yrsSession ||
-      pending.story !== yrsRootStory ||
-      pending.story !== partEditStory(partEdit)
-    ) {
-      yrsInputRef.current?.cancelPointerSelection();
-      return;
+    const release = partCaretReleaseRef.current;
+    partCaretReleaseRef.current = null;
+    try {
+      if (
+        pending.session !== yrsSession ||
+        pending.story !== yrsRootStory ||
+        pending.story !== partEditStory(partEdit)
+      ) {
+        return;
+      }
+      const projection = getYrsPositionProjection(yrsRootStory);
+      if (!projection) return;
+      const position = Math.min(Math.max(0, pending.position), Math.max(0, projection.size - 1));
+      setTextSelection(position);
+      // A held press leaves focus where the reader has it by now.
+      if (!release) focusInput();
+    } finally {
+      release?.();
     }
-    const projection = getYrsPositionProjection(yrsRootStory);
-    if (!projection) {
-      yrsInputRef.current?.cancelPointerSelection();
-      return;
-    }
-    const position = Math.min(Math.max(0, pending.position), Math.max(0, projection.size - 1));
-    setTextSelection(position);
-    focusInput();
   }, [
     focusInput,
     getYrsPositionProjection,
     partEdit,
     pendingPartCaretVersion,
     setTextSelection,
-    yrsInputRef,
     yrsRootStory,
     yrsSession,
   ]);
@@ -746,6 +824,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // selection remains keyboard-ready even when the canvas host is outside
       // PagedEditor's React subtree.
       focusInput();
+      // Its press has yet to land: moving the caret now would jump ahead of it.
+      if (heldPressRef.current) return;
       const projection = getYrsPositionProjection(yrsRootStory);
       const queries = displayListQueries;
       const host = canvasHostRef?.current ?? pagesContainerRef.current;

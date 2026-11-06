@@ -1,3 +1,18 @@
+/** What must land in a session before it is destroyed: input behind a held press. */
+const heldInput = new WeakMap<object, () => Promise<void>>();
+
+export function setHeldInput(session: object, drain: (() => Promise<void>) | null): void {
+  if (drain) heldInput.set(session, drain);
+  else heldInput.delete(session);
+}
+
+/** Lands a session's held input; null when it holds none. */
+export function drainHeldInput(session: object): Promise<void> | null {
+  const drain = heldInput.get(session);
+  heldInput.delete(session);
+  return drain ? drain() : null;
+}
+
 export class InputOperationQueue {
   private pending: Promise<void> = Promise.resolve();
   private interactionEpoch = 0;

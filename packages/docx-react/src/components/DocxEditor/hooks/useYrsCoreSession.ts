@@ -15,6 +15,7 @@ import type {
   YrsRenderEnv,
   YrsSession,
 } from '@betteroffice/docx/yrs';
+import { drainHeldInput } from '../inputOperationQueue';
 import type { DocxEditorCollaborationOptions } from '../types';
 
 type YrsFacadeModule = typeof import('@betteroffice/docx/yrs');
@@ -190,6 +191,7 @@ export function useYrsCoreSession(
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
   const [session, setSession] = useState<YrsSession | null>(null);
+  const drainingRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     setSession(null);
@@ -199,7 +201,8 @@ export function useYrsCoreSession(
     compatibilityBaseRef.current = null;
     sourceDocumentRef.current = null;
 
-    void import('@betteroffice/docx/yrs')
+    void Promise.resolve(drainingRef.current)
+      .then(() => import('@betteroffice/docx/yrs'))
       .then(async (yrs) => {
         const next = await yrs.createYrsSession({
           clientId: collaborationClientId,
@@ -237,10 +240,19 @@ export function useYrsCoreSession(
 
     return () => {
       cancelled = true;
-      sessionRef.current?.destroy();
-      sessionRef.current = null;
-      facadeRef.current = null;
-      inputPositionMapsRef.current.clear();
+      const doomed = sessionRef.current;
+      const finish = () => {
+        doomed?.destroy();
+        if (sessionRef.current === doomed) {
+          sessionRef.current = null;
+          facadeRef.current = null;
+        }
+        inputPositionMapsRef.current.clear();
+      };
+      // Text typed behind a held press goes into the session first, so it saves.
+      const held = doomed && drainHeldInput(doomed);
+      drainingRef.current = held ? held.finally(finish) : null;
+      if (!held) finish();
     };
   }, [
     enabled,

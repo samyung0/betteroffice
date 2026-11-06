@@ -73,8 +73,7 @@ function stableOptions(): (overrides?: Partial<UsePagesPointerOptions>) => UsePa
   const yrsInputRef = {
     current: {
       focus: () => {},
-      beginPointerSelection: () => {},
-      cancelPointerSelection: () => {},
+      inputPending: () => false,
       setSelectionFromDisplay: (anchor: number, head = anchor, story?: string) => {
         selections.push({ anchor, head, story });
       },
@@ -551,8 +550,7 @@ describe('clicking a note', () => {
     const yrsInputRef = {
       current: {
         focus: () => {},
-        beginPointerSelection: () => {},
-        cancelPointerSelection: () => {},
+        inputPending: () => false,
       setSelectionFromDisplay: () => {},
         displaySelection: () => ({ anchor: 3, head: 4 }),
       } as unknown as YrsInputRef,

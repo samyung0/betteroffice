@@ -946,6 +946,7 @@ mod tests {
         }
     }
 
+    // Security regression, as above: every kind of chain target, through both savers.
     #[test]
     fn saved_packages_reopen_with_the_names_they_were_given() {
         let mut cases = vec![(sample(), stored_zip(&sample(), "word/media/image1.png"))];
@@ -987,6 +988,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    // What the field is for: a non-ASCII name the header spells another way keeps its name
+    // and its part through a save, re-deflated with a fresh header.
+    #[test]
+    fn a_valid_unicode_path_keeps_its_name_and_part() {
+        let name = "word/média/図.xml";
+        let raw = b"word/media/x.xml";
+        let source = raw_stored_zip(raw, &unicode_path(raw, name), b"<x/>");
+        let parts = unzip_parts(&source).expect("unzip");
+        assert_eq!(names(&parts), [name]);
+        let out = rezip_parts_preserving(&parts, &source).expect("rezip");
+        assert_eq!(effective_names(&out), [name]);
+        assert_eq!(unzip_parts(&out).expect("reopen"), parts);
     }
 
     // A Unicode Path that applies is the name every reader checks: it cannot carry a part

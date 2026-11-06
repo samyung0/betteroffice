@@ -65,8 +65,7 @@ function setup(partEdit: PartEdit | null = null) {
   } as unknown as DisplayListQueries;
   const input = {
     focus: () => {},
-    beginPointerSelection: () => true,
-    cancelPointerSelection: () => {},
+    inputPending: () => false,
     setSelectionFromDisplay: (anchor: number) => placed.push(anchor),
     selectWordAtDisplay: (position: number) => words.push(position),
     displaySelection: () => null,
