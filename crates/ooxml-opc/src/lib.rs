@@ -447,7 +447,16 @@ fn copy_unchanged_member(
     let Ok(mut file) = archive.by_index(index) else {
         return Ok(false);
     };
-    if file.is_dir() || file.size() != bytes.len() as u64 || !inflated_matches(&mut file, bytes) {
+    // A raw copy keeps a Unicode Path field (0x7075) and writes the effective name as the
+    // new header name, so a field that did not apply when the source was read could rename
+    // the part on the next read. Such a member gets a fresh header (upstream #2138).
+    if file.is_dir()
+        || file.size() != bytes.len() as u64
+        || file
+            .extra_data_fields()
+            .any(|field| matches!(field, zip::ExtraField::UnicodePath(_)))
+        || !inflated_matches(&mut file, bytes)
+    {
         return Ok(false);
     }
     drop(file);
@@ -829,6 +838,171 @@ mod tests {
         entries[2].1 = vec![0x89, 0x50, 0x4e, 0x00];
         let out = rezip_parts_preserving(&entries, &source).expect("rezip");
         assert_eq!(unzip_parts(&out).unwrap(), entries);
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (crc & 1).wrapping_neg());
+            }
+        }
+        !crc
+    }
+
+    fn unicode_path(name_raw: &[u8], path: &str) -> Vec<u8> {
+        let mut field = vec![0x75, 0x70];
+        field.extend_from_slice(&(5 + path.len() as u16).to_le_bytes());
+        field.push(1);
+        field.extend_from_slice(&crc32(name_raw).to_le_bytes());
+        field.extend_from_slice(path.as_bytes());
+        field
+    }
+
+    fn raw_stored_zip(name: &[u8], extra: &[u8], data: &[u8]) -> Vec<u8> {
+        let crc = crc32(data).to_le_bytes();
+        let size = (data.len() as u32).to_le_bytes();
+        let lengths = [
+            (name.len() as u16).to_le_bytes(),
+            (extra.len() as u16).to_le_bytes(),
+        ]
+        .concat();
+        let mut zip = [
+            &[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0][..],
+            &crc,
+            &size,
+            &size,
+            &lengths,
+        ]
+        .concat();
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(extra);
+        zip.extend_from_slice(data);
+        let central_start = zip.len() as u32;
+        zip.extend_from_slice(&[0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0x21, 0]);
+        zip.extend_from_slice(&[&crc[..], &size, &size, &lengths, &[0; 14]].concat());
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(extra);
+        let central_size = zip.len() as u32 - central_start;
+        zip.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0]);
+        zip.extend_from_slice(&central_size.to_le_bytes());
+        zip.extend_from_slice(&central_start.to_le_bytes());
+        zip.extend_from_slice(&[0, 0]);
+        zip
+    }
+
+    fn effective_names(zip_bytes: &[u8]) -> Vec<String> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        (0..archive.len())
+            .map(|index| {
+                archive
+                    .by_index_raw(index)
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    // Security regression: zip 9 refuses to write these Info-ZIP field ids without its
+    // `unreserved` feature, so a document holding them could not be saved at all.
+    #[test]
+    fn preserving_saves_members_holding_info_zip_extra_fields() {
+        // 0x7875 unix uid/gid and 0x554e, the shapes real xlsx and docx files carry.
+        let unix = [0x75, 0x78, 11, 0, 1, 4, 0xe8, 3, 0, 0, 4, 0xe8, 3, 0, 0];
+        let nu = [0x4e, 0x55, 6, 0, 0x2e, 0, b'x', b'x', b'x', b'x'];
+        for extra in [&unix[..], &nu[..]] {
+            let source = raw_stored_zip(b"word/document.xml", extra, b"<x/>");
+            let parts = unzip_parts(&source).expect("unzip");
+            let out = rezip_parts_preserving(&parts, &source).expect("rezip");
+            assert_eq!(unzip_parts(&out).expect("reopen"), parts);
+            // Copied, so the member keeps its stored bytes and its field.
+            assert_eq!(
+                entry_method(&out, "word/document.xml"),
+                zip::CompressionMethod::Stored
+            );
+            assert!(out.windows(extra.len()).any(|bytes| bytes == extra));
+        }
+    }
+
+    // Security regression: a raw copy keeps the field and writes the effective name, so a
+    // chain that reads as safe.xml would save as ../escape.xml, whichever order it is in.
+    #[test]
+    fn preserving_never_lets_a_copied_unicode_path_rename_a_part() {
+        let first = unicode_path(b"old.xml", "safe.xml");
+        let second = unicode_path(b"safe.xml", "../escape.xml");
+        for extra in [
+            [first.clone(), second.clone()].concat(),
+            [second, first].concat(),
+        ] {
+            let source = raw_stored_zip(b"old.xml", &extra, b"<x/>");
+            let parts = unzip_parts(&source).expect("unzip");
+            assert_eq!(names(&parts), ["safe.xml"]);
+            let out = rezip_parts_preserving(&parts, &source).expect("rezip");
+            assert_eq!(effective_names(&out), ["safe.xml"]);
+            assert_eq!(unzip_parts(&out).expect("reopen"), parts);
+        }
+    }
+
+    #[test]
+    fn saved_packages_reopen_with_the_names_they_were_given() {
+        let mut cases = vec![(sample(), stored_zip(&sample(), "word/media/image1.png"))];
+        for target in [
+            "../escape.xml",
+            "/escape.xml",
+            "word\\..\\..\\escape.xml",
+            "C:/escape.xml",
+            "word/escape.xml",
+        ] {
+            let mut extra = unicode_path(b"old.xml", "safe.xml");
+            extra.extend(unicode_path(b"safe.xml", target));
+            let source = raw_stored_zip(b"old.xml", &extra, b"<x/>");
+            cases.push((unzip_parts(&source).expect("unzip"), source));
+        }
+        let renamed = raw_stored_zip(
+            b"old.xml",
+            &unicode_path(b"old.xml", "word/renamed.xml"),
+            b"<x/>",
+        );
+        cases.push((unzip_parts(&renamed).expect("unzip"), renamed));
+        for (parts, source) in cases {
+            let intended: Vec<&str> = names(&parts);
+            for saved in [
+                rezip_parts(&parts).expect("rezip"),
+                rezip_parts_preserving(&parts, &source).expect("rezip preserving"),
+            ] {
+                let reopened = effective_names(&saved);
+                assert_eq!(reopened, intended);
+                assert!(
+                    reopened
+                        .iter()
+                        .all(|name| is_safe_entry_path(name) && !name.contains('\\'))
+                );
+                let retained = RetainedPackage::new(std::sync::Arc::from(saved)).expect("retained");
+                assert_eq!(
+                    retained.parts().map(|(name, _)| name).collect::<Vec<_>>(),
+                    intended
+                );
+            }
+        }
+    }
+
+    // A Unicode Path that applies is the name every reader checks: it cannot carry a part
+    // past the path guard on the way in.
+    #[test]
+    fn every_reader_checks_the_name_a_unicode_path_gives() {
+        let source = raw_stored_zip(
+            b"old.xml",
+            &unicode_path(b"old.xml", "../escape.xml"),
+            b"<x/>",
+        );
+        assert!(unzip_parts(&source).unwrap_err().contains("unsafe"));
+        let retained = RetainedPackage::new(std::sync::Arc::from(source.clone()));
+        assert!(retained.err().is_some_and(|e| e.contains("unsafe")));
+        let mut package = Package::open(&source).expect("open");
+        assert_eq!(package.read("old.xml", 1024), Ok(None));
     }
 
     #[test]
