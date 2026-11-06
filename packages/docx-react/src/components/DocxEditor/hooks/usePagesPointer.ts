@@ -49,6 +49,12 @@ interface ImageInfo {
   inlinePositionEmu?: { horizontalEmu: number; verticalEmu: number };
 }
 
+/** What placing a press needs of its mouse event; a held press has outlived its event. */
+type PagesPress = Pick<React.MouseEvent, 'clientX' | 'clientY' | 'detail' | 'stopPropagation'>;
+
+/** The geometry's engine can fail to load: past this a held press gives the input back. */
+export const HELD_PRESS_MS = 30_000;
+
 export interface UsePagesPointerOptions {
   pagesContainerRef: React.RefObject<HTMLDivElement | null>;
   yrsInputRef: React.RefObject<YrsInputRef | null>;
@@ -201,6 +207,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     position: number;
   } | null>(null);
   const [pendingPartCaretVersion, setPendingPartCaretVersion] = useState(0);
+  // A press before the page geometry is ready, as right after opening: it takes the
+  // caret once the geometry arrives, and input typed meanwhile waits behind it.
+  const heldPressRef = useRef<{ press: PagesPress; release: () => void } | null>(null);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -336,21 +345,11 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [resolveTarget, setCaretPosition, setSelectionRects, syncYrsInputState, yrsSession]
   );
 
-  const handlePagesMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      pendingPartCaretRef.current = null;
-      if (e.button === 2) {
-        e.preventDefault();
-        return;
-      }
-      if (e.button !== 0) return;
-      setTableInsertButton(null);
-      clearTableInsertTimer();
-      e.preventDefault();
-      if (readOnly) return;
-      if (yrsInputRef.current?.beginPointerSelection() === false) return;
-      if (!displayListQueries) return;
-
+  // A held press runs after its click, which focused the input: it leaves focus where
+  // the reader has it by now and starts no drag.
+  const placePress = useCallback(
+    (e: PagesPress, held: boolean) => {
+      const cancelSelection = () => yrsInputRef.current?.cancelPointerSelection();
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const hit = point?.hit ?? null;
       const region = hit?.region ?? null;
@@ -359,7 +358,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       // the note up. The caret the click asked for is placed once the editor
       // is on that note's story.
       const note = noteEditFromHit(hit);
-      if (isNoteAreaHit(hit) && !note) return;
+      if (isNoteAreaHit(hit) && !note) {
+        cancelSelection();
+        return;
+      }
       if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
         e.stopPropagation();
         const pending =
@@ -373,6 +375,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         pendingPartCaretRef.current = pending;
         onNoteClick(note);
         if (pending) setPendingPartCaretVersion((version) => version + 1);
+        else cancelSelection();
         return;
       }
       // A press on a band outside the open part leaves that part open, so the
@@ -397,8 +400,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
                 };
           pendingPartCaretRef.current = pending;
           onHeaderFooterDoubleClick(region, (point?.pageIndex ?? 0) + 1);
-          if (pending) setPendingPartCaretVersion((version) => version + 1);
+          if (pending) {
+            setPendingPartCaretVersion((version) => version + 1);
+            return;
+          }
         }
+        cancelSelection();
         return;
       }
       if (partEdit && !hitBelongsToPart(partEdit, hit) && onBodyClick) {
@@ -410,11 +417,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         pendingPartCaretRef.current = pending;
         onBodyClick();
         if (pending) setPendingPartCaretVersion((version) => version + 1);
+        else cancelSelection();
         return;
       }
 
       const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
+      if (!projection) {
+        cancelSelection();
+        return;
+      }
 
       const imageRegion = partImageRegion(partEdit);
       if (displayListQueries && point && imageRegion) {
@@ -430,8 +441,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           setTextSelection(image.pos, image.pos + 1);
           setSelectionRects([]);
           setCaretPosition(null);
-          focusInput();
-          if (!partEdit) setIsFocused(true);
+          if (!held) {
+            focusInput();
+            if (!partEdit) setIsFocused(true);
+          }
           return;
         }
       }
@@ -440,14 +453,15 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const targetPos = pmPos ?? Math.max(0, projection.size - 1);
       yrsCellDragAnchorRef.current = resolveTarget(targetPos)?.cell ?? null;
       yrsCellDraggingRef.current = false;
-      isDraggingRef.current = true;
+      isDraggingRef.current = !held;
       dragAnchorRef.current = targetPos;
       setTextSelection(targetPos);
-      focusInput();
-      if (!partEdit) setIsFocused(true);
+      if (!held) {
+        focusInput();
+        if (!partEdit) setIsFocused(true);
+      }
     },
     [
-      clearTableInsertTimer,
       displayListQueries,
       focusInput,
       getPositionFromMouse,
@@ -456,7 +470,6 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       onHeaderFooterDoubleClick,
       onNoteClick,
       partEdit,
-      readOnly,
       resolveCanvasHit,
       resolveTarget,
       setCaretPosition,
@@ -469,6 +482,68 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     ]
   );
 
+  const dropHeldPress = useCallback(() => {
+    heldPressRef.current?.release();
+    heldPressRef.current = null;
+  }, []);
+
+  const handlePagesMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      pendingPartCaretRef.current = null;
+      if (e.button === 2) {
+        e.preventDefault();
+        return;
+      }
+      if (e.button !== 0) return;
+      setTableInsertButton(null);
+      clearTableInsertTimer();
+      e.preventDefault();
+      if (readOnly) return;
+      if (!displayListQueries) {
+        // The last press wins; only the first holds the input.
+        const press = {
+          clientX: e.clientX,
+          clientY: e.clientY,
+          detail: e.detail,
+          stopPropagation: () => {},
+        };
+        if (heldPressRef.current) {
+          heldPressRef.current.press = press;
+          return;
+        }
+        let release = () => {};
+        yrsInputRef.current?.holdInput(
+          new Promise((resolve) => {
+            release = resolve;
+          })
+        );
+        const timer = setTimeout(dropHeldPress, HELD_PRESS_MS);
+        heldPressRef.current = {
+          press,
+          release: () => {
+            clearTimeout(timer);
+            release();
+          },
+        };
+        return;
+      }
+      if (yrsInputRef.current?.beginPointerSelection() === false) return;
+      placePress(e, false);
+    },
+    [clearTableInsertTimer, displayListQueries, dropHeldPress, placePress, readOnly, yrsInputRef]
+  );
+
+  useEffect(() => {
+    const held = heldPressRef.current;
+    if (!held || !displayListQueries) return;
+    heldPressRef.current = null;
+    placePress(held.press, true);
+    held.release();
+  }, [displayListQueries, placePress]);
+
+  // A press for a session or mode that is gone places nothing and holds nothing.
+  useEffect(() => dropHeldPress, [dropHeldPress, readOnly, yrsSession]);
+
   useEffect(() => {
     const pending = pendingPartCaretRef.current;
     if (!pending) return;
@@ -478,10 +553,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       pending.story !== yrsRootStory ||
       pending.story !== partEditStory(partEdit)
     ) {
+      yrsInputRef.current?.cancelPointerSelection();
       return;
     }
     const projection = getYrsPositionProjection(yrsRootStory);
-    if (!projection) return;
+    if (!projection) {
+      yrsInputRef.current?.cancelPointerSelection();
+      return;
+    }
     const position = Math.min(Math.max(0, pending.position), Math.max(0, projection.size - 1));
     setTextSelection(position);
     focusInput();
@@ -491,6 +570,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     partEdit,
     pendingPartCaretVersion,
     setTextSelection,
+    yrsInputRef,
     yrsRootStory,
     yrsSession,
   ]);

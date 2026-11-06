@@ -66,6 +66,7 @@ function setup(partEdit: PartEdit | null = null) {
   const input = {
     focus: () => {},
     beginPointerSelection: () => true,
+    cancelPointerSelection: () => {},
     setSelectionFromDisplay: (anchor: number) => placed.push(anchor),
     selectWordAtDisplay: (position: number) => words.push(position),
     displaySelection: () => null,

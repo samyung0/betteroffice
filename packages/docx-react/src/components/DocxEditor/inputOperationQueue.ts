@@ -22,6 +22,14 @@ export class InputOperationQueue {
     });
   }
 
+  /**
+   * Later operations wait until `released` settles, which must not reject. A hold is
+   * no input: it reports nothing pending, though a flush waits for it.
+   */
+  hold(released: Promise<void>): void {
+    this.pending = this.pending.then(() => released);
+  }
+
   hasPending(): boolean {
     return this.pendingCount > 0;
   }

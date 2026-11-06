@@ -65,6 +65,10 @@ export interface YrsInputRef {
   isFocused(): boolean;
   flushPendingInput(): Promise<void>;
   beginPointerSelection(): boolean;
+  /** Ends the block of a pointer selection that turned out to place no caret. */
+  cancelPointerSelection(): void;
+  /** Input from now on waits until `released` settles, which must not reject. */
+  holdInput(released: Promise<void>): void;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -1366,6 +1370,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         pointerSelectionBlockedRef.current = true;
         setPointerSelectionBlocked(true);
         return !inputOperationQueueRef.current?.hasPending() && !composingRef.current && !compositionPendingRef.current;
+      },
+      cancelPointerSelection() {
+        pointerSelectionBlockedRef.current = false;
+        setPointerSelectionBlocked(false);
+      },
+      holdInput(released) {
+        inputOperationQueueRef.current?.hold(released);
       },
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
         if (pointerSelectionBlockedRef.current && (inputOperationQueueRef.current?.hasPending() || composingRef.current || compositionPendingRef.current)) return;
