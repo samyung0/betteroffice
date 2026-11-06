@@ -239,7 +239,7 @@ test('a ribbon host lays out the named controls, whatever is selected', () => {
   );
   expect(getByTestId('pptx-formatting-toolbar').dataset.layout).toBe('ribbon');
   expect(getByTestId('pptx-bold')).toBeTruthy();
-  expect(seen).toEqual(expect.arrayContaining(['fill', 'arrange', 'select', 'align']));
+  expect(seen).toEqual(expect.arrayContaining(['fill', 'select', 'align']));
 });
 
 test('every plain toolbar control is a named ribbon control or a menu command', () => {

@@ -2524,7 +2524,8 @@ function PptxEditorContent({
     const current = modelRef.current;
     if (!handle || !current || readOnly) return;
     try {
-      const index = current.slideIndex + 1;
+      // A deck with no slides takes its first at the start.
+      const index = current.snapshot.slides.length ? current.slideIndex + 1 : 0;
       const layout =
         layoutPartPath === undefined
           ? current.snapshot.slides[current.slideIndex]?.layoutPartPath ?? undefined

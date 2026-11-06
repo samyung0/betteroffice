@@ -334,3 +334,26 @@ test('an inserted image is the file prepareImage returns: one at a time, pending
     document.hasFocus = originalHasFocus;
   }
 });
+
+test("with the editor's view gone, a save exports what the session holds", async () => {
+  const { result } = renderHook(() =>
+    useFileIO({
+      pagedEditorRef: { current: null },
+      documentFromYrs: () => structuredClone(fixture),
+      displayList: null,
+      resolveImage: () => null,
+      documentName: 'doc',
+      onSave: undefined,
+      onError: (error) => {
+        throw error;
+      },
+      onOpen: undefined,
+      onPrint: undefined,
+      onDocumentNameChange: undefined,
+      loadBuffer: async () => {},
+      focusActiveEditor: () => {},
+    })
+  );
+  const bytes = await result.current.handleSave();
+  expect(bytes?.byteLength).toBeGreaterThan(0);
+});

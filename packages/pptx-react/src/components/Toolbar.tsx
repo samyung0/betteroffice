@@ -111,7 +111,6 @@ export interface SlideLayoutOption {
 /** What a ribbon host can lay out; its `RibbonControls` holds one node per name. */
 export const RIBBON_CONTROL_NAMES = [
   'align',
-  'arrange',
   'bold',
   'bulletedList',
   'clearFormatting',
@@ -1064,7 +1063,6 @@ export function Toolbar(explicitProps: ToolbarProps) {
       >
         {ribbon({
           align: alignDropdown,
-          arrange: arrangeDropdown,
           bold: inPlace.get('pptx-bold'),
           bulletedList: listButton('bullet'),
           clearFormatting: clearButton,

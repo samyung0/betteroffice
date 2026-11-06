@@ -1021,6 +1021,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     insertImageFile,
   } = useFileIO({
     pagedEditorRef,
+    documentFromYrs: yrsCore.documentFromYrs,
     displayList: canvasRenderer.displayList,
     resolveImage: canvasRenderer.resolveImage,
     documentName,

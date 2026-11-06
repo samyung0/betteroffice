@@ -1,3 +1,4 @@
+import type { Document } from '@betteroffice/docx/types/document';
 import { useCallback, useRef } from 'react';
 import {
   createDocx,
@@ -123,6 +124,7 @@ function printDisplayListPages(
  */
 export function useFileIO({
   pagedEditorRef,
+  documentFromYrs,
   displayList,
   resolveImage,
   documentName,
@@ -139,6 +141,8 @@ export function useFileIO({
   onImagePending,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  /** The session's document, with no view on it. */
+  documentFromYrs?: () => Document | null;
   displayList: DisplayList | null;
   resolveImage: ImageResolver;
   documentName: string | undefined;
@@ -163,9 +167,8 @@ export function useFileIO({
     async (): Promise<ArrayBuffer | null> => {
       try {
         const editor = pagedEditorRef.current;
-        if (!editor) return null;
-        const session = editor.getYrsSession();
-        await editor.flushPendingInput();
+        const session = editor?.getYrsSession();
+        await editor?.flushPendingInput();
         // The ref object is rebuilt on every repaint; the session is the document.
         const assertCurrent = () => {
           if (session !== pagedEditorRef.current?.getYrsSession()) {
@@ -173,7 +176,9 @@ export function useFileIO({
           }
         };
         assertCurrent();
-        const document = editor.getDocument();
+        // A render error took the view: the session still holds the document, and
+        // a host's rescue of the draft needs it.
+        const document = editor ? editor.getDocument() : (documentFromYrs?.() ?? null);
         if (!document) return null;
 
         // Comments live in the shared document; React state must not overwrite them.
@@ -198,7 +203,7 @@ export function useFileIO({
         return null;
       }
     },
-    [pagedEditorRef, onSave, onError]
+    [documentFromYrs, pagedEditorRef, onSave, onError]
   );
 
   const handleDirectPrint = useCallback(() => {
