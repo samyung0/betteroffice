@@ -3221,7 +3221,11 @@ function PptxEditorContent({
           </button>
         )}
         {remotePeers.length > 0 ? (
-          <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
+          <div
+            style={ribbon ? styles.ribbonPresence : styles.presenceStrip}
+            role="list"
+            aria-label="Collaborators"
+          >
             {toolbarPresence.visible.map((peer) => {
               const sameSlide = peer.state.cursor?.slideId === currentSlideId;
               return (
@@ -4198,6 +4202,14 @@ const styles: Record<string, CSSProperties> = {
     maxWidth: '35%',
     padding: '0 10px 0 2px',
     overflowX: 'auto',
+  },
+  ribbonPresence: {
+    position: 'absolute',
+    top: 4,
+    right: 36,
+    zIndex: 1,
+    display: 'flex',
+    gap: 4,
   },
   workspace: { display: 'flex', flex: 1, minHeight: 0 },
   narrowWorkspace: { display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 },
