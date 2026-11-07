@@ -1,6 +1,6 @@
 import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
-import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import type { FontDecoder } from '@betteroffice/fonts';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
 import {
   excludeHostedFontFamilies,

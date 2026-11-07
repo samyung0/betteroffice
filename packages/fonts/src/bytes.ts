@@ -49,6 +49,30 @@ function validateByteLength(
   return bytes;
 }
 
+/** Reads one bundled font file from disk (Node) or over the network. */
+export async function readFontBytes(
+  file: string,
+  url: URL,
+  timeoutMs?: number,
+): Promise<ArrayBuffer> {
+  const onDisk = readFileAsset(url);
+  if (onDisk) return onDisk;
+  const response = await fetch(
+    url,
+    timeoutMs === undefined
+      ? undefined
+      : {
+          signal: AbortSignal.timeout(timeoutMs),
+          credentials: 'omit',
+          referrerPolicy: 'no-referrer',
+        },
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+  }
+  return response.arrayBuffer();
+}
+
 /**
  * Loads in flight, so concurrent requests for one face share one buffer. A
  * settled load is dropped: the bytes live only as long as their consumer keeps
@@ -64,26 +88,8 @@ export function loadFontBytes(
   const key = `${url.href}|${face.byteLength}|${timeoutMs ?? ''}`;
   const cached = bytesCache.get(key);
   if (cached) return cached;
-  const promise = (async () => {
-    const onDisk = readFileAsset(url);
-    if (onDisk) return validateByteLength(face, onDisk);
-    const response = await fetch(
-      url,
-      timeoutMs === undefined
-        ? undefined
-        : {
-            signal: AbortSignal.timeout(timeoutMs),
-            credentials: 'omit',
-            referrerPolicy: 'no-referrer',
-          },
-    );
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch bundled font ${face.file}: HTTP ${response.status}`,
-      );
-    }
-    return validateByteLength(face, await response.arrayBuffer());
-  })();
+  const promise = (async () =>
+    validateByteLength(face, await readFontBytes(face.file, url, timeoutMs)))();
   const settle = () => {
     if (bytesCache.get(key) === promise) bytesCache.delete(key);
   };

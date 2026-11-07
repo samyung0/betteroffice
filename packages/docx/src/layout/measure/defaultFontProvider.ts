@@ -1,7 +1,7 @@
 /** Lazy default-font provider resolution. @packageDocumentation */
 
 import type { BundledFontLoader, BundledFontProvider } from './fontRegistry';
-import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import type { FontDecoder } from '@betteroffice/fonts';
 import { decodeFontFace } from '../../wasm/fontDecoder';
 
 export const IMPLICIT_FONT_COVERAGE = '@betteroffice/fonts/coverage';
