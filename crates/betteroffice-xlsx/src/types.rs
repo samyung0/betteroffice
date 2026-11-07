@@ -40,6 +40,9 @@ pub struct CellEdit {
     pub cell: CellRef,
     pub input: String,
     pub is_formula: bool,
+    /// The cell's effective style locks it: true unless that style's
+    /// protection says `locked="0"`. Only a protected sheet enforces it.
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +64,9 @@ pub struct SheetInfo {
     pub initial_scroll_y: f32,
     /// The active sheet's used range (its cells and hyperlinks), `None` when empty.
     pub used_range: Option<CellRange>,
+    /// The active sheet came from a source sheet that enables `sheetProtection`;
+    /// the editor refuses edits to its locked cells.
+    pub protected: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

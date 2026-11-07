@@ -96,6 +96,7 @@ struct SheetInfo {
     initial_scroll_x: f32,
     initial_scroll_y: f32,
     used_range: Option<CellRange>,
+    protected: bool,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +180,12 @@ struct CellPosition {
 struct RangeArgs {
     sheet: u32,
     range: String,
+}
+
+#[derive(Deserialize)]
+struct LockedArgs {
+    sheet: u32,
+    ranges: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -267,6 +274,7 @@ struct CellEdit {
     a1: String,
     input: String,
     is_formula: bool,
+    locked: bool,
 }
 
 #[derive(Serialize)]
@@ -706,6 +714,22 @@ impl Session {
         self.edit_result(result)
     }
 
+    /// `true` when the sheet is protected and a cell of the ranges is locked.
+    pub fn locked_in_ranges_json(&self, args: &str) -> Result<String, String> {
+        let args: LockedArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad locked args: {error}"))?;
+        let ranges = args
+            .ranges
+            .iter()
+            .map(|range| parse_range(range))
+            .collect::<Result<Vec<_>, _>>()?;
+        let locked = self
+            .workbook
+            .locked_in_ranges(SheetId(args.sheet), &ranges)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&locked).map_err(|error| error.to_string())
+    }
+
     pub fn check_clear_contents_json(&self, args: &str) -> Result<(), String> {
         let args: ClearArgs =
             serde_json::from_str(args).map_err(|error| format!("bad clear args: {error}"))?;
@@ -771,6 +795,7 @@ impl Session {
             a1: cell.cell.to_a1(),
             input: cell.input,
             is_formula: cell.is_formula,
+            locked: cell.locked,
         })
         .map_err(|error| error.to_string())
     }
@@ -838,6 +863,7 @@ impl Session {
                         a1: cell.cell.to_a1(),
                         input: cell.input,
                         is_formula: cell.is_formula,
+                        locked: cell.locked,
                     })
                     .collect()
             })
@@ -1041,6 +1067,7 @@ impl Session {
                 initial_scroll_x: info.initial_scroll_x,
                 initial_scroll_y: info.initial_scroll_y,
                 used_range: info.used_range,
+                protected: info.protected,
             })
             .map_err(|error| error.to_string())
     }
@@ -1264,6 +1291,85 @@ mod tests {
                 CellValue::Number { value: 5.0 }
             );
         }
+    }
+
+    /// The editor's reads for protected sheets: `protected` in the sheet info
+    /// (the active sheet), `locked` in the cell and range reads.
+    #[test]
+    fn sheet_info_says_protected_and_cell_reads_say_locked() {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::parse_a1("B1").unwrap(),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                formula: None,
+                style: Some(1),
+            },
+        );
+        let mut model = WorkbookModel::default();
+        model.sheets.push(Sheet::new("Open"));
+        model.sheets.push(sheet);
+        model.styles.cell_xfs = vec![
+            xlsx_model::Xf::default(),
+            xlsx_model::Xf {
+                protection: Some(xlsx_model::styles::Protection {
+                    locked: false,
+                    hidden: false,
+                }),
+                ..xlsx_model::Xf::default()
+            },
+        ];
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let data = &mut parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/worksheets/sheet2.xml")
+            .unwrap()
+            .1;
+        *data = String::from_utf8(data.clone())
+            .unwrap()
+            .replace(
+                "</sheetData>",
+                r#"</sheetData><sheetProtection sheet="1"/>"#,
+            )
+            .into_bytes();
+        let mut session = Session::open(&ooxml_opc::rezip_parts(&parts).unwrap(), None).unwrap();
+        assert!(
+            session
+                .sheet_info_json()
+                .unwrap()
+                .contains(r#""protected":false"#)
+        );
+        session.set_active_sheet(1).unwrap();
+        assert!(
+            session
+                .sheet_info_json()
+                .unwrap()
+                .contains(r#""protected":true"#)
+        );
+        let cell = |row, col| {
+            session
+                .cell_json(&format!(r#"{{"sheet":1,"row":{row},"col":{col}}}"#))
+                .unwrap()
+        };
+        assert!(cell(0, 0).contains(r#""locked":true"#));
+        assert!(cell(0, 1).contains(r#""locked":false"#));
+        let range = session
+            .range_cells_json(r#"{"sheet":1,"range":"A1:B1"}"#)
+            .unwrap();
+        assert!(range.contains(r#""a1":"A1","input":"","isFormula":false,"locked":true"#));
+        assert!(range.contains(r#""a1":"B1","input":"1","isFormula":false,"locked":false"#));
+        let locked = |args: &str| session.locked_in_ranges_json(args).unwrap();
+        assert_eq!(locked(r#"{"sheet":1,"ranges":["B1"]}"#), "false");
+        assert_eq!(
+            locked(r#"{"sheet":1,"ranges":["B1","A1:A1048576"]}"#),
+            "true"
+        );
+        assert_eq!(locked(r#"{"sheet":0,"ranges":["A1:XFD1048576"]}"#), "false");
+        assert!(
+            session
+                .locked_in_ranges_json(r#"{"sheet":1,"ranges":["A:A"]}"#)
+                .is_err()
+        );
     }
 
     fn formula_xlsx() -> Vec<u8> {

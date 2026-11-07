@@ -351,6 +351,15 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    /// `{"sheet","ranges":[A1 ranges]}`: a JSON `true` when the sheet is
+    /// protected and a cell of the ranges is locked; changes nothing.
+    #[wasm_bindgen(js_name = lockedInRangesJson)]
+    pub fn locked_in_ranges_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .locked_in_ranges_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// the "edit too large" error `clearContentsJson` would give, or nothing;
     /// changes nothing.
     #[wasm_bindgen(js_name = checkClearContentsJson)]

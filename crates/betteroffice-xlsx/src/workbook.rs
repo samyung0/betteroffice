@@ -1408,6 +1408,7 @@ impl Workbook {
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
             used_range: bounds,
+            protected: self.sheet_protected(self.active_sheet),
         };
         *slot = Some(SheetInfoCache {
             info: info.clone(),
@@ -1493,10 +1494,17 @@ impl Workbook {
             },
             None => (String::new(), false),
         };
+        let locked = self
+            .model
+            .styles
+            .resolved_format(Some(sheet_ref.effective_style(cell).unwrap_or(0)))
+            .protection
+            .is_none_or(|protection| protection.locked);
         Ok(CellEdit {
             cell,
             input,
             is_formula,
+            locked,
         })
     }
 
@@ -2839,6 +2847,95 @@ impl Workbook {
         } else {
             package.reference_moved_by_cols(name, at).is_some()
         }
+    }
+
+    /// Whether `sheet` is protected and a cell of `ranges` is locked by its
+    /// effective style. Answered from the stored cells in the ranges and the row
+    /// and column defaults, not cell by cell, so whole rows and columns are cheap.
+    pub fn locked_in_ranges(&self, sheet: SheetId, ranges: &[CellRange]) -> Result<bool> {
+        let sheet_ref = self.sheet(sheet)?;
+        if !self.sheet_protected(sheet) {
+            return Ok(false);
+        }
+        let styles = &self.model.styles;
+        let locked = |style: Option<u32>| {
+            styles
+                .resolved_format(Some(style.unwrap_or(0)))
+                .protection
+                .is_none_or(|protection| protection.locked)
+        };
+        let runs = sheet_ref.col_style_runs();
+        for range in ranges {
+            // the range's columns as runs of one default style, gaps without one
+            let mut segments = Vec::new();
+            let mut next = range.start.col;
+            for run in runs
+                .iter()
+                .filter(|run| run.last >= range.start.col && run.first <= range.end.col)
+            {
+                if run.first > next {
+                    segments.push((next, run.first - 1, None));
+                }
+                let last = run.last.min(range.end.col);
+                segments.push((run.first.max(next), last, Some(run.xf)));
+                next = last + 1;
+            }
+            if next <= range.end.col {
+                segments.push((next, range.end.col, None));
+            }
+            let styled_rows: BTreeMap<u32, u32> = sheet_ref
+                .row_styles
+                .range(range.start.row..=range.end.row)
+                .map(|(&row, &style)| (row, style))
+                .collect();
+            // a stored cell takes its own style; count the rest by the default
+            // a missing cell beside them would take
+            let mut in_styled_rows: HashMap<u32, u64> = HashMap::new();
+            let mut in_segments = vec![0_u64; segments.len()];
+            for (at, cell) in sheet_ref.cells_in_range(*range) {
+                if locked(cell.style) {
+                    return Ok(true);
+                }
+                if styled_rows.contains_key(&at.row) {
+                    *in_styled_rows.entry(at.row).or_default() += 1;
+                } else {
+                    in_segments[segments.partition_point(|&(_, last, _)| last < at.col)] += 1;
+                }
+            }
+            let width = u64::from(range.end.col - range.start.col) + 1;
+            if styled_rows.iter().any(|(row, &style)| {
+                locked(Some(style)) && in_styled_rows.get(row).copied().unwrap_or(0) < width
+            }) {
+                return Ok(true);
+            }
+            let unstyled_rows =
+                u64::from(range.end.row - range.start.row) + 1 - styled_rows.len() as u64;
+            if segments
+                .iter()
+                .zip(&in_segments)
+                .any(|(&(first, last, style), &stored)| {
+                    locked(style) && stored < unstyled_rows * (u64::from(last - first) + 1)
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether `sheet` came from a source sheet that enables `sheetProtection`,
+    /// through sheet adds and removals; a sheet added since has none.
+    fn sheet_protected(&self, sheet: SheetId) -> bool {
+        self.preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|origin| {
+                self.source_package
+                    .as_ref()
+                    .is_some_and(|package| package.source_sheet_is_protected(origin))
+            })
     }
 
     /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
