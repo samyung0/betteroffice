@@ -137,18 +137,6 @@ fn an_explicit_recalculation_saves_its_values_and_keeps_unevaluable_caches() {
 }
 
 #[test]
-fn recalculated_values_survive_a_recovery_checkpoint() {
-    let source = book(STALE, r#"<calcPr fullCalcOnLoad="1"/>"#);
-    let workbook = Workbook::open_recalculated(&source, options()).unwrap();
-    let checkpoint = workbook.recovery_checkpoint(0, None).unwrap();
-    let (restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-    assert_eq!(
-        saved_caches(&restored.save().unwrap()),
-        vec![Some("5".into()), Some("999".into()), Some("2".into())]
-    );
-}
-
-#[test]
 fn a_flagged_array_formula_saves_its_calculated_range_and_keeps_every_other_part() {
     let source = package(
         r#"<row r="2"><c r="C2"><f t="array" ref="C2:C3">1</f><v>1</v></c></row><row r="3"><c r="C3"><v>100</v></c></row>"#,

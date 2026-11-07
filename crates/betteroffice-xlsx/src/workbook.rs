@@ -24,6 +24,7 @@ use xlsx_ops::{
     StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
     insertion_keeps_chart_anchor_on_grid,
 };
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula, saves_as};
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
     autofit_relevant, build_display_list_with_geometry, build_print_display_list_with_charts,
@@ -326,6 +327,9 @@ pub struct Workbook {
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
+    /// The values `recalculate_at_open` produced; saved only when the source
+    /// asks for a full calculation on load.
+    recalculated_at_open: bool,
     moved_references_since_open: bool,
     active_sheet: SheetId,
     source_active_sheet: SheetId,
@@ -444,10 +448,14 @@ impl Workbook {
     }
 
     /// The recalculation at open shows current values without counting as an
-    /// edit, so a save without edits keeps the file's cached values.
+    /// edit, so a save without edits keeps the file's cached values, unless the
+    /// file asks for a full calculation on load (`calcPr` `fullCalcOnLoad` or
+    /// `forceFullCalc`) and holds a formula. Formulas the engine cannot
+    /// evaluate keep their cached results either way.
     fn recalculate_at_open(&mut self, options: CalculationOptions) {
         self.rebuild_and_recalculate(options);
         self.edited_since_open = false;
+        self.recalculated_at_open = true;
     }
 
     pub fn from_model(model: WorkbookModel) -> Result<Self> {
@@ -573,6 +581,7 @@ impl Workbook {
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
             edited_since_open: false,
+            recalculated_at_open: false,
             moved_references_since_open: false,
             active_sheet,
             source_active_sheet: active_sheet,
@@ -1162,6 +1171,12 @@ impl Workbook {
                         self.preserved.shared_string_cells.as_slice(),
                     )
                 };
+                let recalculated =
+                    self.recalculated_at_open
+                        && package.requests_full_calculation()
+                        && self.model.sheets.iter().any(|sheet| {
+                            sheet.iter_cells().any(|(_, cell)| cell.formula.is_some())
+                        });
                 let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
@@ -1169,7 +1184,7 @@ impl Workbook {
                     shared_string_cells,
                     axes,
                     xlsx_parse::SaveEdits {
-                        changed: self.edited_since_open,
+                        changed: self.edited_since_open || recalculated,
                         moved_references: self.moved_references_since_open,
                     },
                     active_sheet,
@@ -1393,6 +1408,7 @@ impl Workbook {
             initial_scroll_x: content.initial_scroll_x,
             initial_scroll_y: content.initial_scroll_y,
             used_range: bounds,
+            protected: self.sheet_protected(self.active_sheet),
         };
         *slot = Some(SheetInfoCache {
             info: info.clone(),
@@ -1452,12 +1468,25 @@ impl Workbook {
         )))
     }
 
+    /// A formula shows without the storage prefixes Excel saves (`_xlfn.`,
+    /// `_xlpm.`, a leading `=` some producers store) where the save turns
+    /// the shown text back into exactly the stored text.
     pub fn cell(&self, sheet: SheetId, cell: CellRef) -> Result<CellEdit> {
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        self.cell_shown(sheet, cell, names.visible_from(Some(sheet)))
+    }
+
+    fn cell_shown(
+        &self,
+        sheet: SheetId,
+        cell: CellRef,
+        names: FormulaNames<'_>,
+    ) -> Result<CellEdit> {
         self.validate_cell(cell)?;
         let sheet_ref = self.sheet(sheet)?;
         let (input, is_formula) = match sheet_ref.cell(cell) {
             Some(stored) => match &stored.formula {
-                Some(formula) => (format!("={formula}"), true),
+                Some(formula) => (format!("={}", display_formula(formula, names)), true),
                 None => (
                     value_to_input(&self.model, sheet, cell, &stored.value),
                     false,
@@ -1465,10 +1494,17 @@ impl Workbook {
             },
             None => (String::new(), false),
         };
+        let locked = self
+            .model
+            .styles
+            .resolved_format(Some(sheet_ref.effective_style(cell).unwrap_or(0)))
+            .protection
+            .is_none_or(|protection| protection.locked);
         Ok(CellEdit {
             cell,
             input,
             is_formula,
+            locked,
         })
     }
 
@@ -1513,11 +1549,13 @@ impl Workbook {
 
     pub fn range_cells(&self, sheet: SheetId, range: CellRange) -> Result<Vec<Vec<CellEdit>>> {
         let (rows, cols) = self.validate_bounded_range(sheet, range)?;
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let names = names.visible_from(Some(sheet));
         let mut cells = Vec::with_capacity(rows as usize);
         for row in range.start.row..=range.end.row {
             let mut row_cells = Vec::with_capacity(cols as usize);
             for col in range.start.col..=range.end.col {
-                row_cells.push(self.cell(sheet, CellRef::new(row, col))?);
+                row_cells.push(self.cell_shown(sheet, CellRef::new(row, col), names)?);
             }
             cells.push(row_cells);
         }
@@ -1654,13 +1692,12 @@ impl Workbook {
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        // a missing cell in a styled row or column captures that style
+        let mut defaults =
+            xlsx_model::workbook::ColumnDefaults::new(&self.model.sheets[sheet.0 as usize]);
         let source_styles: Vec<_> = formats
             .iter()
-            .map(|(at, _)| {
-                self.model.sheets[sheet.0 as usize]
-                    .cell(*at)
-                    .and_then(|cell| cell.style)
-            })
+            .map(|(at, _)| defaults.effective_style(*at))
             .collect();
         Ok(CapturedFormat {
             rows: rows as u32,
@@ -1752,7 +1789,9 @@ impl Workbook {
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
         self.validate_target(sheet, cell)?;
-        let (state, format) = edit_cell_state(&self.model, sheet, cell, input, options.now_serial);
+        let names = DefinedFunctionNames::new(&self.model.defined_names);
+        let (state, format) =
+            edit_cell_state(&self.model, &names, sheet, cell, input, options.now_serial);
         if typed
             && state.formula.is_none()
             && input.starts_with('=')
@@ -1864,10 +1903,17 @@ impl Workbook {
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
         let mut per_op = Vec::with_capacity(edits.len());
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in edits {
             self.validate_cell(edit.cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, edit.cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                edit.cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             let old = current_cell_state(&preview, sheet, edit.cell);
             if format.is_none() && cell_states_semantically_equal(&old, &state) {
@@ -1937,7 +1983,7 @@ impl Workbook {
 
     fn apply_ops_marked(
         &mut self,
-        ops: Vec<Op>,
+        mut ops: Vec<Op>,
         options: CalculationOptions,
         mark: &mut dyn FnMut(EditStage),
     ) -> Result<MutationResult> {
@@ -1948,7 +1994,10 @@ impl Workbook {
         let mut preview = self.model.clone();
         let mut names = self.sheet_names();
         let mut per_op = Vec::with_capacity(ops.len());
-        for op in &ops {
+        let defined = DefinedFunctionNames::new(&preview.defined_names);
+        for op in &mut ops {
+            keep_stored_formula(&preview, &defined, op);
+            let op = &*op;
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet(sheet)?;
             }
@@ -1994,8 +2043,9 @@ impl Workbook {
             self.proposals.clear();
         }
         mark(EditStage::Applied);
-        // A format changes no value, so an exact calculation stands, as in Excel.
-        if formats_only && exact {
+        // A format changes no value, so an exact calculation stands, as in Excel,
+        // unless the workbook calculates with precision as displayed.
+        if formats_only && exact && self.model.full_precision {
             self.exact_epoch = Some(self.model_epoch);
             mark(EditStage::Recalculated);
             return Ok(MutationResult {
@@ -2208,20 +2258,30 @@ impl Workbook {
         options: CalculationOptions,
     ) -> Result<Proposal> {
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &request.edits {
             self.validate_target(edit.sheet, edit.cell)?;
             let (state, format) = edit_cell_state(
                 &preview,
+                &names,
                 edit.sheet,
                 edit.cell,
                 &edit.input,
                 options.now_serial,
             );
             validate_cell_state(&state)?;
-            preview
-                .sheet_mut(edit.sheet)
-                .ok_or(Error::SheetOutOfRange(edit.sheet))?
-                .set_cell(edit.cell, state.into());
+            // an unchanged re-commit keeps the cell's cached value
+            if format.is_some()
+                || !cell_states_semantically_equal(
+                    &current_cell_state(&preview, edit.sheet, edit.cell),
+                    &state,
+                )
+            {
+                preview
+                    .sheet_mut(edit.sheet)
+                    .ok_or(Error::SheetOutOfRange(edit.sheet))?
+                    .set_cell(edit.cell, state.into());
+            }
             if let Some(format) = format {
                 xlsx_ops::apply_in_place(&mut preview, &format)?;
             }
@@ -2302,12 +2362,19 @@ impl Workbook {
         let mut touched = Vec::with_capacity(proposal.edits.len());
         let mut ops = Vec::with_capacity(proposal.edits.len());
         let mut preview = self.model.clone();
+        let names = DefinedFunctionNames::new(&preview.defined_names);
         for edit in &proposal.edits {
             let sheet = SheetId(edit.sheet);
             let cell = CellRef::new(edit.row, edit.col);
             self.validate_target(sheet, cell)?;
-            let (state, format) =
-                edit_cell_state(&preview, sheet, cell, &edit.input, options.now_serial);
+            let (state, format) = edit_cell_state(
+                &preview,
+                &names,
+                sheet,
+                cell,
+                &edit.input,
+                options.now_serial,
+            );
             validate_cell_state(&state)?;
             if !cell_states_semantically_equal(&current_cell_state(&preview, sheet, cell), &state) {
                 preview
@@ -2780,6 +2847,95 @@ impl Workbook {
         } else {
             package.reference_moved_by_cols(name, at).is_some()
         }
+    }
+
+    /// Whether `sheet` is protected and a cell of `ranges` is locked by its
+    /// effective style. Answered from the stored cells in the ranges and the row
+    /// and column defaults, not cell by cell, so whole rows and columns are cheap.
+    pub fn locked_in_ranges(&self, sheet: SheetId, ranges: &[CellRange]) -> Result<bool> {
+        let sheet_ref = self.sheet(sheet)?;
+        if !self.sheet_protected(sheet) {
+            return Ok(false);
+        }
+        let styles = &self.model.styles;
+        let locked = |style: Option<u32>| {
+            styles
+                .resolved_format(Some(style.unwrap_or(0)))
+                .protection
+                .is_none_or(|protection| protection.locked)
+        };
+        let runs = sheet_ref.col_style_runs();
+        for range in ranges {
+            // the range's columns as runs of one default style, gaps without one
+            let mut segments = Vec::new();
+            let mut next = range.start.col;
+            for run in runs
+                .iter()
+                .filter(|run| run.last >= range.start.col && run.first <= range.end.col)
+            {
+                if run.first > next {
+                    segments.push((next, run.first - 1, None));
+                }
+                let last = run.last.min(range.end.col);
+                segments.push((run.first.max(next), last, Some(run.xf)));
+                next = last + 1;
+            }
+            if next <= range.end.col {
+                segments.push((next, range.end.col, None));
+            }
+            let styled_rows: BTreeMap<u32, u32> = sheet_ref
+                .row_styles
+                .range(range.start.row..=range.end.row)
+                .map(|(&row, &style)| (row, style))
+                .collect();
+            // a stored cell takes its own style; count the rest by the default
+            // a missing cell beside them would take
+            let mut in_styled_rows: HashMap<u32, u64> = HashMap::new();
+            let mut in_segments = vec![0_u64; segments.len()];
+            for (at, cell) in sheet_ref.cells_in_range(*range) {
+                if locked(cell.style) {
+                    return Ok(true);
+                }
+                if styled_rows.contains_key(&at.row) {
+                    *in_styled_rows.entry(at.row).or_default() += 1;
+                } else {
+                    in_segments[segments.partition_point(|&(_, last, _)| last < at.col)] += 1;
+                }
+            }
+            let width = u64::from(range.end.col - range.start.col) + 1;
+            if styled_rows.iter().any(|(row, &style)| {
+                locked(Some(style)) && in_styled_rows.get(row).copied().unwrap_or(0) < width
+            }) {
+                return Ok(true);
+            }
+            let unstyled_rows =
+                u64::from(range.end.row - range.start.row) + 1 - styled_rows.len() as u64;
+            if segments
+                .iter()
+                .zip(&in_segments)
+                .any(|(&(first, last, style), &stored)| {
+                    locked(style) && stored < unstyled_rows * (u64::from(last - first) + 1)
+                })
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether `sheet` came from a source sheet that enables `sheetProtection`,
+    /// through sheet adds and removals; a sheet added since has none.
+    fn sheet_protected(&self, sheet: SheetId) -> bool {
+        self.preserved
+            .origins
+            .get(sheet.0 as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|origin| {
+                self.source_package
+                    .as_ref()
+                    .is_some_and(|package| package.source_sheet_is_protected(origin))
+            })
     }
 
     /// Rejects edits aimed at a preserved chartsheet or dialogsheet.
@@ -4487,6 +4643,7 @@ fn written_cell_style(
 /// takes from it (a typed date, time, percentage or currency, as Excel does).
 fn edit_cell_state(
     workbook: &WorkbookModel,
+    names: &DefinedFunctionNames,
     sheet: SheetId,
     cell: CellRef,
     input: &str,
@@ -4501,7 +4658,24 @@ fn edit_cell_state(
         .number_format;
     let (parsed, inferred) =
         xlsx_ops::parse_input_with_context(input, number_format, workbook.date_system, now_serial);
-    let mut state = xlsx_ops::cell_state_from_parsed(input, parsed);
+    let kept = match &parsed {
+        xlsx_ops::ParsedInput::Formula(text) => kept_formula(workbook, sheet, cell, text),
+        _ => None,
+    };
+    let mut state = match kept {
+        Some(stored) => CellState {
+            formula: Some(stored.to_owned()),
+            ..CellState::default()
+        },
+        None => xlsx_ops::cell_state_from_parsed(input, parsed),
+    };
+    state.formula = state.formula.map(|typed| {
+        committed_formula(
+            typed,
+            stored_formula(workbook, sheet, cell),
+            names.visible_from(Some(sheet)),
+        )
+    });
     state.style = written_cell_style(workbook, sheet, cell, input.is_empty());
     let format = inferred.map(|id| {
         let mut format = workbook.styles.cell_format(Some(style.unwrap_or(0)));
@@ -4524,6 +4698,47 @@ fn edit_cell_state(
         }
     });
     (state, format)
+}
+
+fn stored_formula(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> Option<&str> {
+    workbook.sheet(sheet)?.cell(cell)?.formula.as_deref()
+}
+
+/// `typed`, or `stored` when `typed` saves as exactly that text with the
+/// defined `names` in its scope, so committing shown formula text unchanged
+/// leaves the stored text as it was.
+fn committed_formula(typed: String, stored: Option<&str>, names: FormulaNames<'_>) -> String {
+    match stored {
+        Some(stored) if typed != stored && saves_as(&typed, stored, names) => stored.to_owned(),
+        _ => typed,
+    }
+}
+
+/// An op that re-commits a cell formula in a form that saves as exactly the
+/// stored text keeps the stored text.
+fn keep_stored_formula(workbook: &WorkbookModel, names: &DefinedFunctionNames, op: &mut Op) {
+    if let Op::SetCell { sheet, at, cell } = op {
+        cell.formula = cell.formula.take().map(|typed| {
+            committed_formula(
+                typed,
+                stored_formula(workbook, *sheet, *at),
+                names.visible_from(Some(*sheet)),
+            )
+        });
+    }
+}
+
+/// The formula `cell` stores when `typed` is that text, or that text without
+/// the leading `=` some producers store; re-committing keeps it even when the
+/// engine cannot parse it.
+fn kept_formula<'a>(
+    workbook: &'a WorkbookModel,
+    sheet: SheetId,
+    cell: CellRef,
+    typed: &str,
+) -> Option<&'a str> {
+    stored_formula(workbook, sheet, cell)
+        .filter(|stored| *stored == typed || stored.strip_prefix('=') == Some(typed))
 }
 
 /// Whether a cell in `style` (none means xf 0) takes typed input as text (the Text number format).

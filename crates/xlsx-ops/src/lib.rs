@@ -31,6 +31,5 @@ pub use op::{CellState, Op, Provenance, Transaction};
 pub use proposals::{Proposal, ProposalGhost, ProposalSet, ProposedEdit};
 pub use remap::{
     LocatedReference, ReferenceAddress, formula_references, insertion_keeps_chart_anchor_on_grid,
-    remap_proposal_formula,
 };
 pub use undo::UndoStack;

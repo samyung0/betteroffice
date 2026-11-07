@@ -7,9 +7,6 @@ mod chart;
 mod facts_codec;
 mod formula;
 mod future_functions;
-mod header_footer;
-#[cfg(test)]
-mod header_footer_tests;
 mod inventory;
 mod package;
 mod package_facts;
@@ -37,10 +34,6 @@ pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_
 pub use formula::translate_formula;
 pub use future_functions::{
     DefinedFunctionNames, FormulaNames, display_formula, excel_formula, saves_as,
-};
-pub use header_footer::{
-    HeaderFooterPair, HeaderFooterText, SheetHeaderFooter, parse_header_footer,
-    parse_header_footer_text,
 };
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,

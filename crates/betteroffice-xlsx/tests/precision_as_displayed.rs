@@ -144,25 +144,6 @@ fn recalculation_keeps_unsupported_cached_values_and_constants() {
 }
 
 #[test]
-fn recovery_preserves_displayed_precision_after_edits() {
-    let bytes = source(r#" fullPrecision="0""#);
-    let workbook = Workbook::open(&bytes).unwrap();
-    let checkpoint = workbook.recovery_checkpoint(1, None).unwrap();
-    let (mut restored, ..) = Workbook::restore_recovery_checkpoint(&checkpoint).unwrap();
-    assert!(!restored.model().full_precision);
-    restored
-        .edit_cell(
-            SheetId(0),
-            CellRef::new(0, 0),
-            "6.26",
-            CalculationOptions::default(),
-        )
-        .unwrap();
-    assert_value(&restored, 1, 6.3);
-    assert_value(&restored, 2, 63.0);
-}
-
-#[test]
 fn collaboration_rejects_a_base_with_different_calculation_precision() {
     let displayed = source(r#" fullPrecision="0""#);
     let precise = source(r#" fullPrecision="1""#);

@@ -1,8 +1,11 @@
+//! upstream #2135 with its engine glue on Capy's engine: re-committed formulas
+//! stay formulas (references into other workbooks, a stored leading `=`).
+//! Upstream's agent batch steps become Capy's cell edits and `SetCell` ops.
+
 use betteroffice_xlsx::{
-    CalculationOptions, CellInput, CellRef, CellState, CellValue, EditRequest, Op,
-    ProposalEditInput, ProposalRequest, SheetId, Workbook,
+    CalculationOptions, CellInput, CellRef, CellState, CellValue, Op, ProposalEditInput,
+    ProposalRequest, SheetId, Workbook,
 };
-use serde_json::{Value, json};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -78,30 +81,34 @@ fn recommit_all(workbook: &mut Workbook, addresses: &[&str]) {
     workbook.edit_cells(SheetId(0), &inputs, options()).unwrap();
 }
 
-fn apply(workbook: &mut Workbook, steps: Value) {
-    let request: EditRequest =
-        serde_json::from_value(json!({ "expectVersion": workbook.version(), "steps": steps }))
-            .unwrap();
-    workbook
-        .apply_edits(&request)
+/// an explicit formula write: the cell keeps its value and style.
+fn set_formula(workbook: &mut Workbook, address: &str, source: &str) {
+    let current = workbook
+        .sheet(SheetId(0))
         .unwrap()
-        .expect("the batch applies");
+        .cell(cell(address))
+        .cloned()
+        .unwrap_or_default();
+    workbook
+        .apply_ops(
+            vec![Op::SetCell {
+                sheet: SheetId(0),
+                at: cell(address),
+                cell: CellState {
+                    value: current.value,
+                    formula: Some(source.into()),
+                    style: current.style,
+                },
+            }],
+            options(),
+        )
+        .unwrap();
 }
 
-fn set_formula(address: &str, source: &str) -> Value {
-    json!({
-        "op": "setFormulas",
-        "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": address } },
-        "formulas": [[source]],
-    })
-}
-
-fn set_input(address: &str, input: &str) -> Value {
-    json!({
-        "op": "setCellInputs",
-        "target": { "sheetId": "sheet:0", "range": { "kind": "a1", "a1": address } },
-        "inputs": [[input]],
-    })
+fn set_input(workbook: &mut Workbook, address: &str, input: &str) {
+    workbook
+        .edit_cell(SheetId(0), cell(address), input, options())
+        .unwrap();
 }
 
 const EXTERNAL: &[(&str, &str, f64)] = &[
@@ -126,7 +133,6 @@ fn external_references_recommit_as_the_stored_formulas() {
     let source = external_book("");
     let addresses: Vec<&str> = EXTERNAL.iter().map(|(address, ..)| *address).collect();
     let mut workbook = Workbook::open(&source).unwrap();
-    let version = workbook.version();
     for (address, formula, _) in EXTERNAL {
         assert_eq!(shown(&workbook, address), format!("={formula}"));
     }
@@ -143,7 +149,7 @@ fn external_references_recommit_as_the_stored_formulas() {
             (Some((*formula).to_owned()), number(*cached))
         );
     }
-    assert_eq!(workbook.version(), version);
+    assert!(!workbook.can_undo());
     assert_eq!(workbook.save().unwrap(), source);
 }
 
@@ -151,20 +157,11 @@ fn external_references_recommit_as_the_stored_formulas() {
 fn external_references_recommit_unchanged_through_batches() {
     let source = external_book("");
     let mut workbook = Workbook::open(&source).unwrap();
-    let version = workbook.version();
-    let steps: Vec<Value> = EXTERNAL
-        .iter()
-        .flat_map(|(address, formula, _)| {
-            [
-                set_formula(address, formula),
-                set_input(address, &format!("={formula}")),
-            ]
-        })
-        .collect();
-    for step in steps {
-        apply(&mut workbook, json!([step]));
+    for (address, formula, _) in EXTERNAL {
+        set_formula(&mut workbook, address, formula);
+        set_input(&mut workbook, address, &format!("={formula}"));
     }
-    assert_eq!(workbook.version(), version);
+    assert!(!workbook.can_undo());
     assert_eq!(workbook.save().unwrap(), source);
 }
 
@@ -263,10 +260,7 @@ fn quoted_external_references_keep_cached_values_and_enter_blank() {
     workbook
         .edit_cell(SheetId(0), cell("A2"), "='[1]Other sheet'!C3*2", options())
         .unwrap();
-    apply(
-        &mut workbook,
-        json!([set_formula("B2", "IFERROR('[1]Data'!A1,0)")]),
-    );
+    set_formula(&mut workbook, "B2", "IFERROR('[1]Data'!A1,0)");
     workbook.recalculate_all(options());
     assert_eq!(
         stored(&workbook, "A2"),
@@ -307,7 +301,7 @@ fn external_references_through_defined_names_keep_cached_values() {
     workbook
         .edit_cell(SheetId(0), cell("A2"), "=IFERROR(Chain,0)", options())
         .unwrap();
-    apply(&mut workbook, json!([set_formula("B2", "Plain*2")]));
+    set_formula(&mut workbook, "B2", "Plain*2");
     workbook.recalculate_all(options());
     assert_eq!(
         stored(&workbook, "A2"),
@@ -328,7 +322,7 @@ fn typed_external_references_are_formulas_that_open_nothing() {
     workbook
         .edit_cell(SheetId(0), cell("B2"), "=SUM([3]Data!A1:A9)", options())
         .unwrap();
-    apply(&mut workbook, json!([set_formula("C2", "[1]!Rate*A1")]));
+    set_formula(&mut workbook, "C2", "[1]!Rate*A1");
     assert_eq!(
         stored(&workbook, "A2"),
         (Some("[1]Sheet1!B2*2".into()), CellValue::Empty)
@@ -373,7 +367,7 @@ fn typed_external_references_are_formulas_that_open_nothing() {
             .edit_cell(SheetId(0), cell("E2"), &format!("={formula}"), options())
             .unwrap();
         assert_eq!(stored(&workbook, "E2").0.as_deref(), Some(formula));
-        apply(&mut workbook, json!([set_formula("F2", formula)]));
+        set_formula(&mut workbook, "F2", formula);
         assert_eq!(stored(&workbook, "F2").0.as_deref(), Some(formula));
     }
     workbook
@@ -407,7 +401,6 @@ const LEADING_EQUALS: &str = concat!(
 fn formulas_stored_with_a_leading_equals_show_one_and_recommit_unchanged() {
     let source = package(LEADING_EQUALS, "");
     let mut workbook = Workbook::open(&source).unwrap();
-    let version = workbook.version();
     assert_eq!(shown(&workbook, "B1"), "=A1*2");
     assert_eq!(
         shown(&workbook, "C1"),
@@ -420,10 +413,10 @@ fn formulas_stored_with_a_leading_equals_show_one_and_recommit_unchanged() {
             .edit_cell(SheetId(0), cell(address), &input, options())
             .unwrap();
     }
-    apply(&mut workbook, json!([set_formula("B1", "A1*2")]));
-    apply(&mut workbook, json!([set_input("B1", "=A1*2")]));
+    set_formula(&mut workbook, "B1", "A1*2");
+    set_input(&mut workbook, "B1", "=A1*2");
     assert_eq!(stored(&workbook, "B1"), (Some("=A1*2".into()), number(0.0)));
-    assert_eq!(workbook.version(), version);
+    assert!(!workbook.can_undo());
     assert_eq!(workbook.save().unwrap(), source);
 }
 
@@ -478,7 +471,7 @@ fn typing_a_formula_into_a_text_formatted_cell_enters_text_as_excel_does() {
     assert_eq!(stored(&workbook, "B1"), (None, text.clone()));
 
     let mut workbook = Workbook::open(&source).unwrap();
-    apply(&mut workbook, json!([set_input("B1", "=A1*2")]));
+    set_input(&mut workbook, "B1", "=A1*2");
     assert_eq!(stored(&workbook, "B1"), (None, text));
 }
 
@@ -486,12 +479,11 @@ fn typing_a_formula_into_a_text_formatted_cell_enters_text_as_excel_does() {
 fn explicit_formula_writes_ignore_a_text_number_format() {
     let source = package(TEXT_FORMATTED, "");
     let mut workbook = Workbook::open(&source).unwrap();
-    let version = workbook.version();
-    apply(&mut workbook, json!([set_formula("B1", "A1*2")]));
-    assert_eq!(workbook.version(), version);
+    set_formula(&mut workbook, "B1", "A1*2");
+    assert!(!workbook.can_undo());
     assert_eq!(workbook.save().unwrap(), source);
 
-    apply(&mut workbook, json!([set_formula("B1", "A1*3")]));
+    set_formula(&mut workbook, "B1", "A1*3");
     assert_eq!(stored(&workbook, "B1"), (Some("A1*3".into()), number(63.0)));
 
     workbook
