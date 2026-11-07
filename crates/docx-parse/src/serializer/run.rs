@@ -403,7 +403,7 @@ fn serialize_run_content(
             }
             writer.end_element();
         }
-        RunContent::Chart { chart } => {
+        RunContent::Chart { chart, .. } => {
             let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
                 ParseError::Canonical("chart run carries no drawing to replay".to_owned())
             })?;

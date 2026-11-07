@@ -270,7 +270,7 @@ fn draw_text(
     }
     let letter_spacing = optional_number(run.letter_spacing.as_ref())?.unwrap_or(0.0) as f32;
     let word_spacing = optional_number(run.word_spacing.as_ref())?.unwrap_or(0.0) as f32;
-    let (font_id, size, glyphs) = fonts
+    let (size, runs) = fonts
         .shape_fallback(
             &text,
             &run.font,
@@ -280,9 +280,6 @@ fn draw_text(
             word_spacing,
         )
         .map_err(|error| error.to_string())?;
-    let face = fonts
-        .face(font_id)
-        .ok_or_else(|| format!("text fallback font id {font_id} is unavailable"))?;
     let x = number(&run.x)?;
     let baseline = number(&run.baseline_y)?;
     let width = number(&run.width)?.max(0.0);
@@ -297,13 +294,18 @@ fn draw_text(
         run.rotation_deg.as_ref(),
         run.horizontal_scale.as_ref(),
     )?;
-    scene
-        .draw_glyphs(&face.data)
-        .font_size(size)
-        .brush(color(&run.color, 1.0)?)
-        .brush_alpha(opacity)
-        .transform(visual * Affine::translate((x, baseline)))
-        .draw(Fill::NonZero, glyphs.into_iter());
+    for (font_id, glyphs) in runs {
+        let face = fonts
+            .face(font_id)
+            .ok_or_else(|| format!("text fallback font id {font_id} is unavailable"))?;
+        scene
+            .draw_glyphs(&face.data)
+            .font_size(size)
+            .brush(color(&run.color, 1.0)?)
+            .brush_alpha(opacity)
+            .transform(visual * Affine::translate((x, baseline)))
+            .draw(Fill::NonZero, glyphs.into_iter());
+    }
     Ok(())
 }
 
@@ -965,9 +967,8 @@ mod tests {
         let (watermark, header, footer, behind, front, separator, note) = (
             "#cc0000", "#00cc00", "#0000cc", "#cccc00", "#000000", "#cc00cc", "#00cccc",
         );
-        let rect = |fill: &str| {
-            serde_json::json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":fill})
-        };
+        let rect =
+            |fill: &str| serde_json::json!({"kind":"rect","x":0,"y":0,"w":20,"h":20,"fill":fill});
         let mut page: DisplayPage = serde_json::from_value(serde_json::json!({
             "pageIndex": 0, "width": 20, "height": 20,
             "primitives": [rect(watermark), rect(behind), rect(front)],

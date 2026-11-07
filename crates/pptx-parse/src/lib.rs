@@ -8,11 +8,13 @@ mod comments;
 mod custom_geometry;
 mod drawing;
 mod error;
+mod fmath;
 mod inventory;
 mod model;
 mod notes;
 mod package;
 mod relationships;
+mod slide_splice;
 mod table_style;
 mod theme;
 mod write;
@@ -23,6 +25,7 @@ pub use comments::{
     Comment, CommentAuthor, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
     CommentsWrite,
 };
+pub use drawing::text_paragraph_properties;
 pub use error::PptxError;
 pub use inventory::{
     MediaKind, NotesSource, OmittedElement, OmittedInline, SlideSource, SourceShape,

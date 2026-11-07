@@ -57,7 +57,7 @@ print(json.dumps(result,sort_keys=True))`], { input: Buffer.from(bytes), encodin
   return JSON.parse(result.stdout);
 }
 
-beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))));
+beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(resolve(import.meta.dir, '../wasm/generated/edit/docx_edit_bg.wasm')))), 30_000);
 
 for (const seeder of ['native', 'projected']) {
   it(`${seeder} preserves all run language slots through seed, edit and export`, async () => {

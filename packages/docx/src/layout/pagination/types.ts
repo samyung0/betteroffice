@@ -162,6 +162,7 @@ export type RunFormatting = {
   changeDate?: string;
   /** Revision ID of the tracked change (for sidebar matching) */
   changeRevisionId?: number;
+  formatChange?: { author: string; date: string; revisionId: string; kind: 'format' };
   /** Logical source-order index, independent of bidi visual paint order. */
   logicalOrder?: number;
   /** Resolved Unicode bidi embedding level. Undefined = resolve downstream. */
@@ -366,6 +367,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeAuto?: boolean;
+  afterAuto?: boolean;
   beforeLines?: number;
   afterLines?: number;
   before?: number;
@@ -433,6 +436,7 @@ export type ListNumPr = {
  * w:pPr plus resolved list/numbering state).
  */
 export type ParagraphAttrs = {
+  leadingInlineBox?: { width: number; height: number };
   alignment?: 'left' | 'center' | 'right' | 'justify';
   spacing?: ParagraphSpacing;
   /** See ParagraphFormatting.spacingExplicit. */

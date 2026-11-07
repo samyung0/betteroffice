@@ -17,6 +17,7 @@ mod coercion;
 pub mod deps;
 pub mod engine;
 pub mod eval;
+mod fmath;
 pub mod functions;
 pub mod graph;
 pub mod lexer;
@@ -25,7 +26,7 @@ pub mod printer;
 mod reference;
 
 pub use array::{Array, MAX_ARRAY_CELLS, Spill, Value, evaluate_array, evaluate_spill};
-pub use deps::references;
+pub use deps::{reads_other_workbook, references};
 pub use engine::{
     RecalcJournal, RecalcResult, rebuild_and_recalc_all, rebuild_and_recalc_all_with_seed,
     recalc_after, recalc_after_reversible, recalc_after_with_recomputed, recalc_after_with_seed,

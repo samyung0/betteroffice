@@ -589,6 +589,41 @@ describe('PPTX canvas replay', () => {
     expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05b8\u05d1', x: 50 }]);
   });
 
+  test('keeps a right-to-left run whole when its second cluster opens with a dots glyph', async () => {
+    const run = syntheticPositionedRun('\u0648\u062a\u0645', [
+      [0, 135, 11], [1, 135, 0], [1, 127, 8], [2, 114, 13],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u0648\u062a\u0645', x: 114 }]);
+  });
+
+  test('keeps a right-to-left run whole when its second cluster opens with a point', async () => {
+    const run = syntheticPositionedRun('\u05d0\u05d1\u05b8\u05d2', [
+      [0, 90], [1, 90, 0], [1, 80], [3, 70],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: '\u05d0\u05d1\u05b8\u05d2', x: 70 }]);
+  });
+
+  test('reads a right-to-left run past a zero-width second cluster', async () => {
+    const run = syntheticPositionedRun('בָ​אב', [
+      [0, 90, 0], [0, 80], [2, 80, 0], [3, 70], [4, 60],
+    ]);
+    expect((await paintPositionedRun(run)).calls).toEqual([
+      { text: 'בָ​אב', x: 60 },
+    ]);
+    const rounded = syntheticPositionedRun('בָ​אב', [
+      [0, 57.912, 0], [0, 47.9119987487793], [2, 47.91200256347656, 0], [3, 37.912], [4, 27.912],
+    ]);
+    expect((await paintPositionedRun(rounded)).calls).toEqual([
+      { text: 'בָ​אב', x: 27.912 },
+    ]);
+  });
+
+  test('keeps a left-to-right run whose second cluster opens with a zero-width glyph', async () => {
+    const run = syntheticPositionedRun('ab', [[0, 40], [1, 50, 0], [1, 50]]);
+    run.width = 20;
+    expect((await paintPositionedRun(run)).calls).toEqual([{ text: 'ab', x: 40 }]);
+  });
+
   test('scales a word to the width the layout gave it when the browser draws it narrower', async () => {
     const calls: unknown[] = [];
     const state: Record<string, unknown> = {
@@ -617,6 +652,24 @@ describe('PPTX canvas replay', () => {
     run.width = 50;
     await paintPositionedRun(run, state);
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
+  });
+
+  test('positions proportional Japanese kana at table advances without scaling their outlines', async () => {
+    for (const family of ['MS UI Gothic', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS PMincho', 'ＭＳ Ｐ明朝']) {
+      const advance = family === 'MS UI Gothic' ? 13.056
+        : family.includes('Mincho') || family.includes('明朝') ? 14.128 : 15.056;
+      const run = syntheticPositionedRun('ああ中', [
+        [0, 40, advance], [1, 40 + advance, advance], [2, 40 + 2 * advance, 16],
+      ]);
+      run.fontFamily = family;
+      run.fontSizePx = 16;
+      run.width = 2 * advance + 16;
+      const { calls, scales } = await fittedPositionedRun(run, 16);
+      expect(calls).toEqual([
+        { text: 'あ', x: 40 }, { text: 'あ', x: 40 + advance }, { text: '中', x: 40 + 2 * advance },
+      ]);
+      expect(scales).toEqual([1, 1, 1]);
+    }
   });
 
   test('paints named family width departures at each glyph position without scaling', async () => {
@@ -685,13 +738,13 @@ describe('PPTX canvas replay', () => {
     expect(scales[0]).toBeCloseTo(1, 6);
   });
 
-  async function fittedPositionedRun(run: PositionedTextRun) {
+  async function fittedPositionedRun(run: PositionedTextRun, naturalAdvance = 8) {
     const calls: Array<{ text: string; x: number }> = [];
     const scales: number[] = [];
     let x = 0;
     let scale = 1;
     const state: Record<string, unknown> = {
-      measureText: (text: string) => ({ width: text.length * 8 }),
+      measureText: (text: string) => ({ width: text.length * naturalAdvance }),
       translate: (value: number) => { x = value; },
       scale: (value: number) => { scale = value; },
       restore: () => { x = 0; scale = 1; },
@@ -2733,4 +2786,65 @@ describe('PPTX canvas Round 6 painter comparisons', () => {
     await fresh.paintSlide(second.ctx, slide, 1);
     expect(first.calls).toEqual(second.calls);
   });
+});
+
+test('deleted proposal shapes fade once while surviving shapes keep their opacity', async () => {
+  let alpha = 1;
+  const stack: number[] = [];
+  const painted: number[] = [];
+  const ctx = new Proxy({
+    save() { stack.push(alpha); },
+    restore() { alpha = stack.pop()!; },
+    fill() { painted.push(alpha); },
+  } as Record<string, unknown>, {
+    get(target, key) { return key === 'globalAlpha' ? alpha : target[key as string] ?? (() => undefined); },
+    set(target, key, value) { if (key === 'globalAlpha') alpha = value; else target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const shape = (shapeId: string): ShapePrimitive => ({
+    kind: 'shape', objectId: 1, shapeId, name: shapeId, x: 0, y: 0, w: 10, h: 10, geometry: 'rect',
+    path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 0 }, { type: 'line', x: 1, y: 1 }, { type: 'close' }],
+    fill: { kind: 'solid', color: '#123456' },
+  });
+  const list: SlideDisplayList = { contractVersion: 2, width: 100, height: 100, primitives: [
+    { kind: 'table', objectId: 1, shapeId: 'deleted', name: 'Deleted table', label: 'Table', x: 0, y: 0, w: 10, h: 10, primitives: [shape('deleted')] },
+    shape('surviving'),
+  ] };
+  await paintSlide(ctx, list, 1, 1, { shapeChanges: [{ shapeId: 'deleted', kind: 'deleted' }] });
+  expect(painted).toEqual([0.4, 1]);
+  expect(alpha).toBe(1);
+});
+
+test('paints strike rules with raster geometry, colour, clip and transform', async () => {
+  const rules: { args: number[]; color: unknown; clipped: boolean; transformed: boolean }[] = [];
+  let clipped = false;
+  let transformed = false;
+  const ctx = new Proxy({
+    clip: () => { clipped = true; },
+    rotate: () => { transformed = true; },
+    fillRect: (...args: number[]) => rules.push({ args, color: ctx.fillStyle, clipped, transformed }),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      transform: { rotationDeg: 90 },
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 20, width: 80, height: 50, baseline: 50, start: 0, end: 4,
+        caretStops: [], runs: ['sngStrike', 'dblStrike', 'noStrike', undefined].map((strike, i) => ({
+          text: 'x', start: i, end: i + 1, x: 10 + i * 20, width: 20,
+          fontId: 1, fontFamily: 'Arial', fontSizePx: i === 0 ? 10 : 40, bold: false, italic: false,
+          underline: false, strike, color: '#475467', baselineOffsetPx: 6, glyphs: [],
+        })),
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  expect(rules).toEqual([
+    { args: [10, 41, 20, 1], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 30, 20, 2], color: '#475467', clipped: true, transformed: true },
+    { args: [30, 34, 20, 2], color: '#475467', clipped: true, transformed: true },
+  ]);
 });

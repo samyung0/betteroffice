@@ -287,6 +287,7 @@ mod tests {
             property_changes: None,
             structural_change: None,
             content: Vec::new(),
+            leading_bookmarks: None,
         }
     }
 
@@ -298,6 +299,8 @@ mod tests {
             property_changes: None,
             structural_change: None,
             cells,
+            leading_bookmarks: None,
+            trailing_bookmarks: None,
         }
     }
 

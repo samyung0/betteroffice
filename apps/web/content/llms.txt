@@ -4,7 +4,7 @@
 
 DOCX, XLSX and PPTX are published on npm, crates.io and PyPI. VSDX diagram support builds from source and has no published packages. Versions differ by format and registry; the registries and the [release notes](https://github.com/openooxml/betteroffice/releases) list current versions, and the documentation holds the API reference.
 
-Used by: [OpenCode](https://opencode.ai), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
+Used by: [OpenCode](https://opencode.ai), [T3 Code](https://t3.codes), [atira](https://atira.ai), [Ketryx](https://www.ketryx.com) and others.
 
 ## Features
 
@@ -19,7 +19,7 @@ Agents propose edits that people review in the editor as attributed tracked chan
 - [Python guide](https://docs.betteroffice.dev/docs/python): installation and examples.
 - [Agents guide](https://docs.betteroffice.dev/docs/agents): the agent SDK and MCP server.
 - [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration): connecting editors and deploying a relay.
-- [VSDX guide](https://docs.betteroffice.dev/docs/vsdx): the diagram editor source preview.
+- [VSDX guide](https://docs.betteroffice.dev/docs/vsdx): the diagram editor, built from source.
 
 ## npm packages
 
@@ -33,6 +33,8 @@ Published under the `@betteroffice` scope. The editors render inside your app wi
 - [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): the framework-free PPTX core: parsing, the slide model with masters and layouts, editing and canvas rendering. Use it for a custom slides UI or headless deck processing.
 - [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled open fonts (metric-compatible Latin faces, common presentation families, Hebrew and Arabic coverage) for deterministic layout.
 - [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional Chinese, Japanese and Korean coverage fonts.
+- [@betteroffice/fonts-intl](https://www.npmjs.com/package/@betteroffice/fonts-intl): optional international Noto coverage fonts.
+- [@betteroffice/fonts-latin](https://www.npmjs.com/package/@betteroffice/fonts-latin): Latin and RTL font pack installed with the manager.
 - [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n), [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n), [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the React editors.
 
 ## Rust crates
@@ -62,8 +64,14 @@ Per-layer crates for single pipeline stages:
 - [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): paints a PPTX display list to PNG.
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): shared DrawingML colors, themes and geometry.
+- [betteroffice-ooxml-raster](https://crates.io/crates/betteroffice-ooxml-raster): shared PNG encoding, color parsing, path and glyph outline helpers for the raster crates.
 - [betteroffice-metafile](https://crates.io/crates/betteroffice-metafile): EMF, EMF+ and WMF replay into vector drawings and SVG.
 - [betteroffice-wasm-alloc](https://crates.io/crates/betteroffice-wasm-alloc): the global allocator of the WASM modules, growing linear memory in steps of up to 64 MiB.
+- [betteroffice-fonts](https://crates.io/crates/betteroffice-fonts): shared font pack decoding and optional native family resolution.
+- [betteroffice-fonts-latin](https://crates.io/crates/betteroffice-fonts-latin): bundled Latin and RTL font bytes.
+- [betteroffice-fonts-intl](https://crates.io/crates/betteroffice-fonts-intl): bundled international font bytes.
+- [betteroffice-fonts-cjk](https://crates.io/crates/betteroffice-fonts-cjk): bundled CJK font bytes, grouped from the [SC](https://crates.io/crates/betteroffice-fonts-cjk-sc), [TC](https://crates.io/crates/betteroffice-fonts-cjk-tc), [JP](https://crates.io/crates/betteroffice-fonts-cjk-jp), [KR](https://crates.io/crates/betteroffice-fonts-cjk-kr), and [Serif SC](https://crates.io/crates/betteroffice-fonts-cjk-serif-sc) face crates.
+- [betteroffice-base-latin](https://crates.io/crates/betteroffice-base-latin): embedded fallback faces for native text measurement and rendering.
 
 ## Python packages
 

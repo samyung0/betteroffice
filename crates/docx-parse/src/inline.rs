@@ -12,7 +12,7 @@ use crate::formatting::{
 };
 use crate::relationships::RelationshipMap;
 use crate::styles::{DocDefaults, StyleMap, get_default_character_style};
-use crate::theme::{Theme, get_theme_color, resolve_theme_font_ref};
+use crate::theme::{Theme, get_theme_color, resolve_rfonts_theme_font, resolve_theme_font_ref};
 use crate::xml::{ParseBudget, ParseError, XmlElement, XmlNode};
 
 const MAX_FIELD_NESTING: usize = 32;
@@ -123,19 +123,27 @@ pub enum RunContent {
         image: Box<crate::image::Image>,
         #[serde(rename = "sourceXml", default, skip_serializing_if = "Option::is_none")]
         source_xml: Option<String>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
     },
     #[serde(rename = "shape")]
     Shape {
         shape: Box<crate::shape::Shape>,
         #[serde(rename = "sourceXml", default, skip_serializing_if = "Option::is_none")]
         source_xml: Option<String>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
     },
     #[serde(rename = "horizontalRule")]
     HorizontalRule {
         rule: Box<crate::vml::HorizontalRule>,
     },
     #[serde(rename = "chart")]
-    Chart { chart: Box<crate::chart::Chart> },
+    Chart {
+        chart: Box<crate::chart::Chart>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
+    },
     /// A drawing the parser does not model, replayed verbatim on save; a
     /// phonetic guide (`w:ruby`, kind `ruby`) too, its base text in `text`,
     /// which editors show in its place.
@@ -151,10 +159,50 @@ pub enum RunContent {
         previews: Vec<crate::image::Image>,
         #[serde(rename = "textBox", default, skip_serializing_if = "Option::is_none")]
         text_box: Option<Box<crate::shape::Shape>>,
+        #[serde(rename = "drawing", default, skip_serializing_if = "Option::is_none")]
+        drawing_properties: Option<crate::image::DrawingProperties>,
     },
 }
 
 crate::boxed!(FieldFormData(FieldFormDataFields));
+
+impl RunContent {
+    pub fn drawing_properties(&self) -> Option<&crate::image::DrawingProperties> {
+        match self {
+            Self::Drawing {
+                drawing_properties, ..
+            }
+            | Self::Shape {
+                drawing_properties, ..
+            }
+            | Self::Chart {
+                drawing_properties, ..
+            }
+            | Self::OpaqueDrawing {
+                drawing_properties, ..
+            } => drawing_properties.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn set_drawing_properties(&mut self, properties: Option<crate::image::DrawingProperties>) {
+        match self {
+            Self::Drawing {
+                drawing_properties, ..
+            }
+            | Self::Shape {
+                drawing_properties, ..
+            }
+            | Self::Chart {
+                drawing_properties, ..
+            }
+            | Self::OpaqueDrawing {
+                drawing_properties, ..
+            } => *drawing_properties = properties,
+            _ => {}
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -255,10 +303,12 @@ pub fn parse_run(
             (&mut fonts.east_asia, &fonts.east_asia_theme),
             (&mut fonts.cs, &fonts.cs_theme),
         ] {
-            if explicit.as_deref().is_none_or(str::is_empty)
-                && let Some(reference) = reference
-            {
-                *explicit = Some(resolve_theme_font_ref(theme, reference));
+            if let Some(reference) = reference {
+                if let Some(font) = resolve_rfonts_theme_font(theme, reference) {
+                    *explicit = Some(font.to_owned());
+                } else if explicit.as_deref().is_none_or(str::is_empty) {
+                    *explicit = Some(resolve_theme_font_ref(theme, reference));
+                }
             }
         }
     }
@@ -313,15 +363,15 @@ fn parse_run_property_changes(
 ) -> Option<Vec<RunPropertyChange>> {
     let changes: Vec<_> = r_pr?
         .children_named("w", "rPrChange")
-        .filter_map(|change| {
+        .map(|change| {
             let previous = parse_inline_run_properties(change.child("w", "rPr"), theme);
             let current = current.cloned();
-            (previous.is_some() || current.is_some()).then(|| RunPropertyChange {
+            RunPropertyChange {
                 node_type: RunPropertyChangeType::RunPropertyChange,
                 info: parse_property_change_info(change),
                 previous_formatting: previous,
                 current_formatting: current,
-            })
+            }
         })
         .collect();
     (!changes.is_empty()).then_some(changes)
@@ -391,6 +441,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
@@ -400,6 +451,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                     preview: None,
                     previews: Vec::new(),
                     text_box: None,
+                    drawing_properties: None,
                 });
             }
             "ruby" => output.push(RunContent::OpaqueDrawing {
@@ -2198,6 +2250,36 @@ fn parse_hyperlink_inline_sdt(
     })
 }
 
+/// The field-code part of a run that also carries a field character, as a run of its own.
+pub(crate) fn instruction_run(run: &Run) -> Run {
+    let mut code = run.clone();
+    code.content
+        .retain(|content| matches!(content, RunContent::InstrText { .. }));
+    code
+}
+
+pub(crate) fn field_runs(node: &InlineNode) -> Vec<&Run> {
+    match node {
+        InlineNode::Run(run) => vec![run],
+        InlineNode::Hyperlink(link) => link
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                InlineNode::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect(),
+        InlineNode::SimpleField(field) => field.content.iter().collect(),
+        InlineNode::BookmarkStart(_)
+        | InlineNode::BookmarkEnd(_)
+        | InlineNode::ComplexField(_)
+        | InlineNode::InlineSdt(_)
+        | InlineNode::Math(_)
+        | InlineNode::RawXml(_)
+        | InlineNode::Tracked(_) => Vec::new(),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct OpenComplexField {
     instruction: String,
@@ -2205,6 +2287,7 @@ pub(crate) struct OpenComplexField {
     result_runs: Vec<Run>,
     structured_code: Vec<InlineNode>,
     structured_result: Vec<InlineNode>,
+    instruction_runs: Vec<Run>,
     children: Vec<StructuredFieldTree>,
     mode: FieldMode,
     fld_lock: bool,
@@ -2229,6 +2312,7 @@ impl OpenComplexField {
             result_runs: Vec::new(),
             structured_code: Vec::new(),
             structured_result: Vec::new(),
+            instruction_runs: Vec::new(),
             children: Vec::new(),
             mode: FieldMode::Code,
             fld_lock: flags.is_some_and(|flags| flags.0),
@@ -2258,7 +2342,8 @@ impl OpenComplexField {
     /// A node inside an open field joins the field's structure in place; its
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.
-    pub(crate) fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+    pub(crate) fn absorb(&mut self, node: InlineNode) {
+        let runs = field_runs(&node).into_iter().cloned();
         match self.mode {
             FieldMode::Code => {
                 self.code_runs.extend(runs);
@@ -2269,6 +2354,14 @@ impl OpenComplexField {
                 self.structured_result.push(node);
             }
         }
+    }
+
+    /// The instruction text of a run that also carries a field character; kept as a code run
+    /// only when the field code holds more than runs, so its position among them survives.
+    pub(crate) fn absorb_instruction(&mut self, run: &Run) {
+        let code = instruction_run(run);
+        self.instruction_runs.push(code.clone());
+        self.absorb(InlineNode::Run(code));
     }
 
     pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
@@ -2285,7 +2378,26 @@ impl OpenComplexField {
         }
     }
 
-    pub(crate) fn finish(self) -> ComplexField {
+    pub(crate) fn finish(mut self) -> ComplexField {
+        if !self.instruction_runs.is_empty()
+            && self
+                .structured_code
+                .iter()
+                .all(|node| matches!(node, InlineNode::Run(_)))
+        {
+            for code in std::mem::take(&mut self.instruction_runs) {
+                if let Some(at) = self.code_runs.iter().position(|run| *run == code) {
+                    self.code_runs.remove(at);
+                }
+                if let Some(at) = self
+                    .structured_code
+                    .iter()
+                    .position(|node| matches!(node, InlineNode::Run(run) if *run == code))
+                {
+                    self.structured_code.remove(at);
+                }
+            }
+        }
         let structured_code = (!self.structured_code.is_empty()).then(|| StructuredFieldContent {
             inline: Some(self.structured_code),
             blocks: None,
@@ -2359,7 +2471,7 @@ pub(crate) fn absorb_beyond_field_nesting(
             _ => {}
         }
     }
-    active.absorb(InlineNode::Run(run.clone()), vec![run]);
+    active.absorb(InlineNode::Run(run));
     Ok(None)
 }
 
@@ -2465,11 +2577,14 @@ fn parse_inline_container_at_depth(
                 if let Some(active) = fields.last_mut() {
                     active.append_instruction(&instruction);
                     active.adopt_formatting(&run);
+                    if (has_begin || has_separate) && !instruction.is_empty() {
+                        active.absorb_instruction(&run);
+                    }
                     if has_separate {
                         active.switch_to_result();
                     }
                     if !has_begin && !has_separate && !has_end {
-                        active.absorb(InlineNode::Run(run.clone()), vec![run]);
+                        active.absorb(InlineNode::Run(run));
                     }
                     if has_end {
                         let completed = fields.pop().unwrap().finish();
@@ -2495,15 +2610,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(InlineNode::Hyperlink(Box::new(hyperlink)));
                 }
@@ -2514,7 +2621,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2524,7 +2631,7 @@ fn parse_inline_container_at_depth(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(node),
                 }
             }
@@ -2540,8 +2647,7 @@ fn parse_inline_container_at_depth(
                     depth + 1,
                 )?;
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(InlineNode::SimpleField(Box::new(field)));
                 }

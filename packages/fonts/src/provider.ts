@@ -1,22 +1,38 @@
 import {
+  BASE_LATIN_FONTS,
   resolveBundledFamilyFace,
   resolveMetricCompatFace,
   resolveScriptFallbackFace,
   resolveLastResortChoice,
   resolveGlyphFallbackFace,
+  resolveLightVariantFace,
   type BundledFontFace,
   type LastResortOffice,
   type BundledFontScript,
 } from './manifest';
+import type { SliceLocation } from './progressive';
+import { knownCoverage } from './coverage';
 
 export type BundledFontLoader = (() => Promise<ArrayBuffer>) & {
   /** Word measurement family; defaults to the requested family. */
   measureAs?: string;
   onlyIfPrimaryFails?: boolean;
+  /**
+   * Present for a face shipped in slices: `openSlicedFace` from
+   * `@betteroffice/fonts/progressive` opens it as a face whose outlines load as
+   * they are needed. Calling the loader itself still yields the whole face.
+   */
+  slices?: SliceLocation;
+  /** @internal Base Latin characters the face is known to cover, as coverage bits. */
+  coverage?: string;
+  /** @internal The face's decoded bytes, shared with the font cache: read them, never change or transfer them. */
+  readOnlyBytes?: () => Promise<ArrayBuffer>;
 };
 
 /** Structural provider contract keeps this package independent of the engine. */
 export interface BundledFontSource {
+  /** @internal */
+  resolveBaseLatin?(bold: boolean, italic: boolean): BundledFontLoader | undefined;
   resolve(
     family: string,
     bold: boolean,
@@ -27,35 +43,65 @@ export interface BundledFontSource {
     family: string,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   resolveScriptFallback(
     script: BundledFontScript,
     bold: boolean,
     italic: boolean,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   /** Coverage for characters absent from a bundled substitute. */
   resolveGlyphFallback?(
     family: string,
     bold: boolean,
     italic: boolean,
     office?: LastResortOffice,
-  ): (() => Promise<ArrayBuffer>) | undefined;
+  ): BundledFontLoader | undefined;
   resolveLastResort(
     family: string,
     bold: boolean,
     italic: boolean,
     office?: LastResortOffice,
   ): BundledFontLoader;
+  /** A lighter member of a bundled family, such as `Calibri Light`, drawn with its regular face. */
+  resolveLightVariant?(
+    family: string,
+    bold: boolean,
+    italic: boolean,
+  ): BundledFontLoader | undefined;
 }
 
 export function fontProvider(
   loadBytes: (face: BundledFontFace) => Promise<ArrayBuffer>,
+  readBytes?: (face: BundledFontFace) => Promise<ArrayBuffer>,
+  locateSlices?: (face: BundledFontFace) => SliceLocation | undefined,
 ): BundledFontSource {
-  const load = (face: BundledFontFace) => () => loadBytes(face);
+  const loaders = new Map<string, BundledFontLoader>();
+  const load = (
+    face: BundledFontFace,
+    options?: Pick<BundledFontLoader, 'measureAs' | 'onlyIfPrimaryFails'>,
+  ): BundledFontLoader => {
+    const key = `${face.file}|${options?.measureAs ?? ''}|${options?.onlyIfPrimaryFails ?? false}`;
+    let loader = loaders.get(key);
+    if (loader === undefined) {
+      const slices = locateSlices?.(face);
+      const coverage = knownCoverage(face.file);
+      loader = Object.assign(() => loadBytes(face), options, {
+        ...(slices && { slices }),
+        ...(coverage === undefined ? undefined : { coverage }),
+        ...(readBytes && { readOnlyBytes: () => readBytes(face) }),
+      });
+      loaders.set(key, loader);
+    }
+    return loader;
+  };
   return {
+    resolveBaseLatin(bold, italic) {
+      const face = BASE_LATIN_FONTS.find((face) => face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'));
+      return face ? load(face) : undefined;
+    },
     resolve(family, bold, italic) {
       const face = resolveMetricCompatFace(family, bold, italic);
-      return face ? Object.assign(load(face), { measureAs: face.family === 'Selawik' ? 'Segoe UI' : undefined }) : undefined;
+      return face ? load(face, { measureAs: face.family === 'Selawik' ? face.metricCompatWith : undefined }) : undefined;
     },
     resolveFamily(family, bold, italic) {
       const face = resolveBundledFamilyFace(family, bold, italic);
@@ -69,9 +115,13 @@ export function fontProvider(
       const face = resolveGlyphFallbackFace(family, bold, italic, office);
       return face ? load(face) : undefined;
     },
+    resolveLightVariant(family, bold, italic) {
+      const face = resolveLightVariantFace(family, bold, italic);
+      return face ? load(face) : undefined;
+    },
     resolveLastResort(family, bold, italic, office) {
       const { face, onlyIfPrimaryFails } = resolveLastResortChoice(family, bold, italic, office);
-      return onlyIfPrimaryFails ? Object.assign(load(face), { onlyIfPrimaryFails }) : load(face);
+      return load(face, onlyIfPrimaryFails ? { onlyIfPrimaryFails } : undefined);
     },
   };
 }

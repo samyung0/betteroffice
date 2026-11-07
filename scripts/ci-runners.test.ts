@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync, readdirSync } from 'node:fs';
-import { LABEL, parseGroups } from './ci-route.mjs';
+import { LABEL, ROUTER, parseGroups } from './ci-route.mjs';
 
 const REPOSITORY = 'openooxml/betteroffice';
 const KYORA_CLASSES = ['kyora-4x8', 'kyora-8x8', 'kyora-8x16', 'kyora-16x32'];
@@ -188,12 +188,13 @@ describe('CI runner routing', () => {
       'ci.yml packages': ['kyora-4x8'],
       'ci.yml package-tests': ['kyora-8x8'],
       'ci.yml rust': ['kyora-8x16'],
+      'ci.yml native-viewer': ['kyora-8x16'],
       'ci.yml python': ['kyora-4x8'],
-      'ci.yml route': ['kyora-4x8'],
-      'e2e.yml route': ['kyora-4x8'],
-      'e2e.yml scenarios (Corpus scenarios)': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (1/2))': ['kyora-8x8'],
-      'e2e.yml scenarios (Browser editors (2/2))': ['kyora-8x8'],
+      'ci.yml route': ['ubuntu-latest'],
+      'e2e.yml route': ['ubuntu-latest'],
+      'e2e.yml corpus': ['kyora-8x8'],
+      'e2e.yml browser-build': ['kyora-8x8'],
+      'e2e.yml browser': ['kyora-8x8'],
     });
     const hosted = jobs.filter((entry) => /^(ci|e2e)\.yml /.test(entry.name) && !kyoraJobs.includes(entry));
     expect(hosted.map(({ name }) => name).sort()).toEqual(['ci.yml audit', 'e2e.yml publish']);
@@ -226,6 +227,7 @@ describe('CI runner routing', () => {
     expect(routers.map(({ name }) => name).sort()).toEqual(['ci.yml route', 'e2e.yml route']);
     for (const router of routers) {
       const { name, file, job } = router;
+      expect(job.name, name).toBe(ROUTER);
       expect(router.runsOn(EVENTS['push to main'], {}, everyGroup), name).toEqual(router.runners['push to main'].unset);
       expect(job.permissions, name).toEqual({ actions: 'read', contents: 'read' });
       for (const step of job.steps) expect(step['continue-on-error'], `${name}: ${step.name ?? step.uses}`).toBe(true);
@@ -242,7 +244,7 @@ describe('CI runner routing', () => {
       }
       for (const entry of routed) {
         expect(readers.get(entry.name), entry.name).toHaveLength(1);
-        expect(entry.job.needs, entry.name).toBe('route');
+        expect([entry.job.needs].flat()[0], entry.name).toBe('route');
         // A failed router must not skip a required job, which would count as passed.
         expect(entry.job.if, entry.name).toBe('${{ !cancelled() }}');
       }

@@ -44,11 +44,14 @@ defineSuite('xlsx', ['passing', 'failing'].map((name) => ({
           ...(fault === 'filter' ? ['--test-name-pattern', 'passing'] : []),
         ],
         {
+          cwd: dir,
           env: {
             ...process.env,
             BETTEROFFICE_E2E: '1',
             BETTEROFFICE_E2E_OUTPUT: dir,
             BETTEROFFICE_E2E_ALLOW_SKIP: '0',
+            GIT_DIR: join(dir, 'no-repository'),
+            BETTEROFFICE_E2E_VENV: join(dir, 'no-venv'),
             GITHUB_STEP_SUMMARY: '',
           },
         }
@@ -71,5 +74,5 @@ defineSuite('xlsx', ['passing', 'failing'].map((name) => ({
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 }

@@ -1,4 +1,18 @@
-/** Deterministic bundled-font resolution with lazy loading and optional CJK assets. */
+import intlSizes from './intl-sizes.json';
+import latinManifest from '../../fonts-latin/assets/manifest.json';
+import baseLatinManifest from '../assets/base-latin.json';
+
+/** @internal */
+export const BASE_LATIN_FAMILY = 'BetterOffice Base Latin';
+
+/** @internal */
+export const BASE_LATIN_FONTS: BundledFontFace[] = baseLatinManifest.faces.map((face) => ({
+  family: BASE_LATIN_FAMILY,
+  weight: face.source.includes('-Bold') ? 700 : 400,
+  style: face.source.includes('Italic') ? 'italic' : 'normal',
+  file: face.file,
+  byteLength: face.byteLength,
+}));
 
 /** Script bucket a bundled face provides glyph coverage for. */
 export type BundledFontScript =
@@ -7,7 +21,30 @@ export type BundledFontScript =
   | 'cjk-jp'
   | 'cjk-kr'
   | 'arabic'
-  | 'hebrew';
+  | 'hebrew'
+  | 'thai'
+  | 'lao'
+  | 'khmer'
+  | 'myanmar'
+  | 'devanagari'
+  | 'bengali'
+  | 'gurmukhi'
+  | 'gujarati'
+  | 'oriya'
+  | 'tamil'
+  | 'telugu'
+  | 'kannada'
+  | 'malayalam'
+  | 'sinhala'
+  | 'armenian'
+  | 'georgian'
+  | 'ethiopic'
+  | 'tibetan'
+  | 'mongolian'
+  | 'syriac'
+  | 'thaana'
+  | 'cherokee'
+  | 'tifinagh';
 
 /** One bundled font binary and the Word font(s) it stands in for. */
 export interface BundledFontFace {
@@ -21,7 +58,7 @@ export interface BundledFontFace {
   metricCompatWith?: string;
   weight: 400 | 700;
   style: 'normal' | 'italic';
-  /** Asset filename under this package's `assets/` directory. */
+  /** Asset filename within its font pack. */
   file: string;
   byteLength: number;
   /** Present on faces that serve as per-script coverage fallbacks. */
@@ -70,15 +107,26 @@ function familyFaces(
   ];
 }
 
-/**
- * The complete manifest of bundled faces. Single source of truth: the
- * metric-compat and script-fallback resolution below is derived from this
- * list, never duplicated.
- *
- * Order matters within a script bucket: `resolveScriptFallbackFace` prefers
- * earlier entries on ties, so the sans face of each script comes first.
- */
-export const BUNDLED_FONTS: BundledFontFace[] = [
+function intlFamilyFaces(
+  family: string,
+  script: BundledFontScript,
+  fileBase: string,
+): BundledFontFace[] {
+  return (['Regular', 'Bold'] as const).flatMap<BundledFontFace>((style) => {
+    const file = `${fileBase}-${style}.ttf.zst`;
+    const byteLength = (intlSizes as Record<string, number>)[file];
+    return byteLength === undefined ? [] : [{
+      family,
+      weight: style === 'Bold' ? 700 : 400,
+      style: 'normal',
+      file,
+      byteLength,
+      script,
+    }];
+  });
+}
+
+const bundledFaces: BundledFontFace[] = [
   ...familyFaces(
     'Carlito',
     'Calibri',
@@ -280,6 +328,31 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     script: 'arabic',
   },
 
+  ...intlFamilyFaces('Noto Sans Thai', 'thai', 'NotoSansThai'),
+  ...intlFamilyFaces('Noto Sans Lao', 'lao', 'NotoSansLao'),
+  ...intlFamilyFaces('Noto Sans Khmer', 'khmer', 'NotoSansKhmer'),
+  ...intlFamilyFaces('Noto Sans Myanmar', 'myanmar', 'NotoSansMyanmar'),
+  ...intlFamilyFaces('Noto Sans Devanagari', 'devanagari', 'NotoSansDevanagari'),
+  ...intlFamilyFaces('Noto Sans Bengali', 'bengali', 'NotoSansBengali'),
+  ...intlFamilyFaces('Noto Sans Gurmukhi', 'gurmukhi', 'NotoSansGurmukhi'),
+  ...intlFamilyFaces('Noto Sans Gujarati', 'gujarati', 'NotoSansGujarati'),
+  ...intlFamilyFaces('Noto Sans Oriya', 'oriya', 'NotoSansOriya'),
+  ...intlFamilyFaces('Noto Sans Tamil', 'tamil', 'NotoSansTamil'),
+  ...intlFamilyFaces('Noto Sans Telugu', 'telugu', 'NotoSansTelugu'),
+  ...intlFamilyFaces('Noto Sans Kannada', 'kannada', 'NotoSansKannada'),
+  ...intlFamilyFaces('Noto Sans Malayalam', 'malayalam', 'NotoSansMalayalam'),
+  ...intlFamilyFaces('Noto Sans Sinhala', 'sinhala', 'NotoSansSinhala'),
+  ...intlFamilyFaces('Noto Sans Armenian', 'armenian', 'NotoSansArmenian'),
+  ...intlFamilyFaces('Noto Sans Georgian', 'georgian', 'NotoSansGeorgian'),
+  ...intlFamilyFaces('Noto Sans Ethiopic', 'ethiopic', 'NotoSansEthiopic'),
+  ...intlFamilyFaces('Noto Serif Tibetan', 'tibetan', 'NotoSerifTibetan'),
+  ...intlFamilyFaces('Noto Sans Mongolian', 'mongolian', 'NotoSansMongolian'),
+  ...intlFamilyFaces('Noto Sans Syriac', 'syriac', 'NotoSansSyriac'),
+  ...intlFamilyFaces('Noto Sans Thaana', 'thaana', 'NotoSansThaana'),
+  ...intlFamilyFaces('Noto Sans Cherokee', 'cherokee', 'NotoSansCherokee'),
+  ...intlFamilyFaces('Noto Sans Lao Looped', 'lao', 'NotoSansLaoLooped'),
+  ...intlFamilyFaces('Noto Sans Tifinagh', 'tifinagh', 'NotoSansTifinagh'),
+
   // CJK coverage faces (Regular-only statics; see the module doc). The sans
   // face precedes the serif face of the same script bucket on purpose.
   {
@@ -287,7 +360,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Microsoft YaHei',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansSC-Regular.otf',
+    file: 'NotoSansSC-Regular.otf.zst',
     byteLength: 8331336,
     script: 'cjk-sc',
   },
@@ -296,7 +369,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'SimSun',
     weight: 400,
     style: 'normal',
-    file: 'NotoSerifSC-Regular.otf',
+    file: 'NotoSerifSC-Regular.otf.zst',
     byteLength: 11625800,
     script: 'cjk-sc',
   },
@@ -305,7 +378,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Microsoft JhengHei',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansTC-Regular.otf',
+    file: 'NotoSansTC-Regular.otf.zst',
     byteLength: 5683368,
     script: 'cjk-tc',
   },
@@ -314,7 +387,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'MS Gothic',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansJP-Regular.otf',
+    file: 'NotoSansJP-Regular.otf.zst',
     byteLength: 4533028,
     script: 'cjk-jp',
   },
@@ -323,11 +396,19 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     metricCompatWith: 'Malgun Gothic',
     weight: 400,
     style: 'normal',
-    file: 'NotoSansKR-Regular.otf',
+    file: 'NotoSansKR-Regular.otf.zst',
     byteLength: 4644748,
     script: 'cjk-kr',
   },
 ];
+
+const latinFaces = new Map(latinManifest.faces.map((face) => [face.source, face]));
+
+/** Complete face manifest, ordered by script fallback preference. */
+export const BUNDLED_FONTS: BundledFontFace[] = bundledFaces.map((face) => {
+  const packed = latinFaces.get(face.file);
+  return packed === undefined ? face : { ...face, file: packed.file, byteLength: packed.byteLength };
+});
 
 /**
  * Alternate Word font names that resolve to the same bundled face as a
@@ -346,6 +427,17 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   helvetica: 'arial',
   times: 'times new roman',
   courier: 'courier new',
+
+  // Legacy Windows names and PostScript spellings Office draws with the core
+  // families, read off the faces its exports embed.
+  helv: 'arial',
+  'arial mt': 'arial',
+  arialmt: 'arial',
+  'tms rmn': 'times new roman',
+  'times roman': 'times new roman',
+  timesnewroman: 'times new roman',
+  timesnewromanps: 'times new roman',
+  timesnewromanpsmt: 'times new roman',
 
   // Metric-compatible clones of the core families. A deck that asks for one
   // was laid out against those metrics, so it resolves to the same face rather
@@ -388,6 +480,7 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   // Japanese (the Mincho serif families map to the sans face — Noto Serif JP
   // is not vendored)
   'ms pgothic': 'ms gothic',
+  'ms ui gothic': 'ms gothic',
   meiryo: 'ms gothic',
   'yu gothic': 'ms gothic',
   'ｍｓ ゴシック': 'ms gothic',
@@ -489,6 +582,9 @@ export function resolveBundledFamilyFace(
   bold: boolean,
   italic: boolean,
 ): BundledFontFace | undefined {
+  if (family.trim().toLowerCase() === BASE_LATIN_FAMILY.toLowerCase()) {
+    return BASE_LATIN_FONTS.find((face) => face.weight === (bold ? 700 : 400) && face.style === (italic ? 'italic' : 'normal'));
+  }
   if (resolveMetricCompatFamily(family) === 'Selawik') {
     return italic ? undefined : resolveMetricCompatFace(family, bold, false);
   }
@@ -537,6 +633,7 @@ export function resolveScriptFallbackFace(
  */
 function looksSerif(family: string): boolean {
   const lower = family.toLowerCase();
+  if (/sans[ -]?serif/.test(lower)) return false;
   return (
     lower.includes('antiqua') ||
     lower.includes('bookman') ||
@@ -614,6 +711,19 @@ function lightVariantOf(
 }
 
 /**
+ * The bundled face for a lighter member of a family we carry, such as
+ * `Calibri Light`, at its own weight whatever weight the run claims; undefined
+ * for any other name.
+ */
+export function resolveLightVariantFace(
+  family: string,
+  _bold: boolean,
+  italic: boolean,
+): BundledFontFace | undefined {
+  return lightVariantOf(family, italic);
+}
+
+/**
  * Whether a family name reads as a typewriter face. A monospaced document was
  * laid out against a fixed pitch, so a proportional substitute rewraps every
  * line of it; Courier New's clone keeps the pitch even where the shapes differ.
@@ -649,6 +759,8 @@ function heavyVariantOf(family: string, italic: boolean): BundledFontFace | unde
   }
   return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
 }
+
+const EMULATED_SYMBOL_FAMILIES = new Set(['wingdings', 'wingdings 2', 'wingdings 3', 'webdings']);
 
 /** The Office application whose font substitution a last-resort pick follows. */
 export type LastResortOffice = 'powerpoint' | 'word';
@@ -718,6 +830,9 @@ function resolveBaseFace(
   if (light) bold = false;
   const heavy = heavyVariantOf(family, italic);
   if (heavy && (!excludeSelawik || heavy.family !== 'Selawik')) return heavy;
+  if (EMULATED_SYMBOL_FAMILIES.has(family.trim().toLowerCase())) {
+    return resolveMetricCompatFace('Arial', bold, italic)!;
+  }
   if (looksMono(family)) {
     return resolveMetricCompatFace('Courier New', bold, italic)!;
   }

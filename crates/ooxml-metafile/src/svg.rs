@@ -3,6 +3,11 @@
 //! The output references nothing outside itself: no scripts, no styles, no
 //! external URLs, and bitmaps only as embedded PNG or JPEG `data:` URLs.
 
+#[cfg(target_arch = "wasm32")]
+#[used]
+#[unsafe(link_section = "betteroffice.metafile.svg")]
+static SVG_WRITER: [u8; 1] = [1];
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -47,7 +52,7 @@ pub fn to_svg_with_limits(
         return Err(output_refusal());
     }
     crate::with_budget(budget, |shared| {
-        let drawing = crate::play_nested(bytes, 0, Rc::clone(&shared)).map_err(Refusal)?;
+        let (drawing, _) = crate::play_nested(bytes, 0, Rc::clone(&shared)).map_err(Refusal)?;
         let markup = write_with_limits(&drawing, shared, output_bytes)?;
         Ok(Svg {
             markup,

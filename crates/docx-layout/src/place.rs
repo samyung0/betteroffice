@@ -35,9 +35,10 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::keep_together::{
-    measure_keep_with_next_group_witnessing, paragraph_is_unbreakable, paragraph_min_leading_slice,
-    paragraph_widow_control,
+    KeepRun, paragraph_can_split, paragraph_is_unbreakable, paragraph_min_leading_slice,
+    paragraph_min_trailing_slice, paragraph_widow_control,
 };
+use crate::line_fit::{slice_fit_height, trailing_leading};
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
@@ -493,7 +494,16 @@ fn origin_paginator(
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(indices) = &plan.region_section_indices {
+        paginator.set_region_section_indices(indices.clone());
+    }
     paginator.set_section_page_margins(options.section_page_margins.clone().unwrap_or_default());
+    paginator.set_physical_section_page_margins(
+        options
+            .physical_section_page_margins
+            .clone()
+            .unwrap_or_default(),
+    );
     paginator
         .set_section_page_float_bands(options.section_page_float_bands.clone().unwrap_or_default());
     if let Some(Some(restart)) = plan.section_page_restarts.first() {
@@ -769,8 +779,17 @@ pub fn layout_document_incremental_ranges<F: PartialEq>(
                     start.section_index,
                     options.footnote_reserved_heights.clone(),
                 )?;
+                if let Some(indices) = &plan.region_section_indices {
+                    paginator.set_region_section_indices(indices.clone());
+                }
                 paginator.set_section_page_margins(
                     options.section_page_margins.clone().unwrap_or_default(),
+                );
+                paginator.set_physical_section_page_margins(
+                    options
+                        .physical_section_page_margins
+                        .clone()
+                        .unwrap_or_default(),
                 );
                 paginator.set_section_page_float_bands(
                     options.section_page_float_bands.clone().unwrap_or_default(),
@@ -971,6 +990,36 @@ fn break_type_after_section(plan: &LayoutPlan, section_index: usize) -> Option<S
         .flatten()
 }
 
+fn continuous_horizontal_frame(plan: &LayoutPlan, section_index: usize) -> bool {
+    let mut changed = false;
+    for index in 1..=section_index {
+        if break_type_after_section(plan, index - 1) != Some(SectionBreakType::Continuous) {
+            changed = false;
+            continue;
+        }
+        let previous = &plan.section_configs[index - 1];
+        let current = &plan.section_configs[index];
+        let previous_columns = previous.columns.clone().unwrap_or_else(default_columns);
+        let current_columns = current.columns.clone().unwrap_or_else(default_columns);
+        changed |= previous.margins.left != current.margins.left
+            || previous.margins.right != current.margins.right
+            || previous_columns.count != current_columns.count
+            || (0..current_columns.count as usize).any(|column| {
+                let rectangle = |columns: &crate::types::ColumnLayout| {
+                    crate::page_flow::column_rectangle_at(
+                        current.page_size.w,
+                        current.margins.left,
+                        current.margins.right,
+                        columns,
+                        column,
+                    )
+                };
+                rectangle(&previous_columns) != rectangle(&current_columns)
+            });
+    }
+    changed
+}
+
 fn section_ends_with_next_column(plan: &LayoutPlan, section_index: usize) -> bool {
     plan.break_indices.get(section_index).is_some()
         && break_type_after_section(plan, section_index) == Some(SectionBreakType::NextColumn)
@@ -1015,6 +1064,7 @@ fn place<F: PartialEq>(
 ) -> Result<PlacementOutcome, LayoutError> {
     let mut checkpoints = Vec::new();
     let mut placed_blocks = 0usize;
+    paginator.continuous_horizontal_frame = continuous_horizontal_frame(plan, section_idx);
 
     // Balancing belongs to the page a section's column region opens on: a
     // pass from the document start balances the first section, and a resumed
@@ -1038,6 +1088,7 @@ fn place<F: PartialEq>(
         paginator.mark_balanced_region();
     }
 
+    let mut keep_run: Option<KeepRun<'_>> = None;
     for (i, mb) in measured.iter().enumerate().skip(start_index) {
         crate::progress::tick();
         let section_mark = plan.section_marks[i];
@@ -1070,11 +1121,11 @@ fn place<F: PartialEq>(
             paginator.force_authored_page_break(true);
         }
 
-        // at the head of a keep-with-next group, move to a fresh column when the
-        // whole group would otherwise straddle the boundary
+        let mut keep_with_next_after = None;
         if !section_mark
-            && let Some(group) = plan.keep_with_next.groups_by_head.get(&i)
-            && !plan.keep_with_next.interior_members.contains(&i)
+            && let Some((_, whole_group)) =
+                plan.keep_with_next.groups_by_head.range(..=i).next_back()
+            && i <= whole_group.tail_index
         {
             let state_idx = paginator.get_current();
             let page_content_height =
@@ -1087,7 +1138,9 @@ fn place<F: PartialEq>(
             let droppable = can_drop_lead_skip(paginator);
             let fresh_top = at_fresh_page_top(paginator, page_index_offset);
             let (lead_skip, fresh_lead_skip) = match (&mb.block, &mb.measure) {
-                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) if droppable => {
+                (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure))
+                    if droppable && !paragraph_can_split(block, measure) =>
+                {
                     let kept = paginator
                         .leading_spacing(get_spacing_before(block))
                         .max(paginator.state(state_idx).deferred_spacing);
@@ -1102,42 +1155,68 @@ fn place<F: PartialEq>(
                 }
                 _ => (0.0, 0.0),
             };
-            let group_height = measure_keep_with_next_group_witnessing(
-                group,
+            if keep_run
+                .as_ref()
+                .is_none_or(|run| run.head_index() != whole_group.head_index)
+            {
+                keep_run = Some(KeepRun::new(whole_group, measured)?);
+            }
+            let run = keep_run.as_mut().unwrap();
+            run.starting_at(i);
+            let heights = run.heights(
                 measured,
                 |before| paginator.leading_spacing(before),
                 paginator.state(state_idx).deferred_spacing,
                 page_content_height,
                 split_first_row,
                 every_cell_starts,
-            ) - lead_skip;
-            let fresh_page_height = measure_keep_with_next_group_witnessing(
-                group,
-                measured,
-                |_| 0.0,
-                0.0,
-                page_content_height,
-                split_first_row,
-                every_cell_starts,
-            ) - fresh_lead_skip;
-            let must_advance = hooks::keep_with_next_group_must_advance_from(
-                group_height,
-                fresh_page_height,
-                paginator.get_available_height(),
-                page_content_height,
-                page_has_content,
-            )?;
-            if must_advance {
-                if paginator.has_float_bands() {
-                    paginator.ensure_fits(group_height);
-                } else {
-                    // advance until a column holds the run or a fresh page opens
-                    loop {
-                        let idx = paginator.advance_for_overflow();
-                        if paginator.state(idx).column_index == 0
-                            || fresh_page_height <= paginator.get_available_height()
-                        {
-                            break;
+                lead_skip,
+                fresh_lead_skip,
+            );
+            if let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+                (&mb.block, &mb.measure)
+                && let Some((group_height, fresh_page_height, group_trailing)) = heights
+            {
+                let leading = paginator
+                    .leading_spacing(get_spacing_before(block))
+                    .max(paginator.state(state_idx).deferred_spacing);
+                if paragraph_can_split(block, measure) && fresh_page_height <= page_content_height {
+                    keep_with_next_after = Some((
+                        (group_height + lead_skip
+                            - leading
+                            - paragraph_min_trailing_slice(block, measure))
+                        .max(0.0),
+                        group_trailing,
+                    ));
+                }
+                let must_advance = !paragraph_can_split(block, measure)
+                    && hooks::keep_with_next_group_must_advance_from(
+                        group_height,
+                        fresh_page_height,
+                        paginator.get_available_height()
+                            - if paginator.allows_trailing_leading() {
+                                0.0
+                            } else {
+                                group_trailing
+                            },
+                        paginator.get_column_capacity_with_trailing(group_trailing)
+                            - group_trailing,
+                        page_has_content,
+                    )?;
+                if must_advance {
+                    if paginator.has_float_bands() {
+                        paginator.ensure_fits_with_trailing(
+                            group_height + group_trailing,
+                            group_trailing,
+                        );
+                    } else {
+                        loop {
+                            let idx = paginator.advance_for_overflow();
+                            if paginator.state(idx).column_index == 0
+                                || fresh_page_height <= paginator.get_available_height()
+                            {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1156,7 +1235,14 @@ fn place<F: PartialEq>(
                 } else {
                     stale_lead_skip(&measured[..i], block, measure, paginator, page_index_offset)
                 };
-                layout_paragraph(block, measure, paginator, section_mark, lead_skip)?;
+                layout_paragraph(
+                    block,
+                    measure,
+                    paginator,
+                    section_mark,
+                    lead_skip,
+                    keep_with_next_after,
+                )?;
             }
 
             LayoutBlock::Table(block) => {
@@ -1236,11 +1322,7 @@ fn place<F: PartialEq>(
                 } else {
                     break_type_after_section(plan, section_idx)
                 };
-                let restart = plan
-                    .section_page_restarts
-                    .get(section_idx + 1)
-                    .copied()
-                    .flatten();
+                let restart = plan.section_page_restart(section_idx + 1);
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
@@ -1252,6 +1334,12 @@ fn place<F: PartialEq>(
                         &next_section_config,
                         next_type,
                     );
+                let parity_restart = match next_type {
+                    Some(SectionBreakType::OddPage | SectionBreakType::EvenPage) => {
+                        restart.map(|restart| restart.start)
+                    }
+                    _ => None,
+                };
                 let next_type = match (next_type, restart) {
                     (Some(SectionBreakType::OddPage | SectionBreakType::EvenPage), _) => next_type,
                     (_, Some(restart)) if restart.align_parity && restart_starts_page => {
@@ -1263,8 +1351,13 @@ fn place<F: PartialEq>(
                     }
                     _ => next_type,
                 };
-                let opened_column_region =
-                    hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
+                let opened_column_region = hooks::handle_section_break(
+                    block,
+                    paginator,
+                    &next_section_config,
+                    next_type,
+                    parity_restart,
+                )?;
                 paginator.set_section_index(section_idx + 1);
                 if let Some(restart) = restart
                     && restart_starts_page
@@ -1292,6 +1385,8 @@ fn place<F: PartialEq>(
                 }
 
                 section_idx += 1;
+                paginator.continuous_horizontal_frame =
+                    continuous_horizontal_frame(plan, section_idx);
             }
 
             LayoutBlock::Unsupported => {
@@ -1527,6 +1622,7 @@ fn layout_paragraph(
     paginator: &mut Paginator,
     section_mark: bool,
     dropped_lead_skip: f64,
+    keep_with_next_after: Option<(f64, f64)>,
 ) -> Result<(), LayoutError> {
     // an unknown run kind can't be re-emitted faithfully in resolved lines
     if block.runs.iter().any(|r| matches!(r, Run::Unsupported)) {
@@ -1545,6 +1641,7 @@ fn layout_paragraph(
         let pen_y = paginator.state(state_idx).pen_y;
 
         let fragment = ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: pen_y + paginator.leading_spacing(space_before),
@@ -1585,9 +1682,15 @@ fn layout_paragraph(
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
-        let capacity = paginator.get_column_capacity();
-        if paragraph_height <= capacity && required > paginator.get_available_height() {
-            paginator.ensure_fits(required);
+        let trailing = trailing_leading(block, lines.last().unwrap());
+        let capacity = paginator.get_column_capacity_with_trailing(trailing);
+        let allowance = if paginator.allows_trailing_leading() {
+            trailing
+        } else {
+            0.0
+        };
+        if paragraph_height <= capacity && required - allowance > paginator.get_available_height() {
+            paginator.ensure_fits_with_trailing(required, trailing);
         }
     }
 
@@ -1603,11 +1706,14 @@ fn layout_paragraph(
             } else {
                 0.0
             };
-            paginator.ensure_fits(paragraph_fragment_height(
-                before,
-                lines[current_line_index].line_height
-                    + lines[current_line_index].float_skip_before.unwrap_or(0.0),
-            ));
+            paginator.ensure_fits_with_trailing(
+                paragraph_fragment_height(
+                    before,
+                    lines[current_line_index].line_height
+                        + lines[current_line_index].float_skip_before.unwrap_or(0.0),
+                ),
+                trailing_leading(block, &lines[current_line_index]),
+            );
         }
         let state_idx = paginator.get_current();
         let deferred_spacing = paginator.state(state_idx).deferred_spacing;
@@ -1644,7 +1750,13 @@ fn layout_paragraph(
                 };
             let total_with_line = lines_height + line_height;
 
-            if paragraph_fragment_height(fit_before, total_with_line) <= available_for_lines
+            let trailing = if paginator.allows_trailing_leading() {
+                trailing_leading(block, line)
+            } else {
+                0.0
+            };
+            if paragraph_fragment_height(fit_before, total_with_line - trailing)
+                <= available_for_lines
                 || fitting_lines == 0
             {
                 lines_height = total_with_line;
@@ -1656,21 +1768,18 @@ fn layout_paragraph(
 
         let remaining_after = lines.len() - (current_line_index + fitting_lines);
         let mut pushed_widow = false;
+        let mut pushed_keep = false;
         if widow_control && remaining_after > 0 {
             if current_line_index == 0 && fitting_lines == 1 {
-                let capacity = paginator.get_column_capacity();
-                let first_two_height = lines.iter().take(2).fold(0.0, |sum, line| {
-                    if has_float_bands {
-                        sum + (line.line_height + line.float_skip_before.unwrap_or(0.0))
-                    } else {
-                        sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
-                    }
-                }) - dropped_lead_skip;
+                let trailing = trailing_leading(block, &lines[1]);
+                let capacity = paginator.get_column_capacity_with_trailing(trailing);
+                let first_two_height =
+                    slice_fit_height(block, &lines[..2]) + trailing - dropped_lead_skip;
                 let required = paragraph_fragment_height(reserved_before, first_two_height);
                 if required <= capacity {
                     let pen_y = paginator.state(state_idx).pen_y;
                     let next_idx = if has_float_bands {
-                        paginator.ensure_fits(required)
+                        paginator.ensure_fits_with_trailing(required, trailing)
                     } else {
                         paginator.advance_for_overflow()
                     };
@@ -1687,15 +1796,68 @@ fn layout_paragraph(
                 fitting_lines -= 1;
                 // at a float band the space below it still takes the line, and
                 // balancing chose its column depth with the line kept here
-                let tail: f64 = lines[current_line_index + fitting_lines..]
-                    .iter()
-                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
-                    .sum();
+                let tail = slice_fit_height(block, &lines[current_line_index + fitting_lines..]);
                 pushed_widow = !has_float_bands
                     && !paginator.balances_region()
                     && tail <= paginator.get_column_capacity();
                 let removed = &lines[current_line_index + fitting_lines];
                 lines_height -= removed.line_height + removed.float_skip_before.unwrap_or(0.0);
+            }
+        }
+
+        if current_line_index + fitting_lines == lines.len()
+            && let Some((after, trailing)) = keep_with_next_after.filter(|(after, _)| *after > 0.0)
+            && paragraph_fragment_height(
+                reserved_before,
+                lines_height
+                    + after
+                    + if paginator.allows_trailing_leading() {
+                        0.0
+                    } else {
+                        trailing
+                    },
+            ) > available_height
+        {
+            let trailing_lines = if paragraph_is_unbreakable(block, measure) {
+                lines.len()
+            } else if widow_control {
+                2
+            } else {
+                1
+            };
+            let prefix = (lines.len() - current_line_index).saturating_sub(trailing_lines);
+            if prefix == 0 || (current_line_index == 0 && widow_control && prefix < 2) {
+                let required = paragraph_fragment_height(reserved_before, lines_height + after);
+                if required - reserved_before
+                    <= paginator.get_column_capacity_with_trailing(trailing) - trailing
+                    && paginator.page_fragment_count(state_idx) > 0
+                {
+                    let pen_y = paginator.state(state_idx).pen_y;
+                    let next_idx = if has_float_bands {
+                        paginator.ensure_fits_with_trailing(required + trailing, trailing)
+                    } else {
+                        paginator.advance_for_overflow()
+                    };
+                    let next = paginator.state(next_idx);
+                    if next_idx != state_idx
+                        || next.column_index != column_index
+                        || next.pen_y > pen_y
+                    {
+                        continue;
+                    }
+                }
+            } else {
+                fitting_lines = prefix;
+                lines_height = lines[current_line_index..current_line_index + fitting_lines]
+                    .iter()
+                    .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                    .sum::<f64>()
+                    - if current_line_index == 0 {
+                        dropped_lead_skip
+                    } else {
+                        0.0
+                    };
+                pushed_keep = true;
             }
         }
 
@@ -1716,6 +1878,7 @@ fn layout_paragraph(
         );
 
         let fragment = Fragment::Paragraph(ParagraphFragment {
+            horizontal_frame: None,
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
             y: 0.0, // set by add_fragment
@@ -1729,11 +1892,12 @@ fn layout_paragraph(
             carried_to_next: Some(!is_last_fragment),
         });
 
-        paginator.add_fragment(
+        paginator.add_fragment_with_trailing(
             fragment,
             lines_height,
             effective_space_before,
             effective_space_after,
+            trailing_leading(block, &lines[current_line_index + fitting_lines - 1]),
         );
         if paint_skip > 0.0 {
             // Painting still reads the measured skip; only its origin compensates.
@@ -1749,10 +1913,20 @@ fn layout_paragraph(
 
         // leftover lines: move the pen to a column/page with room for the next;
         // a line widow control pushed down still fits here, so break anyway
-        if pushed_widow {
+        if pushed_keep && has_float_bands {
+            let (after, trailing) = keep_with_next_after.unwrap_or((0.0, 0.0));
+            paginator.ensure_fits_with_trailing(
+                paragraph_min_trailing_slice(block, measure) + after + trailing,
+                trailing,
+            );
+        } else if pushed_widow || pushed_keep {
             paginator.advance_for_overflow();
         } else if current_line_index < lines.len() {
-            paginator.ensure_fits(lines[current_line_index].line_height);
+            paginator.ensure_fits_with_trailing(
+                lines[current_line_index].line_height
+                    + lines[current_line_index].float_skip_before.unwrap_or(0.0),
+                trailing_leading(block, &lines[current_line_index]),
+            );
         }
     }
 
@@ -2039,8 +2213,8 @@ fn resolve_object_position(
         &crate::anchor::AnchorFrame {
             page_width: page.size.w,
             page_height: page.size.h,
-            margin_left: margins.left,
-            margin_right: margins.right,
+            margin_left: paginator.active_margins().left,
+            margin_right: paginator.active_margins().right,
             margin_top: margins.top,
             margin_bottom: margins.bottom,
             flow_x: column_x,
@@ -2174,7 +2348,7 @@ mod pagination_rule_tests {
     fn line(height: f64) -> serde_json::Value {
         json!({
             "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
-            "width": 10, "ascent": 8, "descent": 2, "lineHeight": height,
+            "width": 10, "ascent": height * 0.8, "descent": height * 0.2, "lineHeight": height,
         })
     }
 
@@ -2235,6 +2409,187 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    fn counted_keep_layout(mut value: Input, reference: bool) -> (Vec<u8>, usize) {
+        use crate::keep_together::{KEEP_REFERENCE, KEEP_WORK};
+
+        KEEP_WORK.with(|work| work.set(0));
+        KEEP_REFERENCE.with(|flag| flag.set(reference));
+        let result = layout_document(&mut value);
+        KEEP_REFERENCE.with(|flag| flag.set(false));
+        let count = KEEP_WORK.with(|work| work.get());
+        (serde_json::to_vec(&result.unwrap()).unwrap(), count)
+    }
+
+    fn keep_run_input(count: usize, split_every_tenth: bool, height: f64) -> Input {
+        let mut blocks: Vec<_> = (0..count)
+            .map(|index| {
+                paragraph(
+                    index as u32,
+                    if split_every_tenth && index % 10 == 9 {
+                        2
+                    } else {
+                        1
+                    },
+                    height,
+                    json!({"keepNext": true, "widowControl": false}),
+                )
+            })
+            .collect();
+        blocks.push(paragraph(count as u32, 1, height, json!({})));
+        input(blocks)
+    }
+
+    #[test]
+    fn long_keep_runs_visit_members_linearly_with_page_bounded_witnesses() {
+        for split_every_tenth in [false, true] {
+            let mut counts = Vec::new();
+            let mut reference_counts = Vec::new();
+            for count in [100, 200] {
+                let value = keep_run_input(count, split_every_tenth, 10.0);
+                let (actual, work) = counted_keep_layout(value.clone(), false);
+                let (expected, reference_work) = counted_keep_layout(value, true);
+                assert_eq!(actual, expected);
+                let expected_work = if split_every_tenth {
+                    13 * count - 9
+                } else {
+                    14 * count - 11
+                };
+                assert_eq!(work, expected_work);
+                counts.push(work);
+                reference_counts.push(reference_work);
+            }
+            assert!(counts[1] * 10 <= counts[0] * 22, "{counts:?}");
+            assert!(reference_counts[1] * 10 >= reference_counts[0] * 37);
+        }
+    }
+
+    #[test]
+    fn zero_height_keep_runs_skip_zero_continuations() {
+        let (_, small) = counted_keep_layout(keep_run_input(100, false, 0.0), false);
+        let (_, large) = counted_keep_layout(keep_run_input(200, false, 0.0), false);
+        assert_eq!((small, large), (499, 999));
+        assert!(large * 10 <= small * 22);
+    }
+
+    #[test]
+    fn cached_keep_witnesses_preserve_reference_layout_bytes() {
+        for split_every_tenth in [false, true] {
+            for float_bands in [false, true] {
+                let mut value = keep_run_input(36, split_every_tenth, 7.3);
+                for (index, measured) in value.measured.iter_mut().enumerate() {
+                    let (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(measure)) =
+                        (&mut measured.block, &mut measured.measure)
+                    else {
+                        unreachable!();
+                    };
+                    let attrs = block.attrs.as_mut().unwrap();
+                    attrs.spacing = Some(crate::types::ParagraphSpacing {
+                        before: Some(if index % 7 == 0 { -20.1 } else { 1.3 }),
+                        after: Some(if index % 7 == 6 { -20.7 } else { 2.9 }),
+                        ..Default::default()
+                    });
+                    if index % 6 == 0 {
+                        measure.lines = vec![measure.lines[0].clone(); 4];
+                        measure.total_height = 4.0 * 7.3;
+                        attrs.keep_lines = Some(true);
+                    }
+                    if index % 5 == 0 {
+                        attrs.widow_control = Some(true);
+                    }
+                    if index % 4 == 0 {
+                        measure.lines[0].float_skip_before = Some(13.7);
+                    }
+                }
+                if float_bands {
+                    let mut serialized = serde_json::to_value(&value).unwrap();
+                    serialized["options"]["sectionPageFloatBands"] = json!([
+                        {"default": [{"top": 40, "bottom": 47}]}
+                    ]);
+                    value = serde_json::from_value(serialized).unwrap();
+                }
+                let (actual, _) = counted_keep_layout(value.clone(), false);
+                let (expected, _) = counted_keep_layout(value, true);
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn cached_keep_table_witnesses_preserve_page_dependent_measurements() {
+        use crate::keep_together::{
+            analyze_keep_with_next, measure_keep_with_next_group_witnessing,
+        };
+
+        let mut value = keep_run_input(24, false, 3.7);
+        let cell = paragraph(100, 4, 7.3, json!({}));
+        value.measured[24] = serde_json::from_value(json!({
+            "block": {
+                "kind": "table", "id": 24, "columnWidths": [100],
+                "rows": [{"id": 200, "cells": [{"id": 300, "blocks": [cell["block"]]}]}]
+            },
+            "measure": {
+                "kind": "table", "totalWidth": 100, "totalHeight": 29.2,
+                "columnWidths": [100],
+                "rows": [{"height": 29.2, "cells": [{
+                    "width": 100, "height": 29.2, "blocks": [cell["measure"]]
+                }]}]
+            }
+        }))
+        .unwrap();
+        let scan = analyze_keep_with_next(&value.measured);
+        let whole_group = &scan.groups_by_head[&0];
+        let mut run = KeepRun::new(whole_group, &value.measured).unwrap();
+        for start in 0..24 {
+            run.starting_at(start);
+            let group = crate::keep_together::KeepWithNextGroup {
+                head_index: start,
+                tail_index: 23,
+                members: (start..24).collect(),
+                follower: Some(24),
+            };
+            for capacity in [20.0, 100.0, 500.0] {
+                for split_first_row in [false, true] {
+                    for every_cell_starts in [false, true] {
+                        let current = measure_keep_with_next_group_witnessing(
+                            &group,
+                            &value.measured,
+                            |before| before + 1.3,
+                            2.9,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                        ) - 0.7;
+                        let fresh = measure_keep_with_next_group_witnessing(
+                            &group,
+                            &value.measured,
+                            |_| 0.0,
+                            0.0,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                        ) - 1.1;
+                        let actual = run.heights(
+                            &value.measured,
+                            |before| before + 1.3,
+                            2.9,
+                            capacity,
+                            split_first_row,
+                            every_cell_starts,
+                            0.7,
+                            1.1,
+                        );
+                        if let Some((actual_current, actual_fresh, _)) = actual {
+                            assert_eq!(actual_current.to_bits(), current.to_bits());
+                            assert_eq!(actual_fresh.to_bits(), fresh.to_bits());
+                        } else {
+                            assert!(fresh > capacity);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn widow_rounding_input(
@@ -2366,6 +2721,132 @@ mod pagination_rule_tests {
             })
             .next_back();
         assert_eq!(last_row_end, Some(2));
+    }
+
+    fn two_column_keep_table(keeps: &[(bool, bool)]) -> serde_json::Value {
+        let cell = |row: usize, column: usize, keep_next: bool| {
+            json!({ "id": 30 + 2 * row + column, "blocks": [{
+                "kind": "paragraph", "id": 50 + 2 * row + column,
+                "runs": [{ "kind": "text", "text": "x", "fmt": {} }],
+                "attrs": { "keepNext": keep_next, "widowControl": false },
+            }] })
+        };
+        let extent = || {
+            json!({ "height": 20, "cells": [
+                { "width": 90, "height": 20,
+                  "blocks": [{ "kind": "paragraph", "lines": [line(20.0)], "totalHeight": 20 }] },
+                { "width": 90, "height": 20,
+                  "blocks": [{ "kind": "paragraph", "lines": [line(20.0)], "totalHeight": 20 }] },
+            ] })
+        };
+        json!({
+            "block": {
+                "kind": "table", "id": 2,
+                "rows": keeps.iter().enumerate().map(|(row, (first, second))| {
+                    json!({ "id": 20 + row, "cells": [cell(row, 0, *first), cell(row, 1, *second)] })
+                }).collect::<Vec<_>>(),
+                "columnWidths": [90, 90],
+            },
+            "measure": {
+                "kind": "table", "columnWidths": [90, 90],
+                "totalWidth": 180, "totalHeight": 20 * keeps.len(),
+                "rows": keeps.iter().map(|_| extent()).collect::<Vec<_>>(),
+            },
+        })
+    }
+
+    fn table_fragment_rows(result: &Layout) -> Vec<(usize, usize, usize)> {
+        result
+            .pages
+            .iter()
+            .enumerate()
+            .flat_map(|(page, value)| {
+                value
+                    .fragments
+                    .iter()
+                    .filter_map(move |fragment| match fragment {
+                        Fragment::Table(table) => Some((page, table.row_start, table.row_end)),
+                        _ => None,
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_row_with_keep_next_only_after_its_first_cell_does_not_chain_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (false, true),
+            (false, true),
+            (false, true),
+            (false, true),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 0);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn a_row_with_keep_next_in_every_cell_chains_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, true),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 1);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn a_row_with_keep_next_in_its_first_cell_chains_to_the_next_row() {
+        let table = two_column_keep_table(&[
+            (true, false),
+            (true, false),
+            (true, false),
+            (true, false),
+            (false, false),
+            (false, false),
+        ]);
+        let result = layout(vec![paragraph(1, 3, 20.0, json!({})), table]);
+        let fragments = table_fragment_rows(&result);
+        assert!(fragments.len() > 1);
+        assert_eq!(fragments[0].0, 1);
+        assert_eq!(fragments[0].1, 0);
+        assert!(fragments[0].2 > 1);
+    }
+
+    #[test]
+    fn row_keep_chains_follow_the_first_cell() {
+        let chains = |table: serde_json::Value| {
+            let measured: MeasuredBlock = serde_json::from_value(table).unwrap();
+            let LayoutBlock::Table(block) = &measured.block else {
+                panic!("table block expected");
+            };
+            let BlockExtent::Table(measure) = &measured.measure else {
+                panic!("table measure expected");
+            };
+            hooks::row_keep_chains(block, measure)
+        };
+        let mixed = two_column_keep_table(&[(false, true), (false, true), (false, false)]);
+        assert_eq!(chains(mixed), vec![None, None, None]);
+        let every = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
+        assert_eq!(chains(every), vec![Some((40.0, 2)), None, None]);
+        let first = two_column_keep_table(&[(true, false), (true, false), (false, false)]);
+        assert_eq!(chains(first), vec![Some((40.0, 2)), None, None]);
+        let mut empty = two_column_keep_table(&[(true, true), (true, true), (false, false)]);
+        empty["block"]["rows"][0]["cells"] = json!([]);
+        assert_eq!(chains(empty), vec![None, Some((20.0, 2)), None]);
     }
 
     #[test]
@@ -3850,6 +4331,79 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn incremental_text_edits_restore_continuous_side_margins() {
+        let mut measured: Vec<_> = (0..24)
+            .map(|id| paragraph(id, 1, 20.0, json!({})))
+            .collect();
+        measured.insert(
+            7,
+            json!({
+                "block": {
+                    "kind": "sectionBreak", "id": "section", "type": "continuous",
+                    "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 },
+                },
+                "measure": { "kind": "sectionBreak" },
+            }),
+        );
+        let value = |measured| {
+            let mut value = input(measured);
+            value.options.final_margins = serde_json::from_value(json!({
+                "top": 20, "right": 30, "bottom": 20, "left": 30,
+            }))
+            .unwrap();
+            value.options.body_break_type = Some(SectionBreakType::Continuous);
+            value
+        };
+        let previous = layout_document_checkpointed(&mut value(measured.clone())).unwrap();
+        let shared_page = &previous.layout.pages[1];
+        assert_eq!(shared_page.margins.left, 10.0);
+        let Fragment::Paragraph(first_new) = &shared_page.fragments[2] else {
+            panic!("paragraph expected")
+        };
+        assert_eq!(
+            (first_new.x, first_new.y, first_new.width),
+            (30.0, 50.0, 140.0)
+        );
+        for page in &previous.layout.pages[2..] {
+            assert_eq!((page.margins.left, page.margins.right), (30.0, 30.0));
+            assert_eq!((page.margins.top, page.margins.bottom), (20.0, 20.0));
+        }
+        assert!(previous.checkpoints.iter().any(|checkpoint| {
+            checkpoint.section_index == 1
+                && checkpoint.page_index > 1
+                && checkpoint.flow.margins.left == 30.0
+                && checkpoint.flow.margins.right == 30.0
+        }));
+
+        for dirty in [9, 17] {
+            let mut next = measured.clone();
+            next[dirty]["block"]["runs"][0]["text"] = json!("y");
+            let mut fingerprints = [1_u64; 25];
+            fingerprints[dirty] = 2;
+            let incremental = layout_document_incremental(
+                &mut value(next.clone()),
+                &mut previous.layout.clone(),
+                &previous.checkpoints,
+                &[1_u64; 25],
+                &fingerprints,
+                dirty,
+            )
+            .unwrap();
+            let full = layout_document_checkpointed(&mut value(next)).unwrap();
+            if dirty == 9 {
+                assert_eq!(incremental.rebuilt_page_start, 1);
+            } else {
+                assert!(incremental.rebuilt_page_start > 1);
+            }
+            assert_eq!(
+                serde_json::to_vec(&incremental.layout).unwrap(),
+                serde_json::to_vec(&full.layout).unwrap()
+            );
+            assert_eq!(incremental.checkpoints, full.checkpoints);
+        }
+    }
+
+    #[test]
     fn incremental_text_edits_converge_across_sections_with_the_same_geometry() {
         for (break_type, placed_blocks) in [("continuous", 7), ("nextPage", 6)] {
             let mut measured: Vec<_> = (0..15)
@@ -4001,7 +4555,7 @@ mod pagination_rule_tests {
         let line = |head: (usize, usize), tail: (usize, usize)| {
             json!({
                 "headRun": head.0, "headChar": head.1, "tailRun": tail.0, "tailChar": tail.1,
-                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 20,
+                "width": 10, "ascent": 16, "descent": 4, "lineHeight": 20,
             })
         };
         let mut position = 0;
@@ -4152,7 +4706,7 @@ mod pagination_rule_tests {
                             "kind": "paragraph", "totalHeight": 40,
                             "lines": [{
                                 "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": len,
-                                "width": 10, "ascent": 8, "descent": 2, "lineHeight": 40,
+                                "width": 10, "ascent": 32, "descent": 8, "lineHeight": 40,
                             }],
                         },
                     })
@@ -4270,6 +4824,110 @@ mod pagination_rule_tests {
         };
         assert_incremental_matches_full(interior(false), interior(true), &[2]);
         assert_incremental_matches_full(interior(true), interior(false), &[2]);
+    }
+
+    #[test]
+    fn keepnext_trailing_slice_does_not_subtract_an_excluded_lead_skip() {
+        let mut kept = paragraph(1, 4, 10.0, json!({ "keepNext": true }));
+        kept["measure"]["lines"][0]["floatSkipBefore"] = json!(30.0);
+        kept["measure"]["totalHeight"] = json!(70.0);
+        let result = layout(vec![
+            kept,
+            paragraph(2, 9, 10.0, json!({ "keepLines": true })),
+        ]);
+        assert_eq!(result.pages.len(), 2);
+        assert_eq!(paragraph_slices(&result, 1.0), [(0, 0, 4)]);
+        assert_eq!(paragraph_slices(&result, 2.0), [(1, 0, 9)]);
+    }
+
+    #[test]
+    fn a_keepnext_continuation_can_leave_one_line_before_its_reserved_tail() {
+        let mut value = input(vec![
+            paragraph(0, 2, 10.0, json!({})),
+            paragraph(1, 5, 10.0, json!({ "keepNext": true })),
+            paragraph(2, 2, 10.0, json!({ "keepLines": true })),
+        ]);
+        value.options.page_size.as_mut().unwrap().h = 60.0;
+        let mut result = layout_document(&mut value.clone()).unwrap();
+        let mut paginator = Paginator::new(
+            value.options.page_size.clone().unwrap(),
+            resolve_page_margins(value.options.margins.as_ref()),
+            default_columns(),
+            None,
+        )
+        .unwrap();
+        for (index, measured) in value.measured.iter().enumerate() {
+            let MeasuredBlock {
+                block: LayoutBlock::Paragraph(block),
+                measure: BlockExtent::Paragraph(measure),
+            } = measured
+            else {
+                panic!("expected paragraph");
+            };
+            layout_paragraph(
+                block,
+                measure,
+                &mut paginator,
+                false,
+                0.0,
+                (index == 1).then_some((20.0, 0.0)),
+            )
+            .unwrap();
+        }
+        result.pages = paginator.pages;
+        assert_eq!(
+            paragraph_slices(&result, 1.0),
+            [(0, 0, 2), (1, 2, 3), (2, 3, 5)]
+        );
+        assert_eq!(paragraph_slices(&result, 2.0), [(2, 0, 2)]);
+    }
+
+    #[test]
+    fn incremental_placement_inside_an_oversized_keepnext_chain_matches_full() {
+        let value = input(vec![
+            paragraph(0, 10, 10.0, json!({ "keepNext": true, "keepLines": true })),
+            paragraph(1, 10, 10.0, json!({ "keepNext": true })),
+            paragraph(2, 1, 10.0, json!({})),
+        ]);
+        let full = layout_document_checkpointed(&mut value.clone()).unwrap();
+        let config = SectionLayoutConfig {
+            page_size: value.options.page_size.clone().unwrap(),
+            margins: resolve_page_margins(value.options.margins.as_ref()),
+            columns: value.options.columns.clone(),
+        };
+        let plan = prescan(
+            &value.measured,
+            &config,
+            config.clone(),
+            value.options.body_break_type,
+        )
+        .unwrap();
+        let mut paginator = origin_paginator(&config, &plan, &value.options).unwrap();
+        let MeasuredBlock {
+            block: LayoutBlock::Paragraph(block),
+            measure: BlockExtent::Paragraph(measure),
+        } = &value.measured[0]
+        else {
+            panic!("expected paragraph");
+        };
+        layout_paragraph(block, measure, &mut paginator, false, 0.0, None).unwrap();
+        let resumed = place::<u64>(
+            &value.measured,
+            &plan,
+            &mut paginator,
+            &config,
+            1,
+            0,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(resumed.placed_blocks, 2);
+        assert_eq!(
+            serde_json::to_value(&paginator.pages).unwrap(),
+            serde_json::to_value(&full.layout.pages).unwrap()
+        );
+        assert_eq!(paragraph_slices(&full.layout, 1.0), [(1, 0, 8), (2, 8, 10)]);
     }
 
     fn assert_incremental_matches_full(
@@ -4780,6 +5438,8 @@ mod pagination_rule_tests {
     fn widow_control_keeps_the_pushed_line_when_the_last_two_cannot_share_a_page() {
         let mut block = paragraph(1, 4, 20.0, json!({}));
         block["measure"]["lines"][3]["lineHeight"] = json!(90.0);
+        block["measure"]["lines"][3]["ascent"] = json!(72.0);
+        block["measure"]["lines"][3]["descent"] = json!(18.0);
         let result = layout(vec![block]);
         assert_eq!(result.pages.len(), 2);
     }

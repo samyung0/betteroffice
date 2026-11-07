@@ -285,9 +285,13 @@ pub fn write_pptx_with_edits(
                 if root != original_root {
                     let xml = if layout_part_path.is_some() || has_placeholder_patch(shapes) {
                         crate::attribute_patch::patch_attributes(bytes, &original_root, &root)
+                            .or_else(|| {
+                                crate::slide_splice::splice_slide(bytes, &original_root, &root)
+                            })
                             .unwrap_or_else(|| serialize_xml(&root))
                     } else {
-                        serialize_xml(&root)
+                        crate::slide_splice::splice_slide(bytes, &original_root, &root)
+                            .unwrap_or_else(|| serialize_xml(&root))
                     };
                     sink.store(part_path, xml);
                 }
@@ -3550,6 +3554,7 @@ fn span_elements(
     }
     let ranges = align_span(segments, source_runs, span);
     let mut output = Vec::new();
+    let mut last_source = None;
     let mut offset = 0;
     let mut range_index = 0;
     let mut range_start = 0;
@@ -3575,6 +3580,7 @@ fn span_elements(
                 output.push(XmlNode::Element(segment_element(
                     segment, template, theme, prefixes,
                 )));
+                last_source = None;
                 offset += 1;
                 break;
             }
@@ -3588,7 +3594,23 @@ fn span_elements(
             } else {
                 segment_element(&piece, source.child("rPr"), theme, prefixes)
             };
-            output.push(XmlNode::Element(element));
+            let previous = output.last_mut().and_then(|node| match node {
+                XmlNode::Element(previous)
+                    if last_source == Some(range.source)
+                        && previous.local_name() == "r"
+                        && element.local_name() == "r"
+                        && previous.child("rPr") == element.child("rPr") =>
+                {
+                    previous.child_mut("t")
+                }
+                _ => None,
+            });
+            if let Some(previous) = previous {
+                previous.children.push(XmlNode::Text(piece.text.to_owned()));
+            } else {
+                output.push(XmlNode::Element(element));
+            }
+            last_source = Some(range.source);
             offset += length;
             remaining = &remaining[length..];
             if remaining.is_empty() {
@@ -5257,10 +5279,65 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuilt_run_writes_its_literal_strike() {
+        for authored in [None, Some("noStrike"), Some("sngStrike"), Some("dblStrike")] {
+            for strike in [None, Some("noStrike"), Some("sngStrike"), Some("dblStrike")] {
+                let attribute = authored
+                    .map(|strike| format!(r#" strike="{strike}""#))
+                    .unwrap_or_default();
+                let source = format!(
+                    r#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"{attribute}><a:ea typeface="Yu Gothic"/></a:rPr><a:t>text</a:t></a:r></a:p>"#
+                );
+                for text in ["text", "edited"] {
+                    let xml = rebuilt_paragraph(
+                        source.as_bytes(),
+                        &[(
+                            text,
+                            RunProperties {
+                                strike: strike.map(str::to_owned),
+                                ..RunProperties::default()
+                            },
+                        )],
+                    );
+                    if let Some(strike) = strike {
+                        assert!(xml.contains(&format!(r#"strike="{strike}""#)), "{xml}");
+                    } else {
+                        assert!(!xml.contains("strike="), "{xml}");
+                    }
+                    assert!(xml.contains(r#"lang="en-US""#), "{xml}");
+                    assert!(xml.contains(r#"<a:ea typeface="Yu Gothic"/>"#), "{xml}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_strike_clear_preserves_a_matched_styled_line_break() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:t>First</a:t></a:r><a:br><a:rPr lang="en-US" strike="dblStrike"/></a:br><a:r><a:t>Second</a:t></a:r></a:p>"#,
+            &[("First\nSecond", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(r#"<a:br><a:rPr lang="en-US" strike="dblStrike"/></a:br>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
     fn an_edit_spanning_several_runs_keeps_each_survivor_on_its_source_run() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[("Seethe doc now", RunProperties::default())],
+            &[
+                ("See", RunProperties::default()),
+                (
+                    "the doc",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
+                (" now", RunProperties::default()),
+            ],
         );
         assert!(
             xml.contains(r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See</a:t></a:r>"#),
@@ -5513,7 +5590,17 @@ mod tests {
     fn text_typed_at_the_end_of_a_link_stays_inside_it() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[("See the docsX today", RunProperties::default())],
+            &[
+                ("See ", RunProperties::default()),
+                (
+                    "the docsX",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
+                (" today", RunProperties::default()),
+            ],
         );
         assert!(
             xml.contains(&format!("<a:r>{LINK_PROPERTIES}<a:t>the docsX</a:t></a:r>")),
@@ -5522,13 +5609,20 @@ mod tests {
 
         let bold = RunProperties {
             bold: Some(true),
+            strike: Some("sngStrike".to_owned()),
             ..RunProperties::default()
         };
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
             &[
                 ("See ", RunProperties::default()),
-                ("the docs", RunProperties::default()),
+                (
+                    "the docs",
+                    RunProperties {
+                        strike: Some("sngStrike".to_owned()),
+                        ..RunProperties::default()
+                    },
+                ),
                 ("X", bold),
                 (" today", RunProperties::default()),
             ],

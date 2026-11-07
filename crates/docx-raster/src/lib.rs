@@ -4,6 +4,7 @@
 compile_error!("betteroffice-docx-raster is server-side only");
 
 mod font;
+mod shadow;
 
 pub use font::{GlyphCache, measure_text};
 
@@ -20,10 +21,11 @@ use docx_layout::display_list::{
     LinePrimitive, PageBorderPrimitive, PageBorderSide, PageBorderZOrder, Primitive, RectPrimitive,
     RevisionKind, ShapePathCommand, ShapePrimitive,
 };
+use ooxml_raster::{encode_png, parse_css_color as parse_color};
 use ooxml_text::{FontId, FontStore};
 use serde_json::{Number, Value};
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LineCap, LineJoin,
+    Color, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LineCap, LineJoin,
     LinearGradient, Mask, Paint, Path, PathBuilder, PathSegment, Pixmap, PixmapPaint, Point,
     RadialGradient, Rect, SpreadMode, Stroke, StrokeDash, Transform,
 };
@@ -141,11 +143,14 @@ impl<'a> RenderResources<'a> {
     }
 }
 
-/// A rendered page and the image references it left undrawn.
+/// A rendered page, the image references it left undrawn, and the effects this
+/// backend cannot draw yet, by kind (`text.textOutline`, `shape.effects`, ...),
+/// which it left out while drawing the rest of their primitive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPage {
     pub bytes: Vec<u8>,
     pub skipped_images: usize,
+    pub skipped_effects: BTreeMap<String, usize>,
 }
 
 /// Renders one display-list page to deterministic PNG bytes.
@@ -182,20 +187,36 @@ pub fn render_page_cached(
     glyphs: &mut GlyphCache,
     images: &mut ImageCache,
 ) -> Result<RenderedPage, String> {
+    render_page_cached_scaled(display_list, page_ordinal, resources, glyphs, images, 1.0)
+}
+
+pub fn render_page_cached_scaled(
+    display_list: &DisplayList,
+    page_ordinal: usize,
+    resources: &RenderResources<'_>,
+    glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
+    scale: f32,
+) -> Result<RenderedPage, String> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err("scale must be finite and positive".to_owned());
+    }
     let page = display_list
         .pages
         .get(page_ordinal)
         .ok_or_else(|| format!("page ordinal {page_ordinal} is out of range"))?;
-    let width = page_dimension(&page.width, "page width")?;
-    let height = page_dimension(&page.height, "page height")?;
+    let width = scaled_page_dimension(&page.width, "page width", scale)?;
+    let height = scaled_page_dimension(&page.height, "page height", scale)?;
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
     let mut renderer = Renderer::new(width, height, glyphs, images);
+    renderer.scale = scale;
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
         skipped_images: renderer.scratch.images.skipped,
+        skipped_effects: renderer.scratch.skipped,
     })
 }
 
@@ -378,9 +399,16 @@ struct Scratch<'k> {
     images: PageImages<'k>,
     masks: MaskCache,
     budget: PageBudget,
+    skipped: BTreeMap<String, usize>,
+}
+
+/// Counts an effect left out of a primitive that was otherwise drawn.
+pub(crate) fn skip_effect(skipped: &mut BTreeMap<String, usize>, kind: &str) {
+    *skipped.entry(kind.to_owned()).or_default() += 1;
 }
 
 struct Renderer<'k> {
+    scale: f32,
     clips: ClipSurface,
     scratch: Scratch<'k>,
 }
@@ -393,6 +421,7 @@ impl<'k> Renderer<'k> {
         images: &'k mut ImageCache,
     ) -> Self {
         Self {
+            scale: 1.0,
             clips: ClipSurface::default(),
             scratch: Scratch {
                 glyphs,
@@ -400,6 +429,7 @@ impl<'k> Renderer<'k> {
                 images: PageImages::new(images),
                 masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
+                skipped: BTreeMap::new(),
             },
         }
     }
@@ -422,7 +452,12 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order == Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         let (watermark, body) = page.primitives.split_at(
             page.watermark_primitive_count
@@ -455,7 +490,12 @@ impl<'k> Renderer<'k> {
             .iter()
             .filter(|border| border.z_order != Some(PageBorderZOrder::Back))
         {
-            paint_page_border(pixmap, border, &mut self.scratch.budget)?;
+            paint_page_border(
+                pixmap,
+                border,
+                &mut self.scratch.budget,
+                Transform::from_scale(self.scale, self.scale),
+            )?;
         }
         Ok(())
     }
@@ -470,25 +510,35 @@ impl<'k> Renderer<'k> {
         let attrs = primitive_attrs(primitive);
         validate_visual_attrs(primitive, attrs)?;
         let opacity = primitive_opacity(primitive)?;
-        let clip = clip_rect(attrs)?;
+        let clip = clip_rect(attrs)?.map(|clip| FRect {
+            x: clip.x * self.scale,
+            y: clip.y * self.scale,
+            w: clip.w * self.scale,
+            h: clip.h * self.scale,
+        });
+        let base = Transform::from_scale(self.scale, self.scale);
         let clips = &mut self.clips;
         let scratch = &mut self.scratch;
         if let Some(clip) = clip {
             clips.paint(pixmap, clip, scratch, |target, scratch, transform, mask| {
                 paint_primitive_core(
-                    target, primitive, resources, scratch, transform, mask, opacity, scope,
+                    target,
+                    primitive,
+                    resources,
+                    scratch,
+                    if base.is_identity() {
+                        transform
+                    } else {
+                        transform.pre_concat(base)
+                    },
+                    mask,
+                    opacity,
+                    scope,
                 )
             })
         } else {
             paint_primitive_core(
-                pixmap,
-                primitive,
-                resources,
-                scratch,
-                Transform::identity(),
-                None,
-                opacity,
-                scope,
+                pixmap, primitive, resources, scratch, base, None, opacity, scope,
             )
         }
     }
@@ -518,6 +568,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_text(&mut context, run)
         }
@@ -533,6 +584,7 @@ fn paint_primitive_core<'k>(
                 mask,
                 retained_mask_bytes,
                 opacity,
+                skipped: &mut scratch.skipped,
             };
             font::paint_glyph_run(&mut context, run)
         }
@@ -543,9 +595,9 @@ fn paint_primitive_core<'k>(
         Primitive::Image(image) => paint_image(
             pixmap, image, resources, scratch, transform, mask, opacity, scope,
         ),
-        Primitive::Shape(shape) => {
-            paint_shape(pixmap, shape, transform, mask, opacity, &mut scratch.budget)
-        }
+        Primitive::Shape(shape) => paint_shape(
+            pixmap, shape, resources, scratch, transform, mask, opacity, scope,
+        ),
         Primitive::Decoration(decoration) => paint_decoration(
             pixmap,
             decoration,
@@ -683,41 +735,399 @@ fn paint_decoration(
     Ok(())
 }
 
-fn paint_shape(
+#[allow(clippy::too_many_arguments)]
+fn paint_shape<'k>(
     pixmap: &mut Pixmap,
-    shape: &ShapePrimitive,
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
     transform: Transform,
     mask: Option<&Mask>,
     opacity: f32,
-    budget: &mut PageBudget,
+    scope: ImageScope<'k>,
 ) -> Result<(), String> {
-    if shape
+    if shape.geometry_path.is_empty() && has_picture_fill(shape) {
+        return Ok(());
+    }
+    let picture = picture_fill_source(shape, resources, scratch, scope);
+    let budget = &mut scratch.budget;
+    let (shadow, undrawn) = shape_shadow(&shape.attrs.effects)?;
+    for _ in 0..undrawn {
+        skip_effect(&mut scratch.skipped, "shape.effects");
+    }
+    budget.charge_path(shape.geometry_path.len() as u64)?;
+    let path = build_shape_path(&shape.geometry_path)?;
+    let visual = shape_transform(shape)?;
+    let transform = transform.pre_concat(visual);
+    let fill = if picture.is_some() {
+        None
+    } else {
+        shape_fill(shape, opacity)?
+    };
+    let picture_draws = picture
+        .as_ref()
+        .map(|source| picture_fill_draws(shape, source))
+        .transpose()?;
+    if let Some(draws) = &picture_draws {
+        budget.charge_path(draws.draws.len() as u64)?;
+        budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+    }
+    let stroked = shape_stroke(shape, opacity)?;
+    if let Some(dash) = stroked.as_ref().and_then(|stroked| stroked.dash.as_ref()) {
+        budget.charge_path(dash_segments(path_length(&path), dash))?;
+    }
+    type Draw<'d> = Box<dyn Fn(&mut Pixmap, Transform, Option<&Mask>) + 'd>;
+    let mut parts: Vec<Draw<'_>> = Vec::new();
+    if let (Some(source), Some(draws)) = (&picture, &picture_draws) {
+        let path = &path;
+        parts.push(Box::new(
+            move |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                paint_picture_fill(target, path, source, draws, opacity, transform, mask);
+            },
+        ));
+    }
+    if let Some(paint) = &fill {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.fill_path(&path, paint, FillRule::Winding, transform, mask);
+            },
+        ));
+    }
+    if let Some(stroked) = &stroked {
+        parts.push(Box::new(
+            |target: &mut Pixmap, transform: Transform, mask: Option<&Mask>| {
+                target.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+            },
+        ));
+    }
+    let reach =
+        stroked.as_ref().map_or(0.0, |stroked| stroked.stroke.width) * max_axis_scale(transform);
+    let bounds = path.bounds().transform(transform).and_then(|bounds| {
+        Rect::from_ltrb(
+            bounds.left() - reach,
+            bounds.top() - reach,
+            bounds.right() + reach,
+            bounds.bottom() + reach,
+        )
+    });
+    for draw in &parts {
+        if let (Some(shadow), Some(bounds)) = (shadow, bounds)
+            && let Some(mut surface) = shadow::shadow_surface(
+                (pixmap.width(), pixmap.height()),
+                bounds,
+                &shadow,
+                budget,
+                scratch.masks.bytes,
+            )?
+        {
+            draw(
+                &mut surface.pixmap,
+                surface.offset.pre_concat(transform),
+                None,
+            );
+            shadow::composite_shadow(pixmap, mask, surface, &shadow);
+        }
+        draw(pixmap, transform, mask);
+    }
+    Ok(())
+}
+
+/// The most tiles a picture fill repeats before it stretches instead, as the
+/// web backend does.
+const MAX_PICTURE_FILL_TILES: f32 = 4096.0;
+
+fn has_picture_fill(shape: &ShapePrimitive) -> bool {
+    shape
         .attrs
         .fill_paint
         .as_ref()
         .and_then(|paint| paint.get("kind"))
         .and_then(Value::as_str)
         == Some("picture")
-    {
-        return Ok(());
+}
+
+/// A picture fill's decoded source. `None` leaves the shape to its solid fill,
+/// as the web backend does for a picture it cannot resolve.
+fn picture_fill_source<'k>(
+    shape: &'k ShapePrimitive,
+    resources: &RenderResources<'_>,
+    scratch: &mut Scratch<'k>,
+    scope: ImageScope<'k>,
+) -> Option<Arc<Pixmap>> {
+    if !has_picture_fill(shape) {
+        return None;
     }
-    if !shape.attrs.effects.is_empty() {
-        return Err("unsupported shape field: effects".to_string());
+    let paint = shape.attrs.fill_paint.as_ref()?;
+    let reference = paint
+        .get("pictureSrc")
+        .or_else(|| paint.get("pictureRelId"))
+        .and_then(Value::as_str);
+    let Some(source) = reference.and_then(|rel_id| image_source(rel_id, scope, resources)) else {
+        scratch.images.skipped += 1;
+        return None;
+    };
+    scratch.images.resolve(source)
+}
+
+/// What a picture fill draws: each source placement, the rectangle a stretched
+/// picture stays inside, and its opacity.
+struct PictureFillDraws {
+    draws: Vec<Transform>,
+    frame: Option<FRect>,
+    opacity: f32,
+}
+
+fn fill_number(paint: &Value, object: &str, key: &str) -> f32 {
+    paint
+        .get(object)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0) as f32
+}
+
+fn picture_fill_draws(shape: &ShapePrimitive, source: &Pixmap) -> Result<PictureFillDraws, String> {
+    let paint = shape
+        .attrs
+        .fill_paint
+        .as_ref()
+        .ok_or_else(|| "picture fill without a paint".to_string())?;
+    let box_x = number_f32(&shape.x)?;
+    let box_y = number_f32(&shape.y)?;
+    let box_w = number_f32(&shape.w)?;
+    let box_h = number_f32(&shape.h)?;
+    let picture_opacity = paint
+        .get("pictureOpacity")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map_or(1.0, |value| value.clamp(0.0, 1.0) as f32);
+    let tiled = paint.get("pictureFillMode").and_then(Value::as_str) == Some("tile");
+    if tiled && let Some(draws) = picture_tiles(paint, source, box_x, box_y, box_w, box_h) {
+        return Ok(PictureFillDraws {
+            draws,
+            frame: None,
+            opacity: picture_opacity,
+        });
     }
-    budget.charge_path(shape.geometry_path.len() as u64)?;
-    let path = build_shape_path(&shape.geometry_path)?;
-    let visual = shape_transform(shape)?;
-    let transform = transform.pre_concat(visual);
-    if let Some(paint) = shape_fill(shape, opacity)? {
-        pixmap.fill_path(&path, &paint, FillRule::Winding, transform, mask);
+    let stretch = |key: &str| fill_number(paint, "pictureStretchRect", key).clamp(-10.0, 10.0);
+    let (left, top) = (stretch("left"), stretch("top"));
+    let (right, bottom) = (stretch("right"), stretch("bottom"));
+    let frame = FRect {
+        x: box_x + left * box_w,
+        y: box_y + top * box_h,
+        w: box_w * (1.0 - left - right),
+        h: box_h * (1.0 - top - bottom),
+    };
+    let crop = |key: &str| fill_number(paint, "pictureSrcRect", key);
+    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    let requested_w = source_width * (1.0 - crop("left") - crop("right"));
+    let requested_h = source_height * (1.0 - crop("top") - crop("bottom"));
+    if frame.w <= 0.0 || frame.h <= 0.0 || requested_w <= 0.0 || requested_h <= 0.0 {
+        return Ok(PictureFillDraws {
+            draws: Vec::new(),
+            frame: None,
+            opacity: picture_opacity,
+        });
     }
-    if let Some(stroked) = shape_stroke(shape, opacity)? {
-        if let Some(dash) = &stroked.dash {
-            budget.charge_path(dash_segments(path_length(&path), dash))?;
+    let (scale_x, scale_y) = (frame.w / requested_w, frame.h / requested_h);
+    Ok(PictureFillDraws {
+        draws: vec![Transform::from_row(
+            scale_x,
+            0.0,
+            0.0,
+            scale_y,
+            frame.x - crop("left") * source_width * scale_x,
+            frame.y - crop("top") * source_height * scale_y,
+        )],
+        frame: Some(frame),
+        opacity: picture_opacity,
+    })
+}
+
+/// The tile grid `a:tile` lays over a shape box, or `None` when it is empty or
+/// past the cap, which stretches instead.
+fn picture_tiles(
+    paint: &Value,
+    source: &Pixmap,
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+) -> Option<Vec<Transform>> {
+    let (source_width, source_height) = (source.width() as f32, source.height() as f32);
+    if box_w <= 0.0 || box_h <= 0.0 {
+        return None;
+    }
+    let tile = |key: &str, default: f32| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .map_or(default, |value| value as f32)
+    };
+    let tile_w = (source_width * tile("scaleX", 1.0).clamp(0.01, 100.0)).max(1.0);
+    let tile_h = (source_height * tile("scaleY", 1.0).clamp(0.01, 100.0)).max(1.0);
+    if ((box_w / tile_w).ceil() + 1.0) * ((box_h / tile_h).ceil() + 1.0) > MAX_PICTURE_FILL_TILES {
+        return None;
+    }
+    let text = |key: &str| {
+        paint
+            .get("pictureTile")
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+    };
+    let alignment = text("alignment").unwrap_or("tl");
+    let mut anchor_x = match alignment {
+        "t" | "ctr" | "b" => box_x + (box_w - tile_w) / 2.0,
+        "tr" | "r" | "br" => box_x + box_w - tile_w,
+        _ => box_x,
+    };
+    let mut anchor_y = match alignment {
+        "l" | "ctr" | "r" => box_y + (box_h - tile_h) / 2.0,
+        "bl" | "b" | "br" => box_y + box_h - tile_h,
+        _ => box_y,
+    };
+    anchor_x += tile("offsetX", 0.0).clamp(-100_000.0, 100_000.0);
+    anchor_y += tile("offsetY", 0.0).clamp(-100_000.0, 100_000.0);
+    let start_col = -((anchor_x - box_x) / tile_w).ceil() as i64;
+    let start_row = -((anchor_y - box_y) / tile_h).ceil() as i64;
+    let flip = text("flip").unwrap_or("none");
+    let flip_x = matches!(flip, "x" | "xy");
+    let flip_y = matches!(flip, "y" | "xy");
+    let (scale_x, scale_y) = (tile_w / source_width, tile_h / source_height);
+    let mut draws = Vec::new();
+    let mut row = start_row;
+    loop {
+        let y = anchor_y + row as f32 * tile_h;
+        if y >= box_y + box_h {
+            break;
         }
-        pixmap.stroke_path(&path, &stroked.paint, &stroked.stroke, transform, mask);
+        let mut col = start_col;
+        loop {
+            let x = anchor_x + col as f32 * tile_w;
+            if x >= box_x + box_w {
+                break;
+            }
+            let mirror_x = flip_x && col.rem_euclid(2) == 1;
+            let mirror_y = flip_y && row.rem_euclid(2) == 1;
+            draws.push(Transform::from_row(
+                if mirror_x { -scale_x } else { scale_x },
+                0.0,
+                0.0,
+                if mirror_y { -scale_y } else { scale_y },
+                if mirror_x { x + tile_w } else { x },
+                if mirror_y { y + tile_h } else { y },
+            ));
+            col += 1;
+        }
+        row += 1;
     }
-    Ok(())
+    Some(draws)
+}
+
+/// Draws a picture fill clipped to its shape, and to the outer mask if any.
+fn paint_picture_fill(
+    target: &mut Pixmap,
+    path: &Path,
+    source: &Pixmap,
+    fill: &PictureFillDraws,
+    opacity: f32,
+    transform: Transform,
+    outer: Option<&Mask>,
+) {
+    let Some(mut clip) = Mask::new(target.width(), target.height()) else {
+        return;
+    };
+    clip.fill_path(path, FillRule::Winding, true, transform);
+    if let Some(frame) = fill.frame
+        && let Some(rect) = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+    {
+        clip.intersect_path(
+            &PathBuilder::from_rect(rect),
+            FillRule::Winding,
+            true,
+            transform,
+        );
+    }
+    if let Some(outer) = outer {
+        for (value, limit) in clip.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*limit)) / 255) as u8;
+        }
+    }
+    let paint = PixmapPaint {
+        opacity: opacity * fill.opacity,
+        quality: FilterQuality::Bicubic,
+        ..PixmapPaint::default()
+    };
+    for placement in &fill.draws {
+        target.draw_pixmap(
+            0,
+            0,
+            source.as_ref(),
+            &paint,
+            transform.pre_concat(*placement),
+            Some(&clip),
+        );
+    }
+}
+
+/// The largest factor `transform` stretches a length by along either axis.
+fn max_axis_scale(transform: Transform) -> f32 {
+    let x = (transform.sx * transform.sx + transform.ky * transform.ky).sqrt();
+    let y = (transform.kx * transform.kx + transform.sy * transform.sy).sqrt();
+    x.max(y)
+}
+
+/// The shadow the web backend draws for a shape, the first shadow, outer shadow
+/// or glow, and how many of the shape's effects it leaves undrawn.
+fn shape_shadow(effects: &[Value]) -> Result<(Option<shadow::Shadow>, usize), String> {
+    let drawn = effects.iter().position(|effect| {
+        matches!(
+            effect.get("kind").and_then(Value::as_str),
+            Some("shadow" | "outerShadow" | "glow")
+        )
+    });
+    let Some(index) = drawn else {
+        return Ok((None, effects.len()));
+    };
+    let effect = &effects[index];
+    let number = |key: &str| {
+        effect
+            .get(key)
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+    };
+    let color = color_with_opacity(
+        effect
+            .get("color")
+            .and_then(Value::as_str)
+            .unwrap_or("#000000"),
+        1.0,
+    )?;
+    let blur = number("blurRadius")
+        .or_else(|| number("size"))
+        .unwrap_or(0.0)
+        .max(0.0) as f32;
+    let (dx, dy) = if effect.get("kind").and_then(Value::as_str) == Some("glow") {
+        (0.0, 0.0)
+    } else {
+        let radians = number("direction").unwrap_or(0.0).to_radians();
+        let distance = number("distance").unwrap_or(0.0);
+        (
+            (radians.cos() * distance) as f32,
+            (radians.sin() * distance) as f32,
+        )
+    };
+    Ok((
+        Some(shadow::Shadow::new(color, blur, dx, dy)),
+        effects.len() - 1,
+    ))
 }
 
 fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'static>>, String> {
@@ -810,7 +1220,11 @@ fn shape_fill(shape: &ShapePrimitive, opacity: f32) -> Result<Option<Paint<'stat
         }
         "gradient" => gradient_paint(shape, object, opacity).map(Some),
         "pattern" => Err("unsupported shape fillPaint kind: pattern".to_string()),
-        "picture" => Err("unsupported shape fillPaint kind: picture".to_string()),
+        "picture" => shape
+            .fill
+            .as_deref()
+            .map(|color| solid_paint(color, opacity))
+            .transpose(),
         other => Err(format!("unsupported shape fillPaint kind: {other}")),
     }
 }
@@ -1158,10 +1572,10 @@ fn paint_image<'k>(
     scope: ImageScope<'k>,
 ) -> Result<(), String> {
     if image.filter.is_some() {
-        return Err("unsupported image field: filter".to_string());
+        skip_effect(&mut scratch.skipped, "image.filter");
     }
     if !image.attrs.effects.is_empty() {
-        return Err("unsupported image field: effects".to_string());
+        skip_effect(&mut scratch.skipped, "image.effects");
     }
     let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
         scratch.images.skipped += 1;
@@ -1211,19 +1625,28 @@ fn paint_image<'k>(
         frame.x - requested_x * frame.w / requested_w,
         frame.y - requested_y * frame.h / requested_h,
     );
-    let mut frame_mask = crop
-        .is_some()
-        .then(|| {
-            crop_mask(
-                pixmap,
-                frame,
-                image_transform,
-                mask,
-                &mut scratch.masks,
-                &mut scratch.budget,
-            )
-        })
-        .transpose()?;
+    let mut frame_mask = if is_ellipse_image(image) {
+        scratch.budget.charge_masks(
+            scratch
+                .masks
+                .bytes
+                .saturating_add(mask_bytes(pixmap.width(), pixmap.height())),
+        )?;
+        Some(Rc::new(ellipse_mask(pixmap, frame, image_transform, mask)?))
+    } else {
+        crop.is_some()
+            .then(|| {
+                crop_mask(
+                    pixmap,
+                    frame,
+                    image_transform,
+                    mask,
+                    &mut scratch.masks,
+                    &mut scratch.budget,
+                )
+            })
+            .transpose()?
+    };
     let paint = PixmapPaint {
         opacity,
         quality: FilterQuality::Bicubic,
@@ -1574,11 +1997,7 @@ impl<'c> PageImages<'c> {
             return Decode::Refused;
         };
         let mut data = decoded.into_rgba8().into_raw();
-        let (pixels, _) = data.as_chunks_mut::<4>();
-        for pixel in pixels {
-            let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
-            *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
-        }
+        ooxml_raster::premultiply_rgba(&mut data);
         match Pixmap::from_vec(data, size) {
             Some(pixmap) => Decode::Decoded(pixmap),
             None => Decode::Refused,
@@ -1692,6 +2111,31 @@ fn transformed_rect_mask(
     Ok(mask)
 }
 
+fn is_ellipse_image(image: &ImagePrimitive) -> bool {
+    image.attrs.image_shape_type.as_deref() == Some("ellipse")
+}
+
+/// The ellipse inscribed in an image's frame, clipped by the outer mask if any.
+fn ellipse_mask(
+    pixmap: &Pixmap,
+    frame: FRect,
+    transform: Transform,
+    outer: Option<&Mask>,
+) -> Result<Mask, String> {
+    let mut mask = Mask::new(pixmap.width(), pixmap.height())
+        .ok_or_else(|| "invalid image ellipse mask size".to_string())?;
+    let oval = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
+        .and_then(PathBuilder::from_oval)
+        .ok_or_else(|| "invalid image ellipse".to_string())?;
+    mask.fill_path(&oval, FillRule::Winding, true, transform);
+    if let Some(outer) = outer {
+        for (value, clip) in mask.data_mut().iter_mut().zip(outer.data()) {
+            *value = ((u16::from(*value) * u16::from(*clip) + 127) / 255) as u8;
+        }
+    }
+    Ok(mask)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn paint_image_border(
     pixmap: &mut Pixmap,
@@ -1728,7 +2172,11 @@ fn paint_image_border(
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image border rectangle".to_string())?;
-    let path = PathBuilder::from_rect(rect);
+    let path = if is_ellipse_image(image) {
+        PathBuilder::from_oval(rect).ok_or_else(|| "invalid image border ellipse".to_string())?
+    } else {
+        PathBuilder::from_rect(rect)
+    };
     let mut paint = Paint::default();
     paint.set_color(color_with_opacity(color, opacity)?);
     paint.anti_alias = true;
@@ -1756,6 +2204,7 @@ fn paint_image_revision(
     let color = match revision.kind {
         RevisionKind::Ins => "rgb(46, 125, 50)",
         RevisionKind::Del => "rgb(198, 40, 40)",
+        RevisionKind::Format => "rgb(106, 27, 154)",
     };
     let rect = Rect::from_xywh(frame.x, frame.y, frame.w, frame.h)
         .ok_or_else(|| "invalid image revision rectangle".to_string())?;
@@ -2267,6 +2716,7 @@ fn paint_page_border(
     pixmap: &mut Pixmap,
     border: &PageBorderPrimitive,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let x = number_f32(&border.x)?;
     let y = number_f32(&border.y)?;
@@ -2283,6 +2733,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.right {
@@ -2296,6 +2747,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.bottom {
@@ -2309,6 +2761,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     if let Some(side) = &border.left {
@@ -2322,6 +2775,7 @@ fn paint_page_border(
             },
             side,
             budget,
+            transform,
         )?;
     }
     Ok(())
@@ -2332,6 +2786,7 @@ fn paint_page_border_side(
     segment: Segment,
     side: &PageBorderSide,
     budget: &mut PageBudget,
+    transform: Transform,
 ) -> Result<(), String> {
     let style = match side.style.as_str() {
         "solid" => DisplayBorderStyle::Solid,
@@ -2352,7 +2807,7 @@ fn paint_page_border_side(
         style,
         None,
         None,
-        Transform::identity(),
+        transform,
         None,
         1.0,
         budget,
@@ -2400,7 +2855,7 @@ fn validate_visual_attrs(primitive: &Primitive, attrs: &DocAttrs) -> Result<(), 
     if !is_decoration && attrs.style.is_some() {
         return Err("decoration style is attached to a non-decoration primitive".to_string());
     }
-    if !is_text && attrs.leader_glyphs.is_some() {
+    if !is_text && !is_glyph && attrs.leader_glyphs.is_some() {
         return Err("leaderGlyphs are attached to a non-text primitive".to_string());
     }
     if !is_text && !is_glyph && attrs.modern_effects.is_some() {
@@ -2488,7 +2943,14 @@ struct ClipSurface {
     size: (u32, u32),
     pixmap: Option<Pixmap>,
     mask: Option<Mask>,
+    dirty: Option<IntRect>,
+    columns: Vec<u8>,
 }
+
+/// past this many pixels f32 pixel centers and the tiler's rect translations
+/// stop being exact, so a cropped composite could shift; such targets
+/// composite the whole surface.
+const F32_EXACT_PIXELS: u32 = 1 << 23;
 
 impl ClipSurface {
     /// The surface to allocate for a clip this size, or `None` to keep the one
@@ -2540,6 +3002,7 @@ impl ClipSurface {
                         .ok_or_else(|| "invalid clip mask size".to_string())?,
                 );
                 self.size = size;
+                self.dirty = None;
             }
             let mask = self
                 .mask
@@ -2562,38 +3025,92 @@ impl ClipSurface {
             .pixmap
             .as_mut()
             .ok_or_else(|| "clip surface is unavailable".to_string())?;
-        pixmap.fill(Color::TRANSPARENT);
+        if let Some(dirty) = self.dirty.take() {
+            clear(pixmap, dirty);
+        }
+        let whole = IntRect::from_xywh(0, 0, pixmap.width(), pixmap.height());
+        self.dirty = whole;
         let transform = Transform::from_translate(-(self.origin.0 as f32), -(self.origin.1 as f32));
         painter(pixmap, scratch, transform, self.mask.as_ref())?;
-        target.draw_pixmap(
-            self.origin.0,
-            self.origin.1,
-            pixmap.as_ref(),
-            &PixmapPaint::default(),
-            Transform::identity(),
-            None,
-        );
+        if target.width().max(target.height()) <= F32_EXACT_PIXELS {
+            self.dirty = painted_rect(pixmap, &mut self.columns);
+        }
+        let Some(dirty) = self.dirty else {
+            return Ok(());
+        };
+        let rect = Rect::from_xywh(
+            (dirty.x() + self.origin.0) as f32,
+            (dirty.y() + self.origin.1) as f32,
+            dirty.width() as f32,
+            dirty.height() as f32,
+        )
+        .ok_or_else(|| "invalid clip composite".to_string())?;
+        let paint = Paint {
+            shader: tiny_skia::Pattern::new(
+                pixmap.as_ref(),
+                SpreadMode::Pad,
+                FilterQuality::Nearest,
+                1.0,
+                Transform::from_translate(self.origin.0 as f32, self.origin.1 as f32),
+            ),
+            anti_alias: false,
+            ..Paint::default()
+        };
+        target.fill_rect(rect, &paint, Transform::identity(), None);
         Ok(())
     }
 }
 
+/// the smallest rect holding every non-transparent pixel of `pixmap`. Only
+/// that part is composited and later cleared: the transparent rest would
+/// composite as a no-op.
+fn painted_rect(pixmap: &Pixmap, columns: &mut Vec<u8>) -> Option<IntRect> {
+    let stride = pixmap.width() as usize * 4;
+    columns.clear();
+    columns.resize(stride, 0);
+    let (mut top, mut bottom) = (None, 0);
+    for (y, row) in pixmap.data().chunks_exact(stride).enumerate() {
+        if row.iter().fold(0, |acc, &byte| acc | byte) == 0 {
+            continue;
+        }
+        top.get_or_insert(y);
+        bottom = y + 1;
+        for (column, &byte) in columns.iter_mut().zip(row) {
+            *column |= byte;
+        }
+    }
+    let top = top?;
+    let left = columns.iter().position(|&byte| byte != 0)? / 4;
+    let right = columns.iter().rposition(|&byte| byte != 0)? / 4 + 1;
+    IntRect::from_ltrb(left as i32, top as i32, right as i32, bottom as i32)
+}
+
+fn clear(pixmap: &mut Pixmap, rect: IntRect) {
+    let stride = pixmap.width() as usize * 4;
+    let (left, right) = (rect.left() as usize * 4, rect.right() as usize * 4);
+    let data = pixmap.data_mut();
+    for row in rect.top() as usize..rect.bottom() as usize {
+        data[row * stride + left..row * stride + right].fill(0);
+    }
+}
+
 fn clipped_to_target(clip: FRect, width: u32, height: u32) -> Option<FRect> {
-    let left = clip.x.max(0.0);
-    let top = clip.y.max(0.0);
-    let right = (clip.x + clip.w).min(width as f32);
-    let bottom = (clip.y + clip.h).min(height as f32);
-    (left.is_finite()
-        && top.is_finite()
-        && right.is_finite()
-        && bottom.is_finite()
-        && right > left
-        && bottom > top)
-        .then_some(FRect {
-            x: left,
-            y: top,
-            w: right - left,
-            h: bottom - top,
-        })
+    ooxml_raster::clipped_to_target(
+        ooxml_raster::RasterRect {
+            x: clip.x,
+            y: clip.y,
+            w: clip.w,
+            h: clip.h,
+        },
+        width,
+        height,
+    )
+    .map(|clip| FRect {
+        x: clip.x,
+        y: clip.y,
+        w: clip.w,
+        h: clip.h,
+    })
 }
 
 pub(crate) fn primitive_visual_transform(
@@ -2689,6 +3206,17 @@ fn validate_page_surface(width: u32, height: u32) -> Result<(), String> {
     Ok(())
 }
 
+fn scaled_page_dimension(number: &Number, name: &str, scale: f32) -> Result<u32, String> {
+    if scale == 1.0 {
+        return page_dimension(number, name);
+    }
+    let value = number.as_f64().ok_or_else(|| format!("invalid {name}"))? * f64::from(scale);
+    if !value.is_finite() || value <= 0.0 || value.ceil() > f64::from(u32::MAX) {
+        return Err(format!("invalid scaled {name}"));
+    }
+    Ok(value.ceil() as u32)
+}
+
 fn page_dimension(number: &Number, name: &str) -> Result<u32, String> {
     let value = number_f32(number)?;
     if value <= 0.0 || value.ceil() > u32::MAX as f32 {
@@ -2708,80 +3236,6 @@ pub(crate) fn color_with_opacity(value: &str, opacity: f32) -> Result<Color, Str
     let mut color = parse_color(value)?;
     color.apply_opacity(opacity.clamp(0.0, 1.0));
     Ok(color)
-}
-
-fn parse_color(value: &str) -> Result<Color, String> {
-    if value.eq_ignore_ascii_case("transparent") {
-        return Ok(Color::TRANSPARENT);
-    }
-    if let Some(hex) = value.strip_prefix('#') {
-        return parse_hex_color(hex).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgb(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, false).ok_or_else(|| format!("bad color: {value}"));
-    }
-    if let Some(body) = value
-        .strip_prefix("rgba(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        return parse_rgb_function(body, true).ok_or_else(|| format!("bad color: {value}"));
-    }
-    Err(format!("bad color: {value}"))
-}
-
-fn parse_hex_color(hex: &str) -> Option<Color> {
-    let expanded;
-    let hex = match hex.len() {
-        3 | 4 => {
-            expanded = hex
-                .chars()
-                .flat_map(|character| [character, character])
-                .collect::<String>();
-            expanded.as_str()
-        }
-        6 | 8 => hex,
-        _ => return None,
-    };
-    let byte = |index: usize| u8::from_str_radix(hex.get(index..index + 2)?, 16).ok();
-    Some(Color::from_rgba8(
-        byte(0)?,
-        byte(2)?,
-        byte(4)?,
-        if hex.len() == 8 { byte(6)? } else { 255 },
-    ))
-}
-
-fn parse_rgb_function(body: &str, alpha: bool) -> Option<Color> {
-    let values = body.split(',').map(str::trim).collect::<Vec<_>>();
-    if values.len() != if alpha { 4 } else { 3 } {
-        return None;
-    }
-    let channel = |value: &str| -> Option<u8> {
-        if let Some(percent) = value.strip_suffix('%') {
-            let value = percent.parse::<f32>().ok()?.clamp(0.0, 100.0);
-            Some((value * 2.55).round() as u8)
-        } else {
-            Some(value.parse::<f32>().ok()?.clamp(0.0, 255.0).round() as u8)
-        }
-    };
-    let alpha = if alpha {
-        if let Some(percent) = values[3].strip_suffix('%') {
-            (percent.parse::<f32>().ok()?.clamp(0.0, 100.0) * 2.55).round() as u8
-        } else {
-            (values[3].parse::<f32>().ok()?.clamp(0.0, 1.0) * 255.0).round() as u8
-        }
-    } else {
-        255
-    };
-    Some(Color::from_rgba8(
-        channel(values[0])?,
-        channel(values[1])?,
-        channel(values[2])?,
-        alpha,
-    ))
 }
 
 fn mix_color(left: Color, right: Color, amount: f32) -> Color {
@@ -2804,22 +3258,6 @@ fn ensure_keys(
         return Err(format!("unsupported {context} field: {key}"));
     }
     Ok(())
-}
-
-fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let pixels = pixmap.take_demultiplied();
-    let mut data = Vec::new();
-    {
-        let mut encoder = png::Encoder::new(&mut data, width, height);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::Fast);
-        let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&pixels)
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(data)
 }
 
 #[cfg(test)]
@@ -2881,6 +3319,82 @@ mod tests {
             renderer.scratch.budget.scratch,
             400 * 560 * CLIP_BYTES_PER_PIXEL
         );
+    }
+
+    fn half_black(target: &mut Pixmap, x: f32, transform: Transform, mask: Option<&Mask>) {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(0, 0, 0, 128);
+        let rect = Rect::from_xywh(x, 2.0, 6.0, 6.0).expect("rect");
+        target.fill_rect(rect, &paint, transform, mask);
+    }
+
+    #[test]
+    fn a_shared_clip_composites_each_primitive_once() {
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(40, 20, &mut glyphs, &mut images);
+        let mut alone = Pixmap::new(40, 20).expect("page");
+        alone.fill(Color::WHITE);
+        let mut pixmap = alone.clone();
+        let mut surface = ClipSurface::default();
+        surface
+            .paint(
+                &mut alone,
+                clip(0.0, 0.0, 40.0, 20.0),
+                &mut renderer.scratch,
+                |t, _, tr, m| {
+                    half_black(t, 2.0, tr, m);
+                    Ok(())
+                },
+            )
+            .expect("clipped paint");
+        let mut surface = ClipSurface::default();
+        for x in [2.0, 20.0, 30.0] {
+            surface
+                .paint(
+                    &mut pixmap,
+                    clip(0.0, 0.0, 40.0, 20.0),
+                    &mut renderer.scratch,
+                    |t, _, tr, m| {
+                        half_black(t, x, tr, m);
+                        Ok(())
+                    },
+                )
+                .expect("clipped paint");
+        }
+        assert!(alone.pixel(4, 4).unwrap().red() < 255);
+        for x in [4, 22, 32] {
+            assert_eq!(pixmap.pixel(x, 4), alone.pixel(4, 4), "at {x}");
+        }
+    }
+
+    #[test]
+    fn a_failed_clipped_paint_leaves_no_residue_for_the_next() {
+        let mut glyphs = GlyphCache::default();
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(40, 20, &mut glyphs, &mut images);
+        let mut pixmap = Pixmap::new(40, 20).expect("page");
+        pixmap.fill(Color::WHITE);
+        let mut surface = ClipSurface::default();
+        let failed = surface.paint(
+            &mut pixmap,
+            clip(0.0, 0.0, 40.0, 20.0),
+            &mut renderer.scratch,
+            |t, _, tr, m| {
+                half_black(t, 2.0, tr, m);
+                Err("refused".to_string())
+            },
+        );
+        assert!(failed.is_err());
+        surface
+            .paint(
+                &mut pixmap,
+                clip(0.0, 0.0, 40.0, 20.0),
+                &mut renderer.scratch,
+                |_, _, _, _| Ok(()),
+            )
+            .expect("clipped paint");
+        assert_eq!(pixmap.pixel(4, 4).unwrap().red(), 255);
     }
 
     /// One entry past the byte budget evicts the least recently resolved
@@ -2973,5 +3487,23 @@ mod tests {
         let mut page = PageImages::new(&mut cache);
         let mut charge = ImageCharge::default();
         assert!(matches!(page.decode(&gif, &mut charge), Decode::Decoded(_)));
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    #[test]
+    fn color_keeps_css_forms_and_error_text() {
+        assert_eq!(
+            parse_color("rgba(1,2,3,0.5)"),
+            Ok(Color::from_rgba8(1, 2, 3, 128))
+        );
+        assert_eq!(
+            parse_color("#abcd"),
+            Ok(Color::from_rgba8(170, 187, 204, 221))
+        );
+        assert_eq!(parse_color("red"), Err("bad color: red".to_string()));
     }
 }

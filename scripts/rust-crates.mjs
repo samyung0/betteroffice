@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { FONT_PACK_CRATES } from './rust-font-packs.mjs';
 
 export const RUST_RELEASE_MANIFEST = 'crates/package.json';
 export const WORKSPACE_MANIFEST = 'Cargo.toml';
@@ -7,9 +8,13 @@ export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
   { name: 'betteroffice-wasm-alloc', dependency: 'wasm-alloc' },
+  ...FONT_PACK_CRATES.map(({ name }) => ({ name, dependency: name })),
+  { name: 'betteroffice-fonts', dependency: 'betteroffice-fonts' },
+  { name: 'betteroffice-base-latin', dependency: 'base-latin' },
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
+  { name: 'betteroffice-ooxml-raster', dependency: 'ooxml-raster' },
   { name: 'betteroffice-metafile', dependency: 'ooxml-metafile' },
   { name: 'betteroffice-xlsx-model', dependency: 'xlsx-model' },
   { name: 'betteroffice-xlsx-parse', dependency: 'xlsx-parse' },
@@ -18,8 +23,8 @@ export const RUST_CRATES = [
   { name: 'betteroffice-xlsx-ops', dependency: 'xlsx-ops' },
   { name: 'betteroffice-xlsx-raster', dependency: 'xlsx-raster' },
   { name: 'betteroffice-xlsx', dependency: 'betteroffice-xlsx' },
-  { name: 'betteroffice-docx-parse', dependency: 'docx-parse' },
   { name: 'betteroffice-docx-layout', dependency: 'docx-layout' },
+  { name: 'betteroffice-docx-parse', dependency: 'docx-parse' },
   { name: 'betteroffice-docx-raster', dependency: 'docx-raster' },
   { name: 'betteroffice-docx-edit', dependency: 'docx-edit' },
   { name: 'betteroffice-docx', dependency: 'betteroffice-docx' },

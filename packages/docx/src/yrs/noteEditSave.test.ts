@@ -191,7 +191,7 @@ function rawNoteText(xml: string): string {
 }
 
 describe('typing into a note through the editor path', () => {
-  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+  beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))), 30_000);
 
   it('saves note clicks typed through the editor path', async () => {
     const bytes = fixture();

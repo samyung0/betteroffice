@@ -13,6 +13,15 @@ use crate::xml::{ParseBudget, ParseError, XmlElement, parse_xml};
 pub struct NumberingDefinitions {
     pub abstract_nums: Vec<AbstractNumbering>,
     pub nums: Vec<NumberingInstance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_picture_bullet: Option<PictureBulletSize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureBulletSize {
+    pub width: f64,
+    pub height: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -209,6 +218,10 @@ pub fn parse_numbering(
     let Some(root) = document.root() else {
         return Ok(NumberingMap { definitions });
     };
+    if let Some(bullet) = root.child("w", "numPicBullet") {
+        budget.charge_leaf_value(part)?;
+        definitions.first_picture_bullet = parse_picture_bullet_size(bullet);
+    }
     for element in root.children_named("w", "abstractNum") {
         budget.charge_leaf_value(part)?;
         if let Some(value) = parse_abstract_numbering(element, part, budget)? {
@@ -222,6 +235,20 @@ pub fn parse_numbering(
         }
     }
     Ok(NumberingMap { definitions })
+}
+
+fn parse_picture_bullet_size(bullet: &XmlElement) -> Option<PictureBulletSize> {
+    let shape = bullet.child("w", "pict")?.child("v", "shape")?;
+    let style = crate::vml::parse_style_attr(shape.attribute(None, "style"));
+    Some(PictureBulletSize {
+        width: picture_bullet_points(style.get("width")?)?,
+        height: picture_bullet_points(style.get("height")?)?,
+    })
+}
+
+fn picture_bullet_points(value: &str) -> Option<f64> {
+    let pixels = crate::vml::css_length_to_px(Some(value))?;
+    (pixels > 0.0 && (pixels as f32).is_finite()).then_some(pixels * 72.0 / 96.0)
 }
 
 fn parse_abstract_numbering(
@@ -503,7 +530,11 @@ fn parse_level_run_properties(element: &XmlElement) -> TextFormatting {
         h_ansi: attribute_owned(fonts, "hAnsi"),
         east_asia: attribute_owned(fonts, "eastAsia"),
         cs: attribute_owned(fonts, "cs"),
-        ..FontFamily::default()
+        ascii_theme: attribute_owned(fonts, "asciiTheme"),
+        h_ansi_theme: attribute_owned(fonts, "hAnsiTheme"),
+        east_asia_theme: attribute_owned(fonts, "eastAsiaTheme"),
+        cs_theme: attribute_owned(fonts, "cstheme"),
+        hint: attribute_owned(fonts, "hint"),
     });
     value.font_size = numeric_child(element, "sz", "val");
     value.color = element.child("w", "color").and_then(|color| {
@@ -961,6 +992,81 @@ mod tests {
                 .as_ref()
                 .and_then(|color| color.rgb.as_deref()),
             Some("FF0000")
+        );
+    }
+
+    #[test]
+    fn marker_fonts_keep_authored_names_and_theme_references() {
+        let numbering = parse(
+            r#"<w:numbering><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:rFonts w:ascii="Cambria" w:hAnsi="Cambria" w:eastAsia="MS Mincho" w:cs="Arial" w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi" w:eastAsiaTheme="minorEastAsia" w:cstheme="minorBidi" w:hint="eastAsia"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#,
+        );
+        let level = numbering.get_level(1.0, 0.0).unwrap();
+        let fonts = level.r_pr.unwrap().font_family.unwrap();
+        assert_eq!(fonts.ascii.as_deref(), Some("Cambria"));
+        assert_eq!(fonts.h_ansi.as_deref(), Some("Cambria"));
+        assert_eq!(fonts.east_asia.as_deref(), Some("MS Mincho"));
+        assert_eq!(fonts.cs.as_deref(), Some("Arial"));
+        assert_eq!(fonts.ascii_theme.as_deref(), Some("majorHAnsi"));
+        assert_eq!(fonts.h_ansi_theme.as_deref(), Some("majorHAnsi"));
+        assert_eq!(fonts.east_asia_theme.as_deref(), Some("minorEastAsia"));
+        assert_eq!(fonts.cs_theme.as_deref(), Some("minorBidi"));
+        assert_eq!(fonts.hint.as_deref(), Some("eastAsia"));
+        assert_eq!(
+            compute_list_rendering(Some(1.0), Some(0.0), &numbering)
+                .unwrap()
+                .marker_font_family
+                .as_deref(),
+            Some("Cambria")
+        );
+    }
+
+    #[test]
+    fn first_picture_bullet_size_uses_css_units_and_document_order() {
+        for (width, height) in [
+            ("216pt", "72pt"),
+            ("3in", "1in"),
+            ("288px", "96px"),
+            ("7.62cm", "2.54cm"),
+            ("76.2mm", "25.4mm"),
+            ("18pc", "6pc"),
+            ("288", "96"),
+        ] {
+            let xml = format!(
+                r#"<w:numbering><w:numPicBullet w:numPicBulletId="9"><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet><w:numPicBullet w:numPicBulletId="1"><w:pict><v:shape style="width:1pt;height:1pt"/></w:pict></w:numPicBullet></w:numbering>"#
+            );
+            let definitions = serde_json::to_value(parse(&xml).definitions).unwrap();
+            let size = &definitions["firstPictureBullet"];
+            assert!((size["width"].as_f64().unwrap() - 216.0).abs() < 0.001);
+            assert!((size["height"].as_f64().unwrap() - 72.0).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn invalid_or_non_positive_picture_bullet_size_is_ignored() {
+        for (width, height) in [
+            ("invalid", "1in"),
+            ("1in", "invalid"),
+            ("0", "1in"),
+            ("1in", "-1pc"),
+        ] {
+            let xml = format!(
+                r#"<w:numbering><w:numPicBullet><w:pict><v:shape style="width:{width};height:{height}"/></w:pict></w:numPicBullet></w:numbering>"#
+            );
+            assert!(parse(&xml).definitions.first_picture_bullet.is_none());
+        }
+    }
+
+    #[test]
+    fn unsized_first_picture_bullet_does_not_select_a_later_bullet() {
+        let definitions = parse(
+            r#"<w:numbering><w:numPicBullet><w:pict><v:shape/></w:pict></w:numPicBullet><w:numPicBullet><w:pict><v:shape style="width:3in;height:3in"/></w:pict></w:numPicBullet></w:numbering>"#,
+        )
+        .definitions;
+        assert!(
+            serde_json::to_value(definitions)
+                .unwrap()
+                .get("firstPictureBullet")
+                .is_none()
         );
     }
 

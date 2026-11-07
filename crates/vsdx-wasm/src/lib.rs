@@ -4,6 +4,42 @@ use wasm_bindgen::prelude::*;
 
 pub use vsdx_edit::wasm::VsdxDocument;
 
+#[wasm_bindgen(typescript_custom_section)]
+const DECODED_FONT_FACE: &str =
+    r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
+
+/// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+/// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+/// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+#[wasm_bindgen(js_name = decodeFontFace, unchecked_return_type = "DecodedFontFace")]
+pub fn decode_font_face(
+    bytes: &[u8],
+    codec: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] dict: Option<Vec<u8>>,
+    #[wasm_bindgen(js_name = maxOutput, unchecked_optional_param_type = "number | null")]
+    max_output: Option<f64>,
+) -> Result<JsValue, JsError> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(bytes, codec, dict.as_deref(), max_output)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &"font".into(),
+        &js_sys::Uint8Array::from(decoded.font.as_slice()),
+    )
+    .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    if let Some(payload) = decoded.payload {
+        js_sys::Reflect::set(
+            &object,
+            &"payload".into(),
+            &js_sys::Uint8Array::from(payload.as_slice()),
+        )
+        .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    }
+    Ok(object.into())
+}
+
 #[wasm_bindgen]
 pub struct VsdxRenderer {
     renderer: vsdx_render::Renderer,
@@ -28,7 +64,7 @@ impl VsdxRenderer {
         family: &str,
         bold: bool,
         italic: bool,
-        bytes: &[u8],
+        bytes: Vec<u8>,
     ) -> Result<u32, JsValue> {
         let handle = self.font_count;
         let next_font_count = self
@@ -36,7 +72,7 @@ impl VsdxRenderer {
             .checked_add(1)
             .ok_or_else(|| JsValue::from_str("font handle limit exceeded"))?;
         self.renderer
-            .register_font(family, bold, italic, bytes.to_vec())
+            .register_font(family, bold, italic, bytes)
             .map_err(js_error)?;
         self.font_count = next_font_count;
         Ok(handle)
@@ -158,18 +194,25 @@ impl VsdxRenderer {
         serde_json::to_string(&pages).map_err(js_error)
     }
 
-    #[cfg(feature = "raster")]
-    #[wasm_bindgen(js_name = exportPng)]
-    pub fn export_png(
+    /// The page's display list, leaving the page `hitTestJson` reads untouched.
+    #[wasm_bindgen(js_name = pageDisplayListJson)]
+    pub fn page_display_list_json(
         &self,
         document: &VsdxDocument,
         page_index: u32,
-        scale: f32,
-    ) -> Result<Vec<u8>, JsValue> {
+    ) -> Result<String, JsValue> {
         let package = document.session().package().map_err(js_error)?;
-        vsdx_raster::render_page(&self.renderer, &package, page_index as usize, scale)
-            .map(|page| page.bytes)
-            .map_err(js_error)
+        let page_part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| {
+                JsValue::from_str(&format!("page index {page_index} is out of range"))
+            })?;
+        let rendered = self
+            .renderer
+            .layout_page(&package, page_part)
+            .map_err(js_error)?;
+        serde_json::to_string(&rendered).map_err(js_error)
     }
 }
 
@@ -255,6 +298,19 @@ mod tests {
         ))
         .unwrap();
         assert!(json.contains("pagePartPaths"));
+    }
+
+    #[test]
+    fn page_display_list_json_keeps_the_hit_test_page() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let renderer = VsdxRenderer::new();
+        let list = renderer.page_display_list_json(&document, 0).unwrap();
+        assert!(list.contains("contractVersion"));
+        assert!(renderer.rendered.is_none());
     }
 
     #[test]
@@ -566,20 +622,5 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert!(pages[0].starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
         assert!(pages[0].contains("<text"));
-    }
-
-    #[cfg(feature = "raster")]
-    #[test]
-    fn export_png_renders_scaled_raster_pages() {
-        let document = VsdxDocument::open_collaborative(
-            include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx"),
-            1.0,
-        )
-        .unwrap();
-        let renderer = VsdxRenderer::new();
-        let first = renderer.export_png(&document, 0, 1.0).unwrap();
-        assert_eq!(&first[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
-        let second = renderer.export_png(&document, 0, 2.0).unwrap();
-        assert!(second.len() > first.len());
     }
 }

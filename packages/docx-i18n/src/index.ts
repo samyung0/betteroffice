@@ -33,15 +33,17 @@
 // JSON files. Edit the JSON, not this block.
 
 import enJson from '../en.json';
-import deJson from '../de.json';
-import frJson from '../fr.json';
-import heJson from '../he.json';
-import hiJson from '../hi.json';
-import idJson from '../id.json';
-import plJson from '../pl.json';
-import ptBRJson from '../pt-BR.json';
-import trJson from '../tr.json';
+import arJson from '../ar.json';
+import esJson from '../es.json';
+import itJson from '../it.json';
+import jaJson from '../ja.json';
+import koJson from '../ko.json';
+import nlJson from '../nl.json';
+import ruJson from '../ru.json';
+import ukJson from '../uk.json';
+import viJson from '../vi.json';
 import zhCNJson from '../zh-CN.json';
+import zhTWJson from '../zh-TW.json';
 
 /**
  * Full locale string set, auto-derived from `en.json` (the source of truth).
@@ -60,37 +62,55 @@ export type LocaleStrings = typeof en;
  *
  * @public
  */
-export type LocaleCode = 'en' | 'de' | 'fr' | 'he' | 'hi' | 'id' | 'pl' | 'pt-BR' | 'tr' | 'zh-CN';
+export type LocaleCode =
+  | 'en'
+  | 'ar'
+  | 'es'
+  | 'it'
+  | 'ja'
+  | 'ko'
+  | 'nl'
+  | 'ru'
+  | 'uk'
+  | 'vi'
+  | 'zh-CN'
+  | 'zh-TW';
 
 /** English (`en`) — the source of truth, 100% covered. @public */
 export const en = enJson;
 
-/** German (`de`). Community-maintained; null leaves fall back to English. @public */
-export const de: PartialLocaleStrings = deJson;
+/** Arabic (`ar`). Community-maintained; null leaves fall back to English. @public */
+export const ar: PartialLocaleStrings = arJson;
 
-/** French (`fr`). Community-maintained; null leaves fall back to English. @public */
-export const fr: PartialLocaleStrings = frJson;
+/** Spanish (`es`). Community-maintained; null leaves fall back to English. @public */
+export const es: PartialLocaleStrings = esJson;
 
-/** Hebrew (`he`). Community-maintained; null leaves fall back to English. @public */
-export const he: PartialLocaleStrings = heJson;
+/** Italian (`it`). Community-maintained; null leaves fall back to English. @public */
+export const it: PartialLocaleStrings = itJson;
 
-/** Hindi (`hi`). Community-maintained; null leaves fall back to English. @public */
-export const hi: PartialLocaleStrings = hiJson;
+/** Japanese (`ja`). Community-maintained; null leaves fall back to English. @public */
+export const ja: PartialLocaleStrings = jaJson;
 
-/** Indonesian (`id`). Community-maintained; null leaves fall back to English. @public */
-export const id: PartialLocaleStrings = idJson;
+/** Korean (`ko`). Community-maintained; null leaves fall back to English. @public */
+export const ko: PartialLocaleStrings = koJson;
 
-/** Polish (`pl`). Community-maintained; null leaves fall back to English. @public */
-export const pl: PartialLocaleStrings = plJson;
+/** Dutch (`nl`). Community-maintained; null leaves fall back to English. @public */
+export const nl: PartialLocaleStrings = nlJson;
 
-/** Portuguese (Brazil) (`pt-BR`). Community-maintained; null leaves fall back to English. @public */
-export const ptBR: PartialLocaleStrings = ptBRJson;
+/** Russian (`ru`). Community-maintained; null leaves fall back to English. @public */
+export const ru: PartialLocaleStrings = ruJson;
 
-/** Turkish (`tr`). Community-maintained; null leaves fall back to English. @public */
-export const tr: PartialLocaleStrings = trJson;
+/** Ukrainian (`uk`). Community-maintained; null leaves fall back to English. @public */
+export const uk: PartialLocaleStrings = ukJson;
+
+/** Vietnamese (`vi`). Community-maintained; null leaves fall back to English. @public */
+export const vi: PartialLocaleStrings = viJson;
 
 /** Simplified Chinese (`zh-CN`). Community-maintained; null leaves fall back to English. @public */
 export const zhCN: PartialLocaleStrings = zhCNJson;
+
+/** Traditional Chinese (`zh-TW`). Community-maintained; null leaves fall back to English. @public */
+export const zhTW: PartialLocaleStrings = zhTWJson;
 
 /**
  * Every shipped locale, keyed by BCP-47 tag. Use for runtime locale
@@ -108,15 +128,17 @@ export const zhCN: PartialLocaleStrings = zhCNJson;
  */
 export const locales: Record<LocaleCode, PartialLocaleStrings> = {
   en,
-  de,
-  fr,
-  he,
-  hi,
-  id,
-  pl,
-  'pt-BR': ptBR,
-  tr,
+  ar,
+  es,
+  it,
+  ja,
+  ko,
+  nl,
+  ru,
+  uk,
+  vi,
   'zh-CN': zhCN,
+  'zh-TW': zhTW,
 };
 // ─── GENERATED END ───
 

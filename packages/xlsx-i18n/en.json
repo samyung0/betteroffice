@@ -116,7 +116,12 @@
     "openError": "Couldn't open this workbook",
     "formulaRefused": "There's a problem with this formula. Check its parentheses, quotes and operators.",
     "cellTextTooLong": "A cell holds at most 32,767 characters.",
-    "sheetTabsLabel": "Sheets"
+    "sheetTabsLabel": "Sheets",
+    "clearExceedsLimit": "Clear exceeds the cell limit",
+    "cellMenuLabel": "Cell menu",
+    "sheetTabMenuLabel": "Sheet tab menu",
+    "renameSheetLabel": "Rename sheet",
+    "sheetNamePrefix": "Sheet"
   },
   "proposals": {
     "panelLabel": "Agent proposals",
@@ -126,6 +131,7 @@
     "accept": "Accept",
     "reject": "Reject",
     "forceApply": "Force apply",
+    "forceBlockedReason": "This proposal cannot be applied after a structural edit.",
     "staleWarning": "Cells changed since proposed: {cells}"
   },
   "a11y": {
@@ -135,7 +141,12 @@
     "cellLabel": "{address}, {value}",
     "cellLabelSelected": "{address}, {value}, selected",
     "emptyCellLabel": "{address}, empty",
-    "emptyCellLabelSelected": "{address}, empty, selected"
+    "emptyCellLabelSelected": "{address}, empty, selected",
+    "hasFormula": "{label}, has formula",
+    "rangeSelected": "{start} to {end} selected, {rows, plural, one {# row} other {# rows}} by {columns, plural, one {# column} other {# columns}}",
+    "sheetActivated": "{name}, sheet {index} of {count}",
+    "cellInputLabel": "Edit cell {address}",
+    "gridRoleDescription": "worksheet"
   },
   "hostMenus": {
     "file": "File",

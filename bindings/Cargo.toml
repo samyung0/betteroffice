@@ -8,3 +8,7 @@ yrs = { path = "../third_party/yrs" }
 [profile.release]
 opt-level = 3
 lto = true
+
+[profile.hooks]
+inherits = "release"
+lto = false

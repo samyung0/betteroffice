@@ -1,12 +1,12 @@
 {
   "_lang": "zh-CN",
   "worker": {
-    "previousRecovery": null,
+    "previousRecovery": "下载之前的演示文稿恢复文件",
     "preparing": "正在准备编辑器。稍后即可编辑。",
     "failed": "无法编辑。请下载恢复的演示文稿。",
     "disabled": "此编辑模式下无法使用此功能。",
-    "recovery": null,
-    "image": null
+    "recovery": "下载恢复的演示文稿",
+    "image": "正在准备图片"
   },
   "toolbar": {
     "label": "演示文稿格式工具栏",
@@ -134,30 +134,30 @@
     "opening": "正在打开演示文稿…",
     "noSlides": "没有幻灯片",
     "openPrompt": "打开 PPTX 文件",
-    "textInput": null,
-    "selectionAnnouncement": null,
-    "openError": null,
-    "openErrorDescription": null,
-    "stoppedError": null,
-    "stoppedErrorDescription": null,
-    "loadError": null,
-    "loadErrorDescription": null,
-    "reloadPage": null,
-    "showDetails": null
+    "textInput": "幻灯片文本",
+    "selectionAnnouncement": "已选择文本",
+    "openError": "无法打开此演示文稿",
+    "openErrorDescription": "文件可能已损坏，或使用了此编辑器尚无法读取的内容。",
+    "stoppedError": "编辑器遇到问题",
+    "stoppedErrorDescription": "无法编辑。请下载恢复的演示文稿以保留更改。",
+    "loadError": "编辑器无法加载",
+    "loadErrorDescription": "请检查网络连接，然后重新加载页面。",
+    "reloadPage": "重新加载页面",
+    "showDetails": "显示详细信息"
   },
   "objects": {
     "defaultTextBoxName": "文本框",
     "defaultPictureName": "图片",
-    "insertPicture": null,
+    "insertPicture": "插入图片",
     "resize": {
-      "nw": null,
-      "n": null,
-      "ne": null,
-      "e": null,
-      "se": null,
-      "s": null,
-      "sw": null,
-      "w": null
+      "nw": "调整左上大小",
+      "n": "调整顶部大小",
+      "ne": "调整右上大小",
+      "e": "调整右侧大小",
+      "se": "调整右下大小",
+      "s": "调整底部大小",
+      "sw": "调整左下大小",
+      "w": "调整左侧大小"
     }
   },
   "presentation": {
@@ -217,6 +217,18 @@
     "stale": "提议创建后这些对象发生了变化，请在应用前预览当前更改",
     "stalePreview": "此预览使用更新后的幻灯片，应用后将覆盖已更改的目标",
     "geometry": "位置和大小 (x, y, 宽度, 高度)",
+    "geometryValues": "{before} → {after} pt",
+    "layoutChanged": "布局已更改",
+    "backgroundChanged": "背景已更改",
+    "rowInserted": "已插入行",
+    "rowDeleted": "已删除行",
+    "columnInserted": "已插入列",
+    "columnDeleted": "已删除列",
+    "broughtToFront": "已置于顶层",
+    "sentToBack": "已置于底层",
+    "broughtForward": "已上移一层",
+    "sentBackward": "已下移一层",
+    "zOrderChanged": "堆叠顺序已更改",
     "appearance": "外观或文本格式已更改",
     "changedAgain": "目标再次发生了变化，请在应用前查看更新后的预览",
     "canvasTitle": "此幻灯片上的更改",
@@ -229,9 +241,24 @@
     "canvasStale": "目标已更改，请在应用前打开审阅详情查看更新后的预览",
     "previousPosition": "之前",
     "proposedPosition": "提议",
-    "loadingDiff": "正在加载更改…"
+    "loadingDiff": "正在加载更改…",
+    "slideStrip": null,
+    "previewSlide": null,
+    "insertedShape": null,
+    "deletedShape": null,
+    "insertedSlide": null,
+    "deletedSlide": null,
+    "movedFrom": null
   },
   "presence": {
-    "label": null
+    "label": "协作者",
+    "moreCollaborators": "{count, plural, other {还有 # 位协作者}}",
+    "moreSelections": "+{count, plural, other {# 个选定内容}}"
+  },
+  "contextMenu": {
+    "text": "文本菜单",
+    "shape": "形状菜单",
+    "table": "表格菜单",
+    "slide": "幻灯片菜单"
   }
 }

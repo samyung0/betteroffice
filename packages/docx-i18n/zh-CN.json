@@ -19,12 +19,20 @@
     "change": "更改",
     "px": "px",
     "closeDialog": "关闭对话框",
+    "units": {
+      "inch": "英寸",
+      "cm": "cm",
+      "pt": "pt",
+      "px": "px",
+      "inchMark": "\""
+    },
     "clear": "清除"
   },
   "toolbar": {
     "ariaLabel": "格式工具栏",
     "file": "文件",
     "format": "格式",
+    "layout": "版式",
     "insert": "插入",
     "open": "打开",
     "openShortcut": "Ctrl+O",
@@ -42,10 +50,23 @@
     "symbol": "符号",
     "help": "帮助",
     "reportIssue": "反馈问题",
+    "imageWrap": {
+      "current": "当前"
+    },
     "watermark": "水印",
     "break": "分隔符",
     "sectionBreakContinuous": "分节符（连续）",
     "sectionBreakNextPage": "分节符（下一页）"
+  },
+  "layout": {
+    "margins": "页边距",
+    "normal": "普通",
+    "narrow": "窄",
+    "moderate": "适中",
+    "wide": "宽",
+    "customMargins": "自定义页边距...",
+    "morePaperSizes": "其他纸张大小...",
+    "indent": "缩进"
   },
   "formattingBar": {
     "groups": {
@@ -86,6 +107,7 @@
     "moreItems": null
   },
   "alignment": {
+    "left": "左对齐",
     "alignLeft": "左对齐",
     "alignLeftShortcut": "Ctrl+L",
     "center": "居中",
@@ -109,6 +131,11 @@
     "double": "双倍行距",
     "lineSpacingTitle": "行距: {label}",
     "paragraphSpacing": "段间距",
+    "addBefore": "增加段前间距",
+    "removeBefore": "删除段前间距",
+    "addAfter": "增加段后间距",
+    "removeAfter": "删除段后间距",
+    "options": "行距选项...",
     "label": "行距"
   },
   "styles": {
@@ -131,7 +158,7 @@
     "sansSerif": "无衬线",
     "serif": "衬线",
     "monospace": "等宽",
-    "other": null,
+    "other": "其他",
     "documentFonts": "文档字体"
   },
   "fontSize": {
@@ -144,11 +171,13 @@
   "zoom": {
     "ariaLabel": "缩放: {label}",
     "zoomIn": "放大",
-    "zoomLevel": null,
+    "zoomLevel": "缩放级别",
     "zoomOut": "缩小"
   },
   "colorPicker": {
     "ariaLabel": "{type} 颜色选择器",
+    "pickerLabel": "{title} 选择器",
+    "customHexColor": "自定义十六进制颜色",
     "highlightColors": "突出显示颜色",
     "customColor": "自定义颜色",
     "noColor": "无颜色",
@@ -215,7 +244,7 @@
       "matchCount": "{current}/{total} 个匹配项",
       "noResults": "未找到结果",
       "replaceLabel": "替换为:",
-      "replacePlaceholder": "输入要替换的文本...",
+      "replacePlaceholder": "输入用于替换的文本...",
       "replaceAriaLabel": "替换文本",
       "replaceButton": "替换",
       "replaceCurrentTitle": "替换当前匹配项",
@@ -254,6 +283,8 @@
       "columnsLabel": "列数:",
       "insertButton": "插入表格",
       "sizeSelector": "表格尺寸选择器",
+      "selectSize": "选择大小",
+      "cellSize": "{cols} 列，{rows} 行",
       "autofit": "根据内容自动调整",
       "columnWidthLabel": "列宽",
       "fixedWidth": "固定列宽",
@@ -348,6 +379,7 @@
       "alignment": "对齐方式",
       "offset": "偏移",
       "offsetPx": "偏移(px)",
+      "distanceFromText": "距正文距离 ({unit})",
       "align": "对齐",
       "relativeTo": "相对于",
       "alignOptions": {
@@ -498,6 +530,8 @@
         "strikethroughDescription": "为所选文本添加删除线",
         "subscript": "下标",
         "subscriptDescription": "将所选文本设置为下标",
+        "clearFormatting": "清除格式",
+        "clearFormattingDescription": "清除文本格式",
         "superscript": "上标",
         "superscriptDescription": "将所选文本设置为上标",
         "alignLeft": "左对齐",
@@ -546,12 +580,30 @@
         "keyboardShortcutsDescription": "显示键盘快捷方式",
         "insertLink": "插入链接",
         "insertLinkDescription": "插入或编辑超链接",
-        "open": null,
-        "openDescription": null
+        "open": "打开",
+        "openDescription": "打开文档"
       },
       "noResults": "未找到与 \"{query}\" 匹配的快捷方式",
       "pressEscToClose": "按 {key} 关闭",
-      "or": "或"
+      "or": "或",
+      "keys": {
+        "escape": "Esc",
+        "pageUp": "Page Up",
+        "pageDown": "Page Down",
+        "ctrl": "Ctrl",
+        "del": "Del"
+      }
+    },
+    "objectGeometry": {
+      "left": "左侧(px)",
+      "top": "顶部(px)",
+      "width": "宽度(px)",
+      "height": "高度(px)"
+    },
+    "paragraphSpacing": {
+      "before": "段前间距",
+      "after": "段后间距",
+      "multiple": "多倍行距"
     },
     "watermark": {
       "applyButton": "应用",
@@ -583,7 +635,7 @@
     "unknown": "未知",
     "addComment": "添加批注",
     "replyPlaceholder": "回复或使用 @ 提及他人...",
-    "replyCount": "{count, plural, one {# 条回复} other {# 条回复}}"
+    "replyCount": "{count, plural, other {# 条回复}}"
   },
   "trackedChanges": {
     "unknown": "未知",
@@ -618,6 +670,10 @@
     "selectAll": "全选",
     "selectAllShortcut": "Ctrl+A",
     "selected": "已选择",
+    "addComment": "批注",
+    "resizeImage": "调整图片大小",
+    "moveImage": "移动图片",
+    "columnWidth": "列宽",
     "aiActions": {
       "askAi": "询问 AI",
       "rewrite": "重写",
@@ -648,9 +704,13 @@
   },
   "errors": {
     "loadingDocument": "正在加载文档...",
-    "stillOpening": null,
+    "stillOpening": "文档仍在打开，准备就绪后即可输入。",
     "noDocumentLoaded": "未加载文档",
     "failedToLoad": "文档加载失败",
+    "failedToLoadDescription": "文件可能已损坏，或使用了此编辑器尚无法读取的内容。",
+    "editorUnavailable": "编辑器无法加载",
+    "editorUnavailableDescription": "请检查网络连接，然后重新加载页面。",
+    "reloadPage": "重新加载页面",
     "unableToParse": "无法解析文档",
     "somethingWentWrong": "发生错误",
     "errorDescription": "渲染此组件时发生错误。请重试，如果问题仍然存在，请联系支持人员。",
@@ -659,13 +719,26 @@
     "tryAgain": "请重试",
     "showDetails": "显示详情",
     "hideDetails": "隐藏详情",
+    "canvasRendererFailed": "画布渲染器失败。",
+    "userFriendly": {
+      "network": "网络错误。请检查您的互联网连接，然后重试。",
+      "parse": "无法解析该文档。它可能已损坏或采用不受支持的格式。",
+      "permission": "访问被拒绝。您可能没有访问此文件的权限。",
+      "notFound": "未找到请求的文件。",
+      "timeout": "操作超时。请重试。",
+      "unexpected": "发生意外错误。请重试。"
+    },
     "unsavedChanges": "您有未保存的更改，是否确定离开？"
+  },
+  "contentControls": {
+    "noOptions": "无选项"
   },
   "table": {
     "insertRowAbove": "在上方插入行",
     "insertRowBelow": "在下方插入行",
     "insertColumnLeft": "在左侧插入列",
     "insertColumnRight": "在右侧插入列",
+    "insertColumnToTheRight": "在右侧插入列",
     "deleteRow": "删除行",
     "deleteColumn": "删除列",
     "deleteTable": "删除表格",
@@ -697,10 +770,10 @@
       "normalTable": "普通表格",
       "tableGrid": "表格网格",
       "gridTableLight": "浅色网格表",
-      "plainTable1": "纯文本表格 1",
-      "plainTable2": "纯文本表格 2",
-      "plainTable3": "纯文本表格 3",
-      "plainTable4": "纯文本表格 4",
+      "plainTable1": "简明表格 1",
+      "plainTable2": "简明表格 2",
+      "plainTable3": "简明表格 3",
+      "plainTable4": "简明表格 4",
       "gridTable1Light": "浅色网格表 1",
       "gridTable4Accent1": "网格表 4 强调色 1",
       "gridTable5Dark": "深色网格表 5",
@@ -755,8 +828,8 @@
   },
   "imageWrap": {
     "inline": "嵌入型",
-    "floatLeft": "浮于左侧(文字环绕右侧)",
-    "floatRight": "浮于右侧(文字环绕左侧)",
+    "floatLeft": "四周型靠左",
+    "floatRight": "四周型靠右",
     "topAndBottom": "上下型环绕",
     "behindText": "衬于文字下方",
     "inFrontOfText": "浮于文字上方",
@@ -799,6 +872,20 @@
     "linkRemoved": "链接已删除",
     "linkCopied": "链接已复制到剪贴板",
     "failedToSave": "保存文档失败",
+    "documentInput": "文档输入",
+    "documentPreview": "文档预览",
+    "closeNote": "关闭注释",
+    "recoverableText": "可恢复的文档文本",
+    "dismissDraft": "放弃草稿",
+    "readDocumentText": "读取文档文本",
+    "documentText": "文档文本",
+    "previousText": "上一段文本",
+    "nextText": "下一段文本",
+    "addComment": "添加批注",
+    "noteProperties": "注释属性",
+    "recoverableTextNotice": "此文本无法应用。请复制它以保留草稿，然后将其放弃。",
+    "documentTextUnavailable": "文档文本不可用。",
+    "documentTextChanged": "文档文本已更改。请重新读取。",
     "editing": "编辑",
     "editingDescription": "直接编辑文档",
     "suggesting": "修订",
@@ -828,13 +915,27 @@
     "editableAriaLabel": "可编辑图片"
   },
   "ruler": {
+    "tabStop": "{position} 处的 {alignment} 制表位",
+    "tabAlignments": {
+      "left": "左对齐",
+      "center": "居中",
+      "right": "右对齐",
+      "decimal": "小数点对齐",
+      "bar": "竖线对齐",
+      "clear": "已清除",
+      "num": "列表"
+    },
     "horizontal": "水平标尺",
     "vertical": "垂直标尺",
     "firstLineIndent": "首行缩进",
     "leftIndent": "左缩进",
     "rightIndent": "右缩进",
     "topMargin": "上边距",
-    "bottomMargin": "下边距"
+    "bottomMargin": "下边距",
+    "leftMargin": "左边距",
+    "rightMargin": "右边距",
+    "hangingIndent": "悬挂缩进",
+    "markerValue": "{name}：{value}"
   },
   "print": {
     "label": "打印",
@@ -877,34 +978,34 @@
     "replaceImage": null
   },
   "revisions": {
-    "cellDeleted": null,
-    "cellInserted": null,
-    "cellMerged": null,
-    "cellPropertiesChanged": null,
-    "paragraphMarkDeleted": null,
-    "paragraphMarkInserted": null,
-    "paragraphPropertiesChanged": null,
+    "cellDeleted": "已删除单元格",
+    "cellInserted": "已插入单元格",
+    "cellMerged": "已合并单元格",
+    "cellPropertiesChanged": "已更改单元格属性",
+    "paragraphMarkDeleted": "已删除段落分隔符",
+    "paragraphMarkInserted": "已插入段落分隔符",
+    "paragraphPropertiesChanged": "已更改段落属性",
     "runPropertiesChanged": null,
-    "rowDeleted": null,
-    "rowInserted": null,
-    "rowPropertiesChanged": null,
-    "tablePropertiesChanged": null,
-    "tableDeleted": null,
-    "tableInserted": null
+    "rowDeleted": "已删除行",
+    "rowInserted": "已插入行",
+    "rowPropertiesChanged": "已更改行属性",
+    "tablePropertiesChanged": "已更改表格属性",
+    "tableDeleted": "已删除表格",
+    "tableInserted": "已插入表格"
   },
   "a11y": {
-    "commentedText": null,
-    "footerLabel": null,
-    "headerLabel": null,
-    "listItem": null,
-    "pageLabel": null,
-    "selected": null,
-    "selectionCleared": null,
-    "trackedDeletion": null,
-    "trackedInsertion": null,
-    "addRepeatingItem": null,
-    "contentControl": null,
-    "removeRepeatingItem": null
+    "commentedText": "带批注的文本",
+    "footerLabel": "页脚",
+    "headerLabel": "页眉",
+    "listItem": "列表项，第 {level} 级",
+    "pageLabel": "第 {number} 页",
+    "selected": "已选",
+    "selectionCleared": "已清除选择",
+    "trackedDeletion": "修订的删除内容",
+    "trackedInsertion": "修订的插入内容",
+    "addRepeatingItem": "添加项",
+    "contentControl": "内容控件",
+    "removeRepeatingItem": "删除项"
   },
   "hostMenus": {
     "edit": "编辑",

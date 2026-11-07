@@ -150,6 +150,7 @@ export function DocxEditorShell({
       <ErrorProvider>
         <ErrorBoundary onError={onEditorError}>
           <div
+            dir="ltr"
             ref={containerRef}
             className={cn('oox-root docx-editor', isDark && 'dark', className)}
             style={containerStyle}

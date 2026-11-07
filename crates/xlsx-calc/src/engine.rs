@@ -20,6 +20,7 @@ use xlsx_model::{
 };
 
 use crate::array::{Spill, charged_spill, evaluate_spill};
+use crate::deps::reads_other_workbook;
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 
@@ -793,7 +794,8 @@ fn cell_random_seed(seed: u32, cell: Key) -> u64 {
 }
 
 /// evaluate one formula node; `None` keeps the cached value, because the cell
-/// has no formula, it no longer parses, or an engine gap reached the result.
+/// has no formula, it no longer parses, it reads another workbook, or an engine
+/// gap reached the result.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -816,7 +818,10 @@ fn eval_node_with(
     graph: &DepGraph,
     name_index: Option<&DepGraph>,
 ) -> (Option<NodeValue>, bool) {
-    let Some(expr) = graph.ast(u.0, cell_of(u)) else {
+    let Some(expr) = graph
+        .ast(u.0, cell_of(u))
+        .filter(|expr| !reads_other_workbook(expr))
+    else {
         return (None, false);
     };
     #[cfg(feature = "test-counters")]
@@ -847,6 +852,9 @@ fn eval_node_with(
             None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
         }
     };
+    if ctx.read_other_workbook() {
+        return (None, ctx.exhausted());
+    }
     let unsupported = ctx.has_unhandled_unsupported_function();
     let refused = ctx.has_unhandled_budget_error();
     if (refused || unsupported) && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
@@ -1088,7 +1096,12 @@ fn write_if_changed(
     budget: &EvaluationBudget,
     journal: &mut RecalcJournal,
 ) -> bool {
-    if *wb.value_cow(u.0, cell_of(u)) == value {
+    let value = precision_as_displayed(wb, u, stored(value));
+    let previous = wb.value_cow(u.0, cell_of(u));
+    let negative_zero = !wb.full_precision
+        && matches!(previous.as_ref(), CellValue::Number { value } if *value == 0.0 && value.is_sign_negative())
+        && matches!(&value, CellValue::Number { value } if *value == 0.0 && value.is_sign_positive());
+    if *previous == value && !negative_zero {
         return false;
     }
     journal.value(wb, u);
@@ -1098,6 +1111,45 @@ fn write_if_changed(
         sheet.set_calculated_value(at, value);
     }
     true
+}
+
+/// a result as excel stores it: below the smallest normal double it is 0,
+/// while the math that produced it kept every bit.
+fn stored(value: CellValue) -> CellValue {
+    match value {
+        CellValue::Number { value } if value != 0.0 && value.abs() < f64::MIN_POSITIVE => {
+            CellValue::Number { value: 0.0 }
+        }
+        value => value,
+    }
+}
+
+fn precision_as_displayed(wb: &Workbook, u: Key, value: CellValue) -> CellValue {
+    if wb.full_precision {
+        return value;
+    }
+    let CellValue::Number { value: number } = value else {
+        return value;
+    };
+    let style = wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.effective_style(cell_of(u)));
+    let code = match wb.styles.resolved_format(style).number_format {
+        xlsx_model::styles::FormatCode::Custom(code) => Some(code),
+        xlsx_model::styles::FormatCode::Builtin(id) => xlsx_model::numfmt::builtin_format_code(id),
+    };
+    let Some(digits) = code.and_then(|code| xlsx_model::numfmt::displayed_precision(number, code))
+    else {
+        return value;
+    };
+    let rounded = crate::functions::math::round_number(number, digits);
+    if rounded.is_finite() {
+        CellValue::Number {
+            value: if rounded == 0.0 { 0.0 } else { rounded },
+        }
+    } else {
+        value
+    }
 }
 
 fn sort_key(a: &(SheetId, CellRef), b: &(SheetId, CellRef)) -> std::cmp::Ordering {
@@ -1742,6 +1794,50 @@ mod tests {
         put_formula(&mut wb, s, "B1", "A1+0");
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(41_390.0));
+    }
+
+    /// a TEXT conversion that fails must not poison the cell with an
+    /// unsupported flag: the cell and its dependents recalc normally.
+    #[test]
+    fn a_failed_text_conversion_recalcs_after_an_edit() {
+        let (mut wb, s) = one_sheet();
+        let text = |v: &str| CellValue::Text { value: v.into() };
+        put_text(&mut wb, s, "A1", "99-1");
+        put_num(&mut wb, s, "B1", 5.0);
+        put_cached_formula(&mut wb, s, "C1", "TEXT(A1,\"0\")&B1", text("99-15"));
+        put_cached_formula(&mut wb, s, "D1", "C1", text("99-15"));
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C1"), text("99-15"));
+
+        put_num(&mut wb, s, "B1", 10.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("B1"))], None);
+        assert_eq!(value(&wb, s, "C1"), text("99-110"));
+        assert_eq!(value(&wb, s, "D1"), text("99-110"));
+    }
+
+    /// date text TEXT converts in a 1904 workbook lands on the same date.
+    #[test]
+    fn text_converts_date_text_in_a_1904_workbook() {
+        let (mut wb, s) = one_sheet();
+        wb.date_system = xlsx_model::DateSystem::V1904;
+        put_text(&mut wb, s, "A1", "November 2025");
+        put_formula(&mut wb, s, "B1", "TEXT(A1,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B1"),
+            CellValue::Text {
+                value: "November 2025 ".into()
+            }
+        );
+        put_text(&mut wb, s, "A2", "November 1902");
+        put_formula(&mut wb, s, "B2", "TEXT(A2,\"MMMM YYYY \")");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "B2"),
+            CellValue::Text {
+                value: "November 1902".into()
+            }
+        );
     }
 
     /// excel trims only ascii spaces off date text, so other unicode spaces,
@@ -2410,7 +2506,7 @@ mod tests {
         let (_, result) = rebuild_and_recalc_all(&mut wb, None);
         assert!(result.cycle_cells.is_empty());
         for at in 0..N - 1 {
-            let expected = num(2f64.powi((N - 2 - at) as i32));
+            let expected = num(crate::fmath::powi(2.0, (N - 2 - at) as i32));
             assert_eq!(value(&wb, s, &column(at)), expected);
             assert_eq!(value(&wb, s, &row(at)), expected);
         }

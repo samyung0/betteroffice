@@ -55,7 +55,17 @@ pub(super) fn markers(
 ) -> Result<(), Failure> {
     let mut bookmarks = Vec::new();
     let mut comments = Vec::new();
+    let mut drawing_end = 0;
     for node in &lowered.xml.nodes {
+        #[cfg(test)]
+        super::work::add(1);
+        if node.span.start < drawing_end {
+            continue;
+        }
+        if node.word("drawing") {
+            drawing_end = node.span.end;
+            continue;
+        }
         if node.namespace != WORD
             || !matches!(
                 node.local.as_str(),
@@ -67,6 +77,14 @@ pub(super) fn markers(
         let before = lowered
             .cells
             .partition_point(|cell| cell.raw.end <= node.span.start);
+        if lowered.cells.get(before).is_some_and(|cell| {
+            cell.retained
+                && matches!(cell.unit, UnitV1::Atom { .. })
+                && cell.raw.start <= node.span.start
+                && node.span.end <= cell.raw.end
+        }) {
+            continue;
+        }
         let offset = before.checked_sub(1).map_or(0, |at| lowered.cells[at].to);
         let number = |name| {
             node.attr(source, name)
@@ -155,8 +173,14 @@ pub(super) fn seed(
         })
         .collect::<Result<_, _>>()?;
     for (cell, unit) in lowered.cells.iter().zip(flatten(units)) {
+        if cell.retained && matches!(cell.unit, UnitV1::Atom { .. }) {
+            continue;
+        }
         let attrs = unit_attrs(&unit);
         let node = &lowered.xml.nodes[cell.node];
+        if node.word("drawing") {
+            continue;
+        }
         if node.word("commentReference") {
             if !attrs.is_empty() {
                 return Err(mismatch("commentReference"));
@@ -165,6 +189,8 @@ pub(super) fn seed(
         }
         if let Some(direct) = &runs[cell.run] {
             run(direct, attrs, node.word("sym"))?;
+        } else {
+            language(None, attrs.get("language"))?;
         }
         if node.word("sym")
             && let Some(font) = node.attr(source, "w:font")
@@ -185,7 +211,23 @@ pub(super) fn seed(
     Ok(())
 }
 
+fn language(direct: Option<&Value>, live: Option<&Value>) -> Result<(), Failure> {
+    if let Some(live) = live.and_then(Value::as_object) {
+        for (key, expected) in live {
+            let key = if key == "val" { "latin" } else { key.as_str() };
+            let value = direct
+                .and_then(|value| value.get(key))
+                .filter(|value| !value.is_null());
+            if value != (!expected.is_null()).then_some(expected) {
+                return Err(mismatch("language"));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
+    language(direct.get("language"), attrs.get("language"))?;
     for key in ["bold", "italic", "allCaps", "smallCaps", "hidden"] {
         if let Some(value) = direct.get(key) {
             flag(key, value, attrs)?;
@@ -202,6 +244,10 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
         ("fontSize", "fontSize", "size"),
         ("fontSizeCs", "fontSize", "sizeCs"),
         ("styleId", "runStyle", "styleId"),
+        ("spacing", "characterSpacing", "spacing"),
+        ("position", "characterSpacing", "position"),
+        ("scale", "characterSpacing", "scale"),
+        ("kerning", "characterSpacing", "kerning"),
     ] {
         if let Some(value) = direct.get(source) {
             check(key, value, attrs.get(key).and_then(|v| v.get(field)))?;
@@ -229,11 +275,7 @@ fn run(direct: &Value, attrs: &Attrs, symbol: bool) -> Result<(), Failure> {
     }
     if let Some(color) = direct.get("color") {
         let seeded = attrs.get("textColor").filter(|value| !value.is_null());
-        if color.get("auto") == Some(&Value::Bool(true)) {
-            if seeded.is_some() {
-                return Err(mismatch("textColor"));
-            }
-        } else {
+        if color.get("auto") != Some(&Value::Bool(true)) {
             for key in ["rgb", "themeColor", "themeTint", "themeShade"] {
                 let value = color.get(key).filter(|value| !value.is_null());
                 let seeded = seeded
@@ -337,8 +379,17 @@ fn paragraph(direct: &Value, attrs: &Attrs) -> Result<(), Failure> {
             attrs.get("pStyle").or_else(|| attrs.get("styleId")),
         )?;
     }
+    language(
+        direct
+            .get("runProperties")
+            .and_then(|value| value.get("language")),
+        attrs.get("language"),
+    )?;
     if let Some(run) = direct.get("runProperties").and_then(Value::as_object) {
         for (key, value) in run {
+            if key == "language" && attrs.contains_key("language") {
+                continue;
+            }
             if key == "color" && value.get("auto") == Some(&Value::Bool(true)) {
                 continue;
             }

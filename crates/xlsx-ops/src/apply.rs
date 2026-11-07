@@ -1,7 +1,7 @@
 //! applying ops mutably to a workbook, returning the inverse for undo, plus
 //! `remap_ref` — the shared address-remapping primitive.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
@@ -770,58 +770,11 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
             hidden,
         } => {
             let existing = defined_name_index(wb, name, *scope)?;
-            let grown = match existing {
-                Some(index) => refers_to
-                    .len()
-                    .saturating_sub(wb.defined_names[index].formula.len()),
-                None => DEFINED_NAME_ENTRY_BYTES
-                    .saturating_add(name.len())
-                    .saturating_add(refers_to.len()),
-            };
-            if grown > 0
-                && defined_names_bytes(&wb.defined_names).saturating_add(grown)
-                    > MAX_DEFINED_NAME_BYTES
-            {
-                return Err(OpError::TooManyDefinedNames);
-            }
-            if existing.is_none_or(|index| {
-                let defined = &wb.defined_names[index];
-                defined.formula != *refers_to
-                    || hidden.is_some_and(|hidden| hidden != defined.hidden)
-            }) {
-                validate_defined_name(wb, name, *scope, existing.is_none())?;
-            }
-            if existing.is_none_or(|index| wb.defined_names[index].formula != *refers_to) {
-                validate_defined_name_formula(refers_to)?;
-            }
-            let previous = wb.defined_names.clone();
-            if let Some(index) = existing {
-                let defined = &mut wb.defined_names[index];
-                defined.formula = refers_to.clone();
-                if let Some(hidden) = hidden {
-                    defined.hidden = *hidden;
-                }
-            } else {
-                wb.defined_names.push(DefinedName {
-                    name: name.clone(),
-                    formula: refers_to.clone(),
-                    local_sheet: *scope,
-                    hidden: hidden.unwrap_or(false),
-                });
-            }
-            Ok(InvertedOp(vec![Op::SetDefinedNames {
-                defined_names: previous,
-            }]))
+            set_defined_name(wb, existing, None, true, name, refers_to, *scope, *hidden)
         }
         Op::DeleteDefinedName { name, scope } => {
             let existing = defined_name_index(wb, name, *scope)?;
-            let previous = wb.defined_names.clone();
-            if let Some(index) = existing {
-                wb.defined_names.remove(index);
-            }
-            Ok(InvertedOp(vec![Op::SetDefinedNames {
-                defined_names: previous,
-            }]))
+            Ok(delete_defined_name(wb, existing, true))
         }
         Op::SetDefinedNames { defined_names } => {
             if defined_names_bytes(defined_names) > MAX_DEFINED_NAME_BYTES {
@@ -837,6 +790,82 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
         Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
         Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
     }
+}
+
+/// [`Op::SetDefinedName`] once its `existing` entry is found. `bytes` is what the table charges
+/// against [`MAX_DEFINED_NAME_BYTES`] when the caller already knows it. With `snapshot` the
+/// inverse restores the table as it was; without, it is empty.
+#[allow(clippy::too_many_arguments)]
+fn set_defined_name(
+    wb: &mut Workbook,
+    existing: Option<usize>,
+    bytes: Option<usize>,
+    snapshot: bool,
+    name: &str,
+    refers_to: &str,
+    scope: Option<SheetId>,
+    hidden: Option<bool>,
+) -> Result<InvertedOp, OpError> {
+    let grown = match existing {
+        Some(index) => refers_to
+            .len()
+            .saturating_sub(wb.defined_names[index].formula.len()),
+        None => DEFINED_NAME_ENTRY_BYTES
+            .saturating_add(name.len())
+            .saturating_add(refers_to.len()),
+    };
+    if grown > 0
+        && bytes
+            .unwrap_or_else(|| defined_names_bytes(&wb.defined_names))
+            .saturating_add(grown)
+            > MAX_DEFINED_NAME_BYTES
+    {
+        return Err(OpError::TooManyDefinedNames);
+    }
+    if existing.is_none_or(|index| {
+        let defined = &wb.defined_names[index];
+        defined.formula != refers_to || hidden.is_some_and(|hidden| hidden != defined.hidden)
+    }) {
+        validate_defined_name(wb, name, scope, existing.is_none())?;
+    }
+    if existing.is_none_or(|index| wb.defined_names[index].formula != refers_to) {
+        validate_defined_name_formula(refers_to)?;
+    }
+    let previous = snapshot.then(|| wb.defined_names.clone());
+    if let Some(index) = existing {
+        let defined = &mut wb.defined_names[index];
+        defined.formula = refers_to.to_owned();
+        if let Some(hidden) = hidden {
+            defined.hidden = hidden;
+        }
+    } else {
+        wb.defined_names.push(DefinedName {
+            name: name.to_owned(),
+            formula: refers_to.to_owned(),
+            local_sheet: scope,
+            hidden: hidden.unwrap_or(false),
+        });
+    }
+    Ok(names_inverse(previous))
+}
+
+/// [`Op::DeleteDefinedName`] once its `existing` entry is found, with the inverse
+/// [`set_defined_name`] returns.
+fn delete_defined_name(wb: &mut Workbook, existing: Option<usize>, snapshot: bool) -> InvertedOp {
+    let previous = snapshot.then(|| wb.defined_names.clone());
+    if let Some(index) = existing {
+        wb.defined_names.remove(index);
+    }
+    names_inverse(previous)
+}
+
+fn names_inverse(previous: Option<Vec<DefinedName>>) -> InvertedOp {
+    InvertedOp(
+        previous
+            .map(|defined_names| Op::SetDefinedNames { defined_names })
+            .into_iter()
+            .collect(),
+    )
 }
 
 fn defined_name_index(
@@ -987,9 +1016,26 @@ fn apply_range_formats(
                     let source_col = (col - range.start.col) % captured.columns;
                     let index = (source_row * captured.columns + source_col) as usize;
                     if let Some(source) = captured.source_formats.get(index) {
-                        let matches = |style| {
-                            crate::formatting::PreservedCellFormat::from_style(styles, style)
-                                == *source
+                        let captured_style = captured.source_styles.get(index).copied().flatten();
+                        if source.source_xf.is_none()
+                            && source.derived_from.is_none()
+                            && format == styles.cell_format(Some(0))
+                            && (captured_style.is_none() || !styles.xf_has_extra_xml(0))
+                        {
+                            staged.push(
+                                defaults
+                                    .inherited_style(at)
+                                    .is_some_and(|inherited| inherited != 0)
+                                    .then_some(0),
+                            );
+                            continue;
+                        }
+                        let matches = |style: Option<u32>| {
+                            (source.source_xf.is_some()
+                                || source.derived_from.is_some()
+                                || style.is_none_or(|index| !styles.xf_has_extra_xml(index)))
+                                && crate::formatting::PreservedCellFormat::from_style(styles, style)
+                                    == *source
                         };
                         let selected = if source.format == format {
                             resolved_formats.get(&index).copied().or_else(|| {
@@ -1142,15 +1188,168 @@ fn apply_ops_cloned(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
 }
 
 fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
-    let mut per_op: Vec<Vec<Op>> = Vec::with_capacity(ops.len());
+    let mut batch = InPlaceBatch::new(wb);
     for op in ops {
-        per_op.push(apply_in_place(wb, op)?.0);
+        batch.apply(op)?;
     }
-    let mut inverse = Vec::new();
-    for chunk in per_op.into_iter().rev() {
-        inverse.extend(chunk);
+    Ok(batch.finish())
+}
+
+/// Ops applied in sequence to one workbook as [`apply_in_place`] applies each, with no rollback
+/// clone, and their combined inverse. Consecutive defined-name edits share one lookup of the
+/// name table and one snapshot of it, so a batch editing every name of a large table takes
+/// time and memory linear in its size.
+///
+/// For the workspace crates; not part of the supported API.
+#[doc(hidden)]
+pub struct InPlaceBatch<'a> {
+    wb: &'a mut Workbook,
+    per_op: Option<Vec<Vec<Op>>>,
+    names: Option<NameIndex>,
+    /// the defined-name edits just applied started from a table their inverse restores
+    in_name_run: bool,
+}
+
+/// A name table's entries by scope and ASCII-folded name: the first, and whether another
+/// shares it; and what the table charges against [`MAX_DEFINED_NAME_BYTES`].
+struct NameIndex {
+    entries: HashMap<(Option<SheetId>, String), (usize, bool)>,
+    bytes: usize,
+}
+
+impl NameIndex {
+    fn of(names: &[DefinedName]) -> Self {
+        let mut entries = HashMap::with_capacity(names.len());
+        for (index, defined) in names.iter().enumerate() {
+            entries
+                .entry((defined.local_sheet, defined.name.to_ascii_lowercase()))
+                .and_modify(|(_, shared)| *shared = true)
+                .or_insert((index, false));
+        }
+        Self {
+            entries,
+            bytes: defined_names_bytes(names),
+        }
     }
-    Ok(inverse)
+
+    fn find(&self, name: &str, scope: Option<SheetId>) -> Option<(usize, bool)> {
+        self.entries
+            .get(&(scope, name.to_ascii_lowercase()))
+            .copied()
+    }
+}
+
+impl<'a> InPlaceBatch<'a> {
+    pub fn new(wb: &'a mut Workbook) -> Self {
+        Self {
+            wb,
+            per_op: Some(Vec::new()),
+            names: None,
+            in_name_run: false,
+        }
+    }
+
+    /// A batch whose [`InPlaceBatch::finish`] is empty, for a caller that drops the inverse.
+    pub fn without_inverse(wb: &'a mut Workbook) -> Self {
+        Self {
+            per_op: None,
+            ..Self::new(wb)
+        }
+    }
+
+    pub fn workbook(&self) -> &Workbook {
+        self.wb
+    }
+
+    /// The first defined name `scope` holds under `name`, ignoring ASCII case.
+    pub fn defined_name(&mut self, name: &str, scope: Option<SheetId>) -> Option<&DefinedName> {
+        let (index, _) = self.name_index().find(name, scope)?;
+        self.wb.defined_names.get(index)
+    }
+
+    fn name_index(&mut self) -> &NameIndex {
+        let names = &self.wb.defined_names;
+        self.names.get_or_insert_with(|| NameIndex::of(names))
+    }
+
+    /// Applies `op` as [`apply_in_place`] does. After an error the workbook is only fit to
+    /// drop, as there.
+    pub fn apply(&mut self, op: &Op) -> Result<(), OpError> {
+        let snapshot = self.per_op.is_some() && !self.in_name_run;
+        let inverse = match op {
+            Op::SetDefinedName {
+                name,
+                refers_to,
+                scope,
+                hidden,
+            } => {
+                crate::conditional_formats::ensure_conditional_formats_allow_edit(self.wb, op)?;
+                if let Some(sheet) = *scope {
+                    self.wb.sheet(sheet).ok_or(OpError::SheetNotFound(sheet))?;
+                }
+                let (existing, bytes) = {
+                    let index = self.name_index();
+                    let existing = match index.find(name, *scope) {
+                        Some((_, true)) => {
+                            return Err(OpError::InvalidDefinedName(
+                                "ambiguous defined name in this scope".into(),
+                            ));
+                        }
+                        found => found.map(|(index, _)| index),
+                    };
+                    (existing, index.bytes)
+                };
+                let before = existing.map(|index| self.wb.defined_names[index].retained_bytes());
+                let inverse = set_defined_name(
+                    self.wb,
+                    existing,
+                    Some(bytes),
+                    snapshot,
+                    name,
+                    refers_to,
+                    *scope,
+                    *hidden,
+                )?;
+                let at = existing.unwrap_or(self.wb.defined_names.len() - 1);
+                let after = self.wb.defined_names[at].retained_bytes();
+                if let Some(index) = &mut self.names {
+                    index.bytes = index.bytes - before.unwrap_or(0) + after;
+                    if existing.is_none() {
+                        index
+                            .entries
+                            .insert((*scope, name.to_ascii_lowercase()), (at, false));
+                    }
+                }
+                inverse
+            }
+            Op::DeleteDefinedName { name, scope } => {
+                crate::conditional_formats::ensure_conditional_formats_allow_edit(self.wb, op)?;
+                let existing = defined_name_index(self.wb, name, *scope)?;
+                self.names = None;
+                delete_defined_name(self.wb, existing, snapshot)
+            }
+            _ => {
+                self.names = None;
+                self.in_name_run = false;
+                apply_in_place(self.wb, op)?
+            }
+        };
+        self.in_name_run = matches!(op, Op::SetDefinedName { .. } | Op::DeleteDefinedName { .. });
+        if let Some(per_op) = &mut self.per_op {
+            per_op.push(inverse.0);
+        }
+        Ok(())
+    }
+
+    /// The inverse of every op applied: replayed in order, it restores the workbook as it was
+    /// before the first.
+    pub fn finish(self) -> Vec<Op> {
+        let mut inverse = Vec::new();
+        for chunk in self.per_op.into_iter().flatten().rev() {
+            inverse.extend(chunk);
+        }
+        inverse
+    }
 }
 
 fn ranges_intersect(left: CellRange, right: CellRange) -> bool {
@@ -3538,6 +3737,39 @@ mod merge_c1300_tests {
         assert_eq!(
             wb.sheets[0].effective_style(CellRef::new(0, 0)),
             Some(row_style)
+        );
+    }
+
+    #[test]
+    fn captured_clean_copy_of_an_extra_xf_zero_keeps_the_copy() {
+        let mut wb = workbook();
+        wb.styles.cell_xfs[0].num_fmt_id = Some(10);
+        wb.styles.mark_xf_extra_xml(0);
+        let clean = wb.styles.cell_xfs.len() as u32;
+        wb.styles.cell_xfs.push(wb.styles.cell_xfs[0].clone());
+        wb.styles.mark_generated_format(clean);
+        let source = PreservedCellFormat::from_style(&wb.styles, Some(clean));
+        assert_eq!((source.source_xf, source.derived_from), (None, None));
+        assert_eq!(source.format, wb.styles.cell_format(Some(0)));
+        apply(
+            &mut wb,
+            &Op::ApplyRangeFormat {
+                sheet: SheetId(0),
+                range: CellRange::parse_a1("A1").unwrap(),
+                format: CapturedFormat {
+                    rows: 1,
+                    columns: 1,
+                    formats: vec![source.format.clone()],
+                    kept: Vec::new(),
+                    source_styles: vec![Some(clean)],
+                    source_formats: vec![source],
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            wb.sheets[0].cell(CellRef::new(0, 0)).map(|cell| cell.style),
+            Some(Some(clean))
         );
     }
 

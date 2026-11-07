@@ -8,7 +8,7 @@ const version = (name) =>
     '\\$&',
   );
 const fontUrl = new RegExp(
-  `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}|fonts-cjk@${version('fonts-cjk')})/assets/[A-Za-z0-9-]+\\.(?:ttf|otf)$`,
+  `^https://cdn\\.jsdelivr\\.net/npm/@betteroffice/(?:fonts@${version('fonts')}/dist/decoder/fontpack\\.wasm|fonts-latin@${version('fonts-latin')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst|fonts-cjk@${version('fonts-cjk')}/assets/[A-Za-z0-9-]+\\.otf\\.zst|fonts-intl@${version('fonts-intl')}/assets/[A-Za-z0-9-]+\\.ttf\\.zst)$`
 );
 
 /** Allow only the jsDelivr font binaries the capture harness requests, fetched without credentials. */

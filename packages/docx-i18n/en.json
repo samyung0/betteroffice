@@ -19,12 +19,20 @@
     "change": "Change",
     "clear": "Clear",
     "px": "px",
-    "closeDialog": "Close dialog"
+    "closeDialog": "Close dialog",
+    "units": {
+      "inch": "in",
+      "cm": "cm",
+      "pt": "pt",
+      "px": "px",
+      "inchMark": "\""
+    }
   },
   "toolbar": {
     "ariaLabel": "Formatting toolbar",
     "file": "File",
     "format": "Format",
+    "layout": "Layout",
     "insert": "Insert",
     "open": "Open",
     "openShortcut": "Ctrl+O",
@@ -49,6 +57,16 @@
     "imageWrap": {
       "current": "Current"
     }
+  },
+  "layout": {
+    "margins": "Margins",
+    "normal": "Normal",
+    "narrow": "Narrow",
+    "moderate": "Moderate",
+    "wide": "Wide",
+    "customMargins": "Custom margins...",
+    "morePaperSizes": "More paper sizes...",
+    "indent": "Indent"
   },
   "formattingBar": {
     "groups": {
@@ -89,6 +107,7 @@
     "moreItems": "{count, plural, one {# more item} other {# more items}}"
   },
   "alignment": {
+    "left": "Left",
     "alignLeft": "Align Left",
     "alignLeftShortcut": "Ctrl+L",
     "center": "Center",
@@ -112,7 +131,12 @@
     "single": "Single",
     "double": "Double",
     "lineSpacingTitle": "Line spacing: {label}",
-    "paragraphSpacing": "Paragraph spacing"
+    "paragraphSpacing": "Paragraph spacing",
+    "addBefore": "Add Space Before Paragraph",
+    "removeBefore": "Remove Space Before Paragraph",
+    "addAfter": "Add Space After Paragraph",
+    "removeAfter": "Remove Space After Paragraph",
+    "options": "Line Spacing Options..."
   },
   "styles": {
     "selectAriaLabel": "Select paragraph style",
@@ -152,6 +176,8 @@
   },
   "colorPicker": {
     "ariaLabel": "{type} color picker",
+    "pickerLabel": "{title} picker",
+    "customHexColor": "Custom hex color",
     "highlightColors": "Highlight Colors",
     "customColor": "Custom Color",
     "noColor": "No Color",
@@ -257,6 +283,8 @@
       "columnsLabel": "Columns:",
       "insertButton": "Insert Table",
       "sizeSelector": "Table size selector",
+      "selectSize": "Select size",
+      "cellSize": "{cols} columns, {rows} rows",
       "columnWidthLabel": "Column width",
       "fixedWidth": "Fixed",
       "autofit": "Auto-fit to contents",
@@ -372,6 +400,7 @@
       "alignment": "Alignment",
       "offset": "Offset",
       "offsetPx": "Offset (px)",
+      "distanceFromText": "Distance from text ({unit})",
       "align": "Align",
       "relativeTo": "Relative to",
       "alignOptions": {
@@ -524,6 +553,8 @@
         "strikethroughDescription": "Toggle strikethrough",
         "subscript": "Subscript",
         "subscriptDescription": "Toggle subscript",
+        "clearFormatting": "Clear Formatting",
+        "clearFormattingDescription": "Clear text formatting",
         "superscript": "Superscript",
         "superscriptDescription": "Toggle superscript",
         "alignLeft": "Align Left",
@@ -575,13 +606,25 @@
       },
       "noResults": "No shortcuts found matching \"{query}\"",
       "pressEscToClose": "Press {key} to close",
-      "or": "or"
+      "or": "or",
+      "keys": {
+        "escape": "Esc",
+        "pageUp": "Page Up",
+        "pageDown": "Page Down",
+        "ctrl": "Ctrl",
+        "del": "Del"
+      }
     },
     "objectGeometry": {
       "left": "Left (px)",
       "top": "Top (px)",
       "width": "Width (px)",
       "height": "Height (px)"
+    },
+    "paragraphSpacing": {
+      "before": "Spacing Before",
+      "after": "Spacing After",
+      "multiple": "Multiple"
     }
   },
   "comments": {
@@ -695,13 +738,26 @@
     "tryAgain": "Try Again",
     "showDetails": "Show details",
     "hideDetails": "Hide details",
+    "canvasRendererFailed": "Canvas renderer failed.",
+    "userFriendly": {
+      "network": "Network error. Please check your internet connection and try again.",
+      "parse": "The document could not be parsed. It may be corrupted or in an unsupported format.",
+      "permission": "Access denied. You may not have permission to access this file.",
+      "notFound": "The requested file was not found.",
+      "timeout": "The operation timed out. Please try again.",
+      "unexpected": "An unexpected error occurred. Please try again."
+    },
     "unsavedChanges": "You have unsaved changes. Are you sure you want to leave?"
+  },
+  "contentControls": {
+    "noOptions": "No options"
   },
   "table": {
     "insertRowAbove": "Insert row above",
     "insertRowBelow": "Insert row below",
     "insertColumnLeft": "Insert column left",
     "insertColumnRight": "Insert column right",
+    "insertColumnToTheRight": "Insert column to the right",
     "deleteRow": "Delete row",
     "deleteColumn": "Delete column",
     "deleteTable": "Delete table",
@@ -884,13 +940,27 @@
     "replaceImage": "Replace image…"
   },
   "ruler": {
+    "tabStop": "{alignment} tab at {position}",
+    "tabAlignments": {
+      "left": "Left",
+      "center": "Center",
+      "right": "Right",
+      "decimal": "Decimal",
+      "bar": "Bar",
+      "clear": "Clear",
+      "num": "List"
+    },
     "horizontal": "Horizontal ruler",
     "vertical": "Vertical ruler",
     "firstLineIndent": "First line indent",
     "leftIndent": "Left indent",
     "rightIndent": "Right indent",
     "topMargin": "Top margin",
-    "bottomMargin": "Bottom margin"
+    "bottomMargin": "Bottom margin",
+    "leftMargin": "Left margin",
+    "rightMargin": "Right margin",
+    "hangingIndent": "Hanging indent",
+    "markerValue": "{name}: {value}"
   },
   "print": {
     "label": "Print",

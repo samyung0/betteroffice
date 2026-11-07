@@ -4,60 +4,30 @@ use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage,
-    scoped_image_key,
+    ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
 };
-use ooxml_text::FontStore;
 use serde_json::Number;
 
 use crate::{Document, Error, Result};
 
-const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
-const MAX_FONTS: usize = 256;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGES: usize = 256;
 pub const MAX_PIXMAP_DIM: u32 = docx_raster::MAX_PAGE_DIM;
 pub const MAX_PIXMAP_PIXELS: u64 = docx_raster::MAX_PAGE_PIXELS;
 
-/// Registered faces plus the `family|bold|italic` chains the raster backend
-/// resolves runs against. The store and glyph cache sit behind a `Mutex` so a
-/// [`Document`] holding one stays `Send + Sync`.
-#[derive(Default)]
-pub(crate) struct FontRegistry {
-    store: Mutex<FontStore>,
-    chains: FontChains,
-    faces: usize,
-    glyphs: Mutex<GlyphCache>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PngTarget {
+    pub page: usize,
 }
 
-impl FontRegistry {
-    fn register(&mut self, family: &str, bold: bool, italic: bool, bytes: &[u8]) -> Result<u32> {
-        if bytes.len() > MAX_FONT_BYTES {
-            return Err(Error::ResourceLimit(format!(
-                "font exceeds {MAX_FONT_BYTES} bytes"
-            )));
-        }
-        if self.faces >= MAX_FONTS {
-            return Err(Error::ResourceLimit(format!(
-                "more than {MAX_FONTS} font faces"
-            )));
-        }
-        let family = family.trim();
-        if family.is_empty() {
-            return Err(Error::Font("font family is empty".to_owned()));
-        }
-        let id = self
-            .store
-            .get_mut()
-            .unwrap_or_else(PoisonError::into_inner)
-            .register(bytes.to_vec())
-            .map_err(|error| Error::Font(error.to_string()))?;
-        self.chains
-            .entry(chain_key(family, bold, italic))
-            .or_default()
-            .push(id);
-        self.faces += 1;
-        Ok(id.to_u32())
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderOptions {
+    pub scale: f32,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        Self { scale: 1.0 }
     }
 }
 
@@ -111,35 +81,80 @@ fn validate_render_size(width: u32, height: u32) -> Result<()> {
 
 /// The pixel extent the raster backend would allocate, or `None` when the
 /// backend rejects the number before allocating anything.
-fn page_pixels(number: &Number) -> Option<u32> {
-    let value = number.as_f64()?;
+fn page_pixels(number: &Number, scale: f32) -> Option<u32> {
+    let value = number.as_f64()? * f64::from(scale);
     if !value.is_finite() || value <= 0.0 {
         return None;
     }
     Some(value.ceil().min(f64::from(u32::MAX)) as u32)
 }
 
-fn chain_key(family: &str, bold: bool, italic: bool) -> String {
-    format!(
-        "{}|{}|{}",
-        family.to_lowercase(),
-        u8::from(bold),
-        u8::from(italic)
-    )
-}
-
 impl Document {
-    /// Registers one font face for rendering, returning its font id. Faces are
-    /// capped at 256 and each font at 32 MiB; either budget is a
-    /// [`Error::ResourceLimit`] rather than a truncated accept.
-    pub fn register_font(
-        &mut self,
-        family: &str,
-        bold: bool,
-        italic: bool,
-        bytes: &[u8],
-    ) -> Result<u32> {
-        self.fonts.register(family, bold, italic, bytes)
+    pub fn render_png(&self, target: PngTarget, options: &RenderOptions) -> Result<RenderedPage> {
+        if !options.scale.is_finite() || options.scale <= 0.0 {
+            return Err(Error::Render("scale must be finite and positive".into()));
+        }
+        let bytes = self.save()?;
+        let package = docx_parse::parse_docx_s9_wire(
+            &bytes,
+            docx_parse::S9ParseOptions {
+                detect_variables: false,
+                ..Default::default()
+            },
+        )?
+        .document
+        .package;
+        let engine = docx_edit::EngineSession::new(1);
+        docx_edit::seed_from_docx(engine.doc(), &bytes).map_err(Error::Render)?;
+        let package =
+            serde_json::to_value(package).map_err(|error| Error::Render(error.to_string()))?;
+        let mut request = docx_edit::layout_request::region_layout_request(&package, 24.0);
+        request["measurement"] = serde_json::json!({
+            "defaults": {"fontFamily": "Calibri", "fontSize": 11}
+        });
+        let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
+        #[cfg(feature = "fonts")]
+        {
+            let requirements = engine
+                .layout_font_requirements_json(&request.to_string())
+                .map_err(Error::Render)?;
+            let requirements: Vec<serde_json::Value> = serde_json::from_str(&requirements)
+                .map_err(|error| Error::Render(error.to_string()))?;
+            let requirements: Vec<_> = requirements
+                .iter()
+                .map(|value| docx_layout::measure_blocks::FontRequirement {
+                    key: value["key"].as_str().unwrap_or_default().to_owned(),
+                    family: value["family"].as_str().unwrap_or("Calibri").to_owned(),
+                    bold: value["bold"].as_bool().unwrap_or(false),
+                    italic: value["italic"].as_bool().unwrap_or(false),
+                    scripts: value["scripts"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|script| script.as_str().map(str::to_owned))
+                        .collect(),
+                    characters: Default::default(),
+                })
+                .collect();
+            fonts.resolve(&self.font_manager, &requirements)?;
+        }
+        let chains: std::collections::BTreeMap<_, Vec<_>> = fonts
+            .chains
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.iter().map(|id| id.to_u32()).collect()))
+            .collect();
+        request["measurement"]["fontChains"] = serde_json::json!(chains);
+        let display_list = docx_layout::with_measure_font_store(&mut fonts.store, || {
+            let output = engine
+                .layout_document_with_regions_json(&request.to_string())
+                .map_err(Error::Render)?;
+            let mut output: serde_json::Value =
+                serde_json::from_str(&output).map_err(|error| Error::Render(error.to_string()))?;
+            output["fontChains"] = serde_json::json!(chains);
+            docx_layout::build_display_list_value(&output.to_string()).map_err(Error::Render)
+        })?;
+        drop(fonts);
+        self.render_display_list_scaled(&display_list, target.page, options.scale)
     }
 
     /// Supplies bytes for one relationship id the display list left
@@ -160,39 +175,50 @@ impl Document {
     /// Glyph outlines and decoded images are cached on the document, so a page
     /// reuses what earlier pages extracted and decoded; an export past either
     /// cache's cap re-does what it evicted.
-    pub fn render_png(
+    pub fn render_display_list_png(
         &self,
         display_list: &DisplayList,
         page_ordinal: usize,
     ) -> Result<RenderedPage> {
+        self.render_display_list_scaled(display_list, page_ordinal, 1.0)
+    }
+
+    fn render_display_list_scaled(
+        &self,
+        display_list: &DisplayList,
+        page_ordinal: usize,
+        scale: f32,
+    ) -> Result<RenderedPage> {
         if let Some(page) = display_list.pages.get(page_ordinal)
-            && let (Some(width), Some(height)) =
-                (page_pixels(&page.width), page_pixels(&page.height))
+            && let (Some(width), Some(height)) = (
+                page_pixels(&page.width, scale),
+                page_pixels(&page.height, scale),
+            )
         {
             validate_render_size(width, height)?;
         }
-        let store = self
-            .fonts
-            .store
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        let mut glyphs = self
-            .fonts
-            .glyphs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        #[cfg(feature = "fonts")]
+        self.prepare_display_fonts(display_list, page_ordinal)?;
+        let mut fonts = self.fonts.lock().unwrap_or_else(PoisonError::into_inner);
         let mut images = self
             .images
             .cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
-        docx_raster::render_page_cached(
+        let crate::font::FontRegistry {
+            store,
+            chains,
+            glyphs,
+            ..
+        } = &mut *fonts;
+        let resources = RenderResources::new(store, chains, &self.images.entries);
+        docx_raster::render_page_cached_scaled(
             display_list,
             page_ordinal,
             &resources,
-            &mut glyphs,
+            glyphs,
             &mut images,
+            scale,
         )
         .map_err(Error::Render)
     }

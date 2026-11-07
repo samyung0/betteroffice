@@ -1,0 +1,257 @@
+{
+  "bodyStory": "body",
+  "notes": {
+    "contents": []
+  },
+  "options": {
+    "pageGap": 24
+  },
+  "regions": {
+    "sections": [
+      {
+        "properties": {
+          "columnSpace": 720,
+          "docGrid": {
+            "linePitch": 360
+          },
+          "footerDistance": 720,
+          "footerReferences": [
+            {
+              "rId": "rId10",
+              "type": "default"
+            }
+          ],
+          "gutter": 0,
+          "headerDistance": 720,
+          "headerReferences": [
+            {
+              "rId": "rId9",
+              "type": "default"
+            }
+          ],
+          "marginBottom": 1152,
+          "marginLeft": 1224,
+          "marginRight": 1224,
+          "marginTop": 1152,
+          "pageHeight": 15840,
+          "pageWidth": 12240
+        }
+      },
+      {
+        "properties": {
+          "columnSpace": 720,
+          "docGrid": {
+            "linePitch": 360
+          },
+          "footerDistance": 720,
+          "footerReferences": [
+            {
+              "rId": "rId10",
+              "type": "default"
+            }
+          ],
+          "gutter": 0,
+          "headerDistance": 720,
+          "headerReferences": [
+            {
+              "rId": "rId9",
+              "type": "default"
+            }
+          ],
+          "marginBottom": 1152,
+          "marginLeft": 1224,
+          "marginRight": 1224,
+          "marginTop": 1152,
+          "pageHeight": 15840,
+          "pageWidth": 12240
+        }
+      }
+    ],
+    "settings": {
+      "compatibilityFlags": {
+        "adjustLineHeightInTable": false,
+        "allowSpaceOfSameStyleInTable": false,
+        "balanceSingleByteDoubleByteWidth": false,
+        "compatibilityMode": 14,
+        "doNotExpandShiftReturn": false,
+        "doNotUseHTMLParagraphAutoSpacing": false,
+        "noLeading": false,
+        "suppressSpBfAfterPgBrk": false,
+        "useWord97LineBreakRules": false
+      },
+      "defaultTabStop": 720,
+      "themeFontLang": {
+        "eastAsia": "ja-JP"
+      }
+    }
+  },
+  "renderEnv": {
+    "compatibilityFlags": {
+      "adjustLineHeightInTable": false,
+      "allowSpaceOfSameStyleInTable": false,
+      "balanceSingleByteDoubleByteWidth": false,
+      "compatibilityMode": 14,
+      "doNotExpandShiftReturn": false,
+      "doNotUseHTMLParagraphAutoSpacing": false,
+      "noLeading": false,
+      "suppressSpBfAfterPgBrk": false,
+      "useWord97LineBreakRules": false
+    },
+    "defaultParagraphStyleId": "Normal",
+    "defaultTabStopTwips": 720,
+    "docDefaultFontSize": 11,
+    "docDefaultLanguage": {
+      "bidi": "ar-SA",
+      "eastAsia": "en-US",
+      "latin": "en-US"
+    },
+    "fontTheme": {
+      "colorScheme": {
+        "accent1": "4F81BD",
+        "accent2": "C0504D",
+        "accent3": "9BBB59",
+        "accent4": "8064A2",
+        "accent5": "4BACC6",
+        "accent6": "F79646",
+        "dk1": "000000",
+        "dk2": "1F497D",
+        "folHlink": "800080",
+        "hlink": "0000FF",
+        "lt1": "FFFFFF",
+        "lt2": "EEECE1"
+      },
+      "fontScheme": {
+        "majorFont": {
+          "cs": "",
+          "ea": "ＭＳ ゴシック",
+          "fonts": {
+            "Arab": "Times New Roman",
+            "Beng": "Vrinda",
+            "Cans": "Euphemia",
+            "Cher": "Plantagenet Cherokee",
+            "Deva": "Mangal",
+            "Ethi": "Nyala",
+            "Geor": "Sylfaen",
+            "Gujr": "Shruti",
+            "Guru": "Raavi",
+            "Hang": "맑은 고딕",
+            "Hans": "宋体",
+            "Hant": "新細明體",
+            "Hebr": "Times New Roman",
+            "Jpan": "ＭＳ ゴシック",
+            "Khmr": "MoolBoran",
+            "Knda": "Tunga",
+            "Laoo": "DokChampa",
+            "Mlym": "Kartika",
+            "Mong": "Mongolian Baiti",
+            "Orya": "Kalinga",
+            "Sinh": "Iskoola Pota",
+            "Syrc": "Estrangelo Edessa",
+            "Taml": "Latha",
+            "Telu": "Gautami",
+            "Thaa": "MV Boli",
+            "Thai": "Angsana New",
+            "Tibt": "Microsoft Himalaya",
+            "Uigh": "Microsoft Uighur",
+            "Viet": "Times New Roman",
+            "Yiii": "Microsoft Yi Baiti"
+          },
+          "latin": "Calibri"
+        },
+        "minorFont": {
+          "cs": "",
+          "ea": "ＭＳ 明朝",
+          "fonts": {
+            "Arab": "Arial",
+            "Beng": "Vrinda",
+            "Cans": "Euphemia",
+            "Cher": "Plantagenet Cherokee",
+            "Deva": "Mangal",
+            "Ethi": "Nyala",
+            "Geor": "Sylfaen",
+            "Gujr": "Shruti",
+            "Guru": "Raavi",
+            "Hang": "맑은 고딕",
+            "Hans": "宋体",
+            "Hant": "新細明體",
+            "Hebr": "Arial",
+            "Jpan": "ＭＳ 明朝",
+            "Khmr": "DaunPenh",
+            "Knda": "Tunga",
+            "Laoo": "DokChampa",
+            "Mlym": "Kartika",
+            "Mong": "Mongolian Baiti",
+            "Orya": "Kalinga",
+            "Sinh": "Iskoola Pota",
+            "Syrc": "Estrangelo Edessa",
+            "Taml": "Latha",
+            "Telu": "Gautami",
+            "Thaa": "MV Boli",
+            "Thai": "Cordia New",
+            "Tibt": "Microsoft Himalaya",
+            "Uigh": "Microsoft Uighur",
+            "Viet": "Arial",
+            "Yiii": "Microsoft Yi Baiti"
+          },
+          "latin": "Cambria"
+        }
+      },
+      "name": "Office Theme"
+    },
+    "numericIds": {},
+    "paragraphStyleFontSizes": {
+      "BodyText": 11,
+      "BodyText2": 11,
+      "BodyText3": 8,
+      "Caption": 9,
+      "Footer": 11,
+      "Header": 11,
+      "Heading1": 14,
+      "Heading2": 13,
+      "Heading3": 11,
+      "Heading4": 11,
+      "Heading5": 11,
+      "Heading6": 11,
+      "Heading7": 11,
+      "Heading8": 10,
+      "Heading9": 10,
+      "IntenseQuote": 11,
+      "List": 11,
+      "List2": 11,
+      "List3": 11,
+      "ListBullet": 11,
+      "ListBullet2": 11,
+      "ListBullet3": 11,
+      "ListContinue": 11,
+      "ListContinue2": 11,
+      "ListContinue3": 11,
+      "ListNumber": 11,
+      "ListNumber2": 11,
+      "ListNumber3": 11,
+      "ListParagraph": 11,
+      "MacroText": 10,
+      "NoSpacing": 11,
+      "Normal": 11,
+      "Quote": 11,
+      "Subtitle": 12,
+      "TOCHeading": 14,
+      "Title": 26
+    },
+    "showHiddenText": false,
+    "themeColors": {
+      "accent1": "4F81BD",
+      "accent2": "C0504D",
+      "accent3": "9BBB59",
+      "accent4": "8064A2",
+      "accent5": "4BACC6",
+      "accent6": "F79646",
+      "dk1": "000000",
+      "dk2": "1F497D",
+      "folHlink": "800080",
+      "hlink": "0000FF",
+      "lt1": "FFFFFF",
+      "lt2": "EEECE1"
+    },
+    "tocStyleIds": []
+  }
+}

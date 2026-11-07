@@ -552,7 +552,6 @@ export {
   deleteColumn,
   mergeCells,
   splitCell,
-  getActionLabel,
   isDeleteAction,
   handleTableShortcut,
 } from './TableToolbar/operations';

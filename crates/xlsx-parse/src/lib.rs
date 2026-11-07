@@ -6,6 +6,10 @@ mod axis;
 mod chart;
 mod facts_codec;
 mod formula;
+mod future_functions;
+mod header_footer;
+#[cfg(test)]
+mod header_footer_tests;
 mod inventory;
 mod package;
 mod package_facts;
@@ -31,13 +35,25 @@ pub use chart::{
 pub use chart::{chart_counters, chart_save_counters, reset_chart_counters};
 pub use facts_codec::{PackageFactsBuilder, PackageFactsEncoder, SNAPSHOT_RECORD_MAX_BYTES};
 pub use formula::translate_formula;
+pub use future_functions::{
+    DefinedFunctionNames, FormulaNames, display_formula, excel_formula, saves_as,
+};
+pub use header_footer::{
+    HeaderFooterPair, HeaderFooterText, SheetHeaderFooter, parse_header_footer,
+    parse_header_footer_text,
+};
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};
-pub use read::{LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook};
+#[doc(hidden)]
+pub use read::styles_part_name;
+pub use read::{
+    LegacySheetDimensions, SharedStringCells, SourceCellFacts, parse_workbook,
+    workbook_full_precision,
+};
 pub use reference::UnpatchableReference;
 pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TEXT_STYLE_BYTES};
 #[cfg(any(test, feature = "test-oracle"))]
@@ -45,6 +61,8 @@ pub use rich_text::{MAX_RICH_TEXT_RUNS, MAX_RICH_TEXT_RUNS_PER_ITEM, MAX_RICH_TE
 pub use save_oracle::with_legacy_save_path;
 #[cfg(feature = "test-counters")]
 pub use styles::legacy_style_reads;
+#[doc(hidden)]
+pub use styles::source_style_xml_markers;
 pub use write::{
     SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,

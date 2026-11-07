@@ -1,0 +1,29 @@
+[package]
+name = "betteroffice-pptx-engine"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Target-neutral PPTX engine boundary shared by the wasm and native backends."
+
+[lib]
+name = "pptx_engine"
+
+[features]
+default = ["metafile-svg"]
+metafile-svg = ["pptx-edit/metafile-svg"]
+raster = ["dep:pptx-raster"]
+
+[dependencies]
+ooxml-drawingml = { workspace = true, features = ["tiff"] }
+pptx-edit = { workspace = true, features = ["engine"] }
+pptx-parse.workspace = true
+pptx-render.workspace = true
+pptx-raster = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+yrs = "0.27.3"
+
+[dev-dependencies]
+betteroffice-fonts.workspace = true
+ooxml-opc.workspace = true

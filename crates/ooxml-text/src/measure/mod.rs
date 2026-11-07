@@ -36,8 +36,8 @@
 //!   images, text boxes and breaks are measured by other code paths and are
 //!   never routed here.
 //!
-//! A character no font in the chain covers is *not* refused: it shapes as
-//! the chain's terminal font's `.notdef`, which is a real advance width.
+//! Uncovered characters use a covering backstop face, then the chain's
+//! terminal font's `.notdef`.
 //!
 //! # Measurement rules
 //!
@@ -58,9 +58,7 @@
 //!   line before the cut.
 //! - **`allCaps` uppercases before shaping**, `smallCaps` shapes lowercase
 //!   as small capitals, and `horizontalScale` multiplies glyph advances:
-//!   measurement reflects what a painter draws. `letterSpacing` is added
-//!   once per gap between shaped clusters within a word — never between
-//!   words, and not scaled by `horizontalScale`.
+//!   measurement reflects what a painter draws.
 //! - **Line height** follows `spacing.lineRule` (`exact` / `atLeast` /
 //!   `auto`) and `lineUnit` (`multiplier` / `px`), defaulting to single
 //!   spacing. An empty paragraph floors at 1.15 × the font size under the
@@ -128,7 +126,7 @@ mod list_marker;
 mod prepare;
 mod tabs;
 
-pub use font_slots::{FontSlotUse, font_slot_use};
+pub use font_slots::{FontSlotUse, font_slot_characters, font_slot_use};
 pub use input::{
     AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChainDependencies,
     FontChains, IndentIn, MeasureInput, MeasureRequest, PositionalTabIn, RotationBoundsIn,
@@ -137,6 +135,11 @@ pub use input::{
 pub use intrinsic::measure_intrinsic_widths;
 
 use crate::font_store::{FontId, FontStore};
+
+#[doc(hidden)]
+pub fn needs_glyph(ch: char) -> bool {
+    !ch.is_whitespace() && !ch.is_control() && !crate::shape::is_default_ignorable(ch)
+}
 
 /// Why measurement refused an input.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -322,6 +325,13 @@ pub fn measure_paragraph_typed(
     }
     input::validate_pt_size(request.defaults.font_size, "defaults.fontSize")?;
 
+    let space_shrink_limit = request.compat.space_shrink_limit.unwrap_or(0.25);
+    if !(space_shrink_limit.is_finite() && (0.0..=0.25).contains(&space_shrink_limit)) {
+        return Err(MeasureError::Unsupported(
+            "spaceShrinkLimit out of range".to_owned(),
+        ));
+    }
+
     let runs = &request.block.runs;
     if runs.len() > MAX_RUNS {
         return Err(MeasureError::Unsupported(format!(
@@ -436,6 +446,7 @@ pub fn measure_paragraph_typed(
         (body_width - insets.first_line_offset - insets.marker_inline_width).max(1.0);
 
     let mut extent = line_filler::fill(line_filler::FillParams {
+        space_shrink_limit,
         justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,

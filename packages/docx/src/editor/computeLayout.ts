@@ -106,9 +106,11 @@ export function buildResidentRegionLayoutRequest(
     },
     notes: { contents },
     renderEnv: {
+      fontTheme: document?.package.theme,
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),
+      ...chainFontSizeEnv(document, renderEnv),
       tocStyleIds: [...new Set([
         ...(renderEnv.tocStyleIds ?? []),
         ...(document?.package.styles?.styles ?? [])
@@ -118,6 +120,57 @@ export function buildResidentRegionLayoutRequest(
       ])],
     },
   };
+}
+
+function chainFontSizeEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'paragraphStyleFontSizes' | 'hyperlinkStyleFontSizes' | 'docDefaultFontSize' | 'docDefaultLanguage'> {
+  const styles = document?.package.styles;
+  if (!styles) return {};
+  const docDefault = styles.docDefaults?.rPr?.fontSize ?? 20;
+  const byId = new Map((styles.styles ?? []).map((style) => [style.styleId, style]));
+  const sizes: Record<string, number> = { ...(renderEnv.paragraphStyleFontSizes ?? {}) };
+  const hyperlinkSizes: Record<string, number> = { ...(renderEnv.hyperlinkStyleFontSizes ?? {}) };
+  for (const style of styles.styles ?? []) {
+    const hyperlink = style.type === 'character' && [style.styleId, style.name]
+      .some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''));
+    if (!style.styleId || (style.type !== 'paragraph' && !hyperlink)) continue;
+    const target = hyperlink ? hyperlinkSizes : sizes;
+    if (style.styleId in target) continue;
+    let size: number | undefined;
+    const seen = new Set<string>();
+    let current: typeof style | undefined = style;
+    while (current && !seen.has(current.styleId)) {
+      seen.add(current.styleId);
+      if (current.rPr?.fontSize != null) {
+        size = current.rPr.fontSize;
+        break;
+      }
+      current = current.basedOn ? byId.get(current.basedOn) : undefined;
+    }
+    const resolved = size ?? (hyperlink ? undefined : docDefault);
+    if (resolved !== undefined) target[style.styleId] = resolved / 2;
+  }
+  return {
+    ...(Object.keys(sizes).length > 0 ? { paragraphStyleFontSizes: sizes } : {}),
+    ...(Object.keys(hyperlinkSizes).length > 0 ? { hyperlinkStyleFontSizes: hyperlinkSizes } : {}),
+    ...(renderEnv.docDefaultFontSize == null
+      ? { docDefaultFontSize: docDefault / 2 }
+      : {}),
+    ...(renderEnv.docDefaultLanguage == null ? docDefaultLanguage(styles.docDefaults?.rPr?.language) : {}),
+  };
+}
+
+function docDefaultLanguage(
+  language: { latin?: string; eastAsia?: string; bidi?: string } | undefined
+): Pick<YrsRenderEnv, 'docDefaultLanguage'> {
+  const slots = Object.fromEntries(
+    (['latin', 'eastAsia', 'bidi'] as const)
+      .filter((slot) => typeof language?.[slot] === 'string' && language[slot] !== '')
+      .map((slot) => [slot, language![slot]])
+  );
+  return Object.keys(slots).length > 0 ? { docDefaultLanguage: slots } : {};
 }
 
 function defaultParagraphStyleEnv(

@@ -2709,6 +2709,32 @@ mod tests {
     }
 
     #[test]
+    fn tracked_inline_content_is_a_revision_risk() {
+        let mut paragraph: Paragraph = serde_json::from_value(serde_json::json!({
+            "type": "paragraph", "content": []
+        }))
+        .unwrap();
+        let tracked = docx_parse::paragraph::TrackedInline {
+            node_type: "insertion".to_owned(),
+            info: docx_parse::paragraph::TrackedChangeInfo {
+                id: 1.0,
+                author: "Author".to_owned(),
+                date: None,
+            },
+            content: Vec::new(),
+        };
+        paragraph
+            .content
+            .push(ParagraphContent::Inline(InlineNode::Tracked(Box::new(
+                tracked,
+            ))));
+        assert_eq!(
+            paragraph_projection_risks(&paragraph),
+            vec!["revision marks"]
+        );
+    }
+
+    #[test]
     fn paragraph_patch_refuses_a_positional_identity_mismatch() {
         let original = paragraph_package(
             r#"<w:p w14:paraId="11111111"><w:r><w:t>First</w:t></w:r></w:p><w:p w14:paraId="22222222"><w:r><w:t>Second</w:t></w:r></w:p>"#,

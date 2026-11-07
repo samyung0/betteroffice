@@ -123,6 +123,8 @@ test('builds older and current Rust APIs with the same native host', () => {
   expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str) {}')).toEqual(['substitute-metrics']);
   expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str, bold: bool, italic: bool) {}'))
     .toEqual(['substitute-styles']);
+  expect(nativeFeatures('pub fn register_substitute_measure_font(id: u32, name: &str) { store.register_named_substitute(id, name) }'))
+    .toEqual(['substitute-widths']);
 });
 
 test('native builds use the patched yrs of a source checkout that has one', () => {

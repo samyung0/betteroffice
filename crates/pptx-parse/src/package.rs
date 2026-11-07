@@ -219,6 +219,7 @@ fn parse_package(
             shape_elements,
         )?;
         masters.push(SlideMaster {
+            header_footer: header_footer(&root),
             part_path: part_path.clone(),
             name: data.name,
             theme_part_path: relationship_by_type(master_relationships, relationship_types::THEME),
@@ -260,6 +261,7 @@ fn parse_package(
             shape_elements,
         )?;
         layouts.push(SlideLayout {
+            header_footer: header_footer(&root),
             part_path: part_path.clone(),
             name: root
                 .attribute("matchingName")
@@ -1220,6 +1222,16 @@ fn positive_integer_attribute(element: Option<&XmlElement>, name: &str) -> Optio
     (value > 0 && value <= 1_000_000_000_000_000).then_some(value)
 }
 
+fn header_footer(element: &XmlElement) -> Option<HeaderFooterSettings> {
+    let settings = element.child("hf")?;
+    Some(HeaderFooterSettings {
+        slide_number: bool_attribute(settings, "sldNum", true),
+        footer: bool_attribute(settings, "ftr", true),
+        date: bool_attribute(settings, "dt", true),
+        header: bool_attribute(settings, "hdr", true),
+    })
+}
+
 fn bool_attribute(element: &XmlElement, name: &str, default: bool) -> bool {
     match element.attribute(name) {
         Some("1" | "true" | "on") => true,
@@ -1683,7 +1695,9 @@ mod tests {
                 base: ShapeBase {
                     id,
                     name: format!("Chart {id}"),
+                    title: None,
                     description: None,
+                    decorative: false,
                     hidden: false,
                     placeholder: None,
                     transform: ShapeTransform::default(),
@@ -1728,6 +1742,7 @@ mod tests {
         ];
         let layouts = vec![
             SlideLayout {
+                header_footer: None,
                 part_path: "ppt/slideLayouts/layout1.xml".to_owned(),
                 name: None,
                 layout_type: None,
@@ -1740,6 +1755,7 @@ mod tests {
                 color_map_override: None,
             },
             SlideLayout {
+                header_footer: None,
                 part_path: "ppt/slideLayouts/layout2.xml".to_owned(),
                 name: None,
                 layout_type: None,
@@ -1754,6 +1770,7 @@ mod tests {
         ];
         let masters = vec![
             SlideMaster {
+                header_footer: None,
                 part_path: "ppt/slideMasters/master1.xml".to_owned(),
                 name: None,
                 theme_part_path: Some("ppt/theme/theme1.xml".to_owned()),
@@ -1766,6 +1783,7 @@ mod tests {
                 color_map: ColorMap::default(),
             },
             SlideMaster {
+                header_footer: None,
                 part_path: "ppt/slideMasters/master2.xml".to_owned(),
                 name: None,
                 theme_part_path: Some("ppt/theme/theme2.xml".to_owned()),

@@ -39,7 +39,14 @@ impl NodeKey {
 /// edit; cells calling them re-evaluate on every recalc. OFFSET joins them per
 /// call site, but only where its target is not statically resolvable; INDIRECT
 /// always does, since its target is a string the graph cannot read.
-const VOLATILE_FNS: [&str; 5] = ["TODAY", "NOW", "RAND", "RANDBETWEEN", "INDIRECT"];
+const VOLATILE_FNS: [&str; 6] = [
+    "TODAY",
+    "NOW",
+    "RAND",
+    "RANDBETWEEN",
+    "RANDARRAY",
+    "INDIRECT",
+];
 
 pub struct DepGraph {
     pub(crate) currency_coercion: std::sync::Mutex<Option<crate::coercion::CurrencyCoercion>>,
@@ -241,10 +248,13 @@ enum SheetBinding {
 
 /// a defined name's formula without the `=` some producers store.
 fn definition_source(defined: &DefinedName) -> &str {
-    defined
-        .formula
-        .strip_prefix('=')
-        .unwrap_or(&defined.formula)
+    formula_source(&defined.formula)
+}
+
+/// stored formula text without the `=` some producers keep, which Excel
+/// leaves out of the file; the stored text itself stays as it was read.
+pub(crate) fn formula_source(formula: &str) -> &str {
+    formula.strip_prefix('=').unwrap_or(formula)
 }
 
 impl DepGraph {
@@ -364,7 +374,7 @@ impl DepGraph {
             .sheets
             .iter()
             .flat_map(|sheet| sheet.iter_cells())
-            .filter_map(|(_, cell)| cell.formula.as_deref())
+            .filter_map(|(_, cell)| cell.formula.as_deref().map(formula_source))
             .chain(wb.defined_names.iter().map(definition_source))
             .collect();
         self.asts
@@ -569,7 +579,7 @@ impl DepGraph {
 
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Some(expr) = parse_cached(&self.asts, src) else {
+        let Some(expr) = parse_cached(&self.asts, formula_source(src)) else {
             return;
         };
         let edges = self.resolve_edges(key, &expr);
@@ -841,7 +851,7 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
     while let Some(expression) = expressions.pop() {
         match expression {
             Expr::FuncCall { name, args, .. } => {
-                let upper = name.to_ascii_uppercase();
+                let upper = crate::functions::bare_name(name).to_ascii_uppercase();
                 if VOLATILE_FNS.contains(&upper.as_str())
                     || (upper == "OFFSET" && offset_target(args).is_none())
                 {

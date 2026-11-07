@@ -232,6 +232,8 @@
     "loadingDiff": "Loading changes…"
   },
   "presence": {
-    "label": "Collaborators"
+    "label": "Collaborators",
+    "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}",
+    "moreSelections": "+{count, plural, one {# selection} other {# selections}}"
   }
 }
