@@ -3699,7 +3699,7 @@ describe('XlsxEditor formula entry', () => {
     }
   };
 
-  // S5: these three need the xlsx-wasm with lockedInRangesJson and sheetInfo's
+  // S5: these four need the xlsx-wasm with lockedInRangesJson and sheetInfo's
   // `protected` (XLSX track, Q701); on capy-ci's wasm the clear, paste and cut
   // go through.
   it('refuses a clear over a locked cell of a protected sheet whole (Q701)', async () => {
@@ -3731,6 +3731,28 @@ describe('XlsxEditor formula entry', () => {
     });
     expect([refusal(view), written]).toEqual(['This cell is on a protected sheet.', []]);
     expect(await view.input(0, 0)).toBe('1');
+  });
+
+  // the engine takes a whole column as full A1 (`B1:B1048576`, not `B:B`), as clearContents does.
+  it('refuses a Delete of a whole column on a protected sheet, asking for the column in full A1 (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    const proxy = view.workbook();
+    const forward = proxy.onSheet.bind(proxy);
+    const spy = spyOn(proxy, 'onSheet').mockImplementation(((sheetId, method, ...args) =>
+      forward(sheetId, method, ...args)) as WorkbookProxy['onSheet']);
+    try {
+      // column B from its last row up to B1: B1 is unlocked, the column's empty cells are not.
+      fireEvent.change(view.nameBox(), { target: { value: 'B1048576' } });
+      await press(view.nameBox(), 'Enter');
+      await press(view.surface, 'ArrowUp', { ctrlKey: true, shiftKey: true });
+      await press(view.surface, 'Delete');
+      const asked = spy.mock.calls.filter(([, method]) => method === 'lockedInRanges').map((call) => call[3]);
+      expect(asked).toEqual([['B1:B1048576']]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(refusal(view)).toBe('This cell is on a protected sheet.');
+    expect(await view.input(0, 1)).toBe('2');
   });
 
   it('clears and pastes into an unlocked cell of a protected sheet (Q701)', async () => {
