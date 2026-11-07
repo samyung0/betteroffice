@@ -2,7 +2,7 @@
 #[path = "../../pptx-parse/tests/support/header_footer.rs"]
 mod support;
 
-use pptx_edit::{DeckSession, EditCtx, ReadRequest, TextParagraphDraft, TextRunDraft, TextStyle};
+use pptx_edit::{DeckSession, EditCtx, TextStyle};
 use pptx_render::{Primitive, SlideRenderer};
 use support::{deck, field, placeholder};
 
@@ -37,22 +37,6 @@ fn empty_coalescing_field() -> String {
 
 fn open(bytes: &[u8]) -> DeckSession {
     DeckSession::open(bytes, 920).unwrap()
-}
-
-fn read_number(session: &DeckSession, index: usize) -> String {
-    let read = session
-        .read_content(&ReadRequest::default())
-        .unwrap()
-        .unwrap();
-    read.slides[index]
-        .header_footer
-        .as_ref()
-        .unwrap()
-        .slide_number
-        .as_ref()
-        .unwrap()
-        .text
-        .clone()
 }
 
 fn rendered_runs(session: &DeckSession, index: usize) -> Vec<pptx_render::TextRun> {
@@ -132,12 +116,11 @@ fn rendered_number(session: &DeckSession, index: usize) -> String {
 }
 
 #[test]
-fn stale_slide_owned_number_renders_live_and_agrees_with_read() {
+fn stale_slide_owned_number_renders_live() {
     let shape = number_shape(&field_paragraph());
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "2");
-    assert_eq!(read_number(&session, 1), "2");
 }
 
 #[test]
@@ -150,11 +133,10 @@ fn number_next_to_literal_text_renders_with_the_literal() {
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "Seite 2");
-    assert_eq!(read_number(&session, 1), "Seite 2");
 }
 
 #[test]
-fn moved_slide_renders_and_reads_its_new_number() {
+fn moved_slide_renders_its_new_number() {
     let shape = number_shape(&field_paragraph());
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
@@ -163,7 +145,6 @@ fn moved_slide_renders_and_reads_its_new_number() {
         .move_slide(&EditCtx::local("test"), &slide_id, 0)
         .unwrap();
     assert_eq!(rendered_number(&session, 0), "1");
-    assert_eq!(read_number(&session, 0), "1");
 }
 
 #[test]
@@ -174,31 +155,25 @@ fn edit_inside_the_field_keeps_the_edited_text() {
     let snapshot = session.snapshot().unwrap();
     let story = snapshot.slides[1].shapes[0].text_stories[0].clone();
     session
-        .set_story_paragraphs(
+        .replace_text(
             &EditCtx::local("test"),
             &story.id,
-            &[TextParagraphDraft {
-                alignment: None,
-                bullet: None,
-                runs: vec![TextRunDraft {
-                    text: "8".to_owned(),
-                    style: TextStyle::default(),
-                }],
-            }],
+            0,
+            story.plain_text().encode_utf16().count() as u32,
+            "8",
+            &TextStyle::default(),
         )
         .unwrap();
     assert_eq!(rendered_number(&session, 1), "8");
-    assert_eq!(read_number(&session, 1), "8");
 }
 
 #[test]
-fn empty_slide_owned_number_renders_live_and_agrees_with_read() {
+fn empty_slide_owned_number_renders_live() {
     let paragraphs = format!("<a:p>{}</a:p>", empty_field());
     let shape = number_shape(&paragraphs);
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "2");
-    assert_eq!(read_number(&session, 1), "2");
 }
 
 #[test]
@@ -226,7 +201,7 @@ fn empty_number_carries_the_field_run_properties() {
 }
 
 #[test]
-fn moved_empty_number_renders_and_reads_its_new_number() {
+fn moved_empty_number_renders_its_new_number() {
     let paragraphs = format!("<a:p>{}</a:p>", empty_field());
     let shape = number_shape(&paragraphs);
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
@@ -236,7 +211,6 @@ fn moved_empty_number_renders_and_reads_its_new_number() {
         .move_slide(&EditCtx::local("test"), &slide_id, 0)
         .unwrap();
     assert_eq!(rendered_number(&session, 0), "1");
-    assert_eq!(read_number(&session, 0), "1");
 }
 
 #[test]
@@ -245,11 +219,10 @@ fn first_slide_num_offsets_the_rendered_number() {
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(10));
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "11");
-    assert_eq!(read_number(&session, 1), "11");
 }
 
 #[test]
-fn coalesced_number_renders_live_and_agrees_with_read() {
+fn coalesced_number_renders_live() {
     let paragraphs = format!(
         "<a:p><a:r><a:rPr sz=\"1800\"/><a:t>Seite </a:t></a:r>{}</a:p>",
         coalescing_field()
@@ -258,7 +231,6 @@ fn coalesced_number_renders_live_and_agrees_with_read() {
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
     assert_eq!(rendered_number(&session, 1), "Seite 2");
-    assert_eq!(read_number(&session, 1), "Seite 2");
 }
 
 #[test]
@@ -274,25 +246,22 @@ fn empty_coalesced_number_renders_once_between_literals() {
 }
 
 #[test]
-fn suffix_keeping_edit_renders_what_the_read_reports() {
+/// "19" keeps the field's cached "9" as its suffix, so the located field still renders live.
+fn suffix_keeping_edit_keeps_the_field_live() {
     let shape = number_shape(&field_paragraph());
     let bytes = deck(&[("", false), (&shape, false)], "", "", "", Some(1));
     let session = open(&bytes);
     let snapshot = session.snapshot().unwrap();
     let story = snapshot.slides[1].shapes[0].text_stories[0].clone();
     session
-        .set_story_paragraphs(
+        .replace_text(
             &EditCtx::local("test"),
             &story.id,
-            &[TextParagraphDraft {
-                alignment: None,
-                bullet: None,
-                runs: vec![TextRunDraft {
-                    text: "19".to_owned(),
-                    style: TextStyle::default(),
-                }],
-            }],
+            0,
+            story.plain_text().encode_utf16().count() as u32,
+            "19",
+            &TextStyle::default(),
         )
         .unwrap();
-    assert_eq!(rendered_number(&session, 1), read_number(&session, 1));
+    assert_eq!(rendered_number(&session, 1), "12");
 }

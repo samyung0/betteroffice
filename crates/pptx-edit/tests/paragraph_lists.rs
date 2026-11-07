@@ -85,7 +85,9 @@ fn saved_body(bytes: &[u8], name: &str) -> TextBody {
         .unwrap()
 }
 
-/// The `p:sp` XML of the first shape called `name` in slide part `part`.
+/// The `p:sp` XML of the first shape called `name` in slide part `part`. Saves splice edits
+/// into the source markup (upstream #1860), so an edited element keeps the source's attribute
+/// order and spacing (`<a:pPr lvl="1" />`).
 fn shape_xml(bytes: &[u8], part: &str, name: &str) -> String {
     let parts = ooxml_opc::unzip_parts(bytes).unwrap();
     let xml = parts
@@ -265,7 +267,7 @@ fn indenting_a_plain_paragraph_without_a_margin_changes_only_its_level() {
     let saved = session.save().unwrap();
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
-        xml.contains(r#"<a:pPr lvl="1"/><a:r><a:rPr/><a:t>First level"#),
+        xml.contains(r#"<a:pPr lvl="1" /><a:r><a:rPr /><a:t>First level"#),
         "{xml}"
     );
 }
@@ -285,7 +287,7 @@ fn removing_an_inherited_bullet_writes_bu_none_without_a_hanging_indent() {
     assert_eq!(first.indent, Some(0));
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
-        xml.contains(r#"<a:pPr indent="0" marL="0"><a:buNone/></a:pPr>"#),
+        xml.contains(r#"<a:pPr indent="0" marL="0" ><a:buNone/></a:pPr>"#),
         "{xml}"
     );
     // The other paragraphs keep their exact markup.
@@ -521,7 +523,7 @@ fn a_plain_paragraph_listed_with_items_takes_their_indents() {
     );
     let xml = shape_xml(&saved, "ppt/slides/slide2.xml", LECTURE_BODY);
     assert_eq!(
-        xml.matches(r#"<a:pPr algn="l" indent="-317500" marL="457200" rtl="0">"#)
+        xml.matches(r#"<a:pPr marL="457200" indent="-317500" algn="l" rtl="0">"#)
             .count(),
         3,
         "{xml}"
@@ -593,7 +595,7 @@ fn a_paragraph_listed_with_an_inherited_indent_item_inherits_too() {
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
         xml.contains(
-            r#"<a:pPr><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#
+            r#"<a:pPr ><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr /><a:t>First level"#
         ),
         "{xml}"
     );
@@ -649,7 +651,7 @@ fn powerpoints_plain_paragraph_takes_an_inherited_items_laid_out_indents() {
     let xml = shape_xml(&saved, "ppt/slides/slide1.xml", "Inherited bullets");
     assert!(
         xml.contains(
-            r#"<a:pPr indent="-228600" marL="228600"><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr/><a:t>First level"#
+            r#"<a:pPr marL="228600" indent="-228600"><a:buFont typeface="Arial"/><a:buChar char="●"/></a:pPr><a:r><a:rPr /><a:t>First level"#
         ),
         "{xml}"
     );
