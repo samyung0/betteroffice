@@ -195,6 +195,15 @@ export interface ListRendering {
   markerHidden?: boolean;
   /** Marker font family from numbering level rPr (ascii name) */
   markerFontFamily?: string;
+  /**
+   * The level's Latin font slots when one names a theme font: the seed keeps
+   * them (`listMarkerFonts`) so the layout applies the theme font over the
+   * authored name, as Word does (#1921).
+   */
+  markerFontSlots?: Pick<
+    NonNullable<TextFormatting['fontFamily']>,
+    'ascii' | 'hAnsi' | 'asciiTheme' | 'hAnsiTheme'
+  >;
   /** Marker font size from numbering level rPr, in points */
   markerFontSize?: number;
   /** Marker bold from numbering level rPr, explicit false preserves Word normal */

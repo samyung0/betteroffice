@@ -9,9 +9,11 @@ import { unzipContainer } from '../docx/wasm';
 import type { LayoutBlock, Run as LayoutRun, ShapeBlock } from '../layout/pagination/types';
 import type { DisplayList, GlyphRunPrimitive } from '../layout/render/displayList';
 import type { Document } from '../types/document';
+import { createStyleResolver } from '../styles';
 import { preloadEditWasm } from '../wasm/edit';
-import { documentToYrs } from './documentToYrs';
+import { documentToYrs, styleParagraphValues } from './documentToYrs';
 import { createYrsSession, type YrsSession } from './index';
+import { applyStyleValues, type ParagraphStyleValues } from './paragraphSeed';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -49,6 +51,20 @@ function mixedSlotsPackage(fonts: string): Uint8Array<ArrayBuffer> {
   parts.set('word/_rels/document.xml.rels', toBytes(rels.replace('</Relationships>', `<Relationship Id="numbering" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`)));
   parts.set('word/numbering.xml', toBytes(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>${fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`));
   parts.set('word/theme/theme1.xml', toBytes('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>'));
+  return new Uint8Array(rezipPartsToArrayBuffer(parts));
+}
+
+// mixedSlotsPackage's numbering and theme, the list given by the style
+// `ThemedList` to a body paragraph that has none.
+function styledListPackage(fonts: string): Uint8Array<ArrayBuffer> {
+  const parts = new Map(Object.entries(unzipContainer(mixedSlotsPackage(fonts))));
+  parts.set('word/document.xml', toBytes(`<w:document xmlns:w="${W}"><w:body><w:p><w:r><w:t>Title</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`));
+  parts.set('word/styles.xml', toBytes(`<w:styles xmlns:w="${W}"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>` +
+    '<w:style w:type="paragraph" w:styleId="ThemedList"><w:name w:val="Themed List"/><w:basedOn w:val="Normal"/><w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr></w:style></w:styles>'));
+  const types = new TextDecoder().decode(parts.get('[Content_Types].xml'));
+  parts.set('[Content_Types].xml', toBytes(types.replace('</Types>', '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>')));
+  const rels = new TextDecoder().decode(parts.get('word/_rels/document.xml.rels'));
+  parts.set('word/_rels/document.xml.rels', toBytes(rels.replace('</Relationships>', `<Relationship Id="styles" Type="${R}/styles" Target="styles.xml"/></Relationships>`)));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
 }
 
@@ -245,3 +261,28 @@ for (const path of ['native', 'typescript'] as const) {
     }
   }
 }
+
+// S5: the layout half needs the docx-edit wasm whose restyle takes
+// `listMarkerFonts` with a style's numbering and whose bridge applies it
+// (DOCX track, #1921); capy-ci's ignores it and shows the authored name.
+test("a restyle that brings numbering from a style shows its level's theme marker font (#1921)", async () => {
+  const bytes = styledListPackage('<w:rFonts w:ascii="Times New Roman" w:asciiTheme="minorHAnsi" w:hAnsi="Arial"/>');
+  const document = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const styles = createStyleResolver(document.package.styles);
+  const values: ParagraphStyleValues = (styleId) =>
+    styleParagraphValues(styles, styleId, { numbering: document.package.numbering });
+  expect(values('ThemedList', 'body')).toMatchObject({
+    listMarkerFontFamily: 'Times New Roman',
+    listMarkerFonts: { ascii: 'Times New Roman', asciiTheme: 'minorHAnsi', hAnsi: 'Arial' },
+  });
+  const session = await createYrsSession();
+  try {
+    session.seedFromDocx(bytes);
+    const { paraId } = session.paragraphs('body')[0]!;
+    applyStyleValues(session, { story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 0 } }, 'ThemedList', values);
+    const blocks = session.yrsBlocksForStory('body', buildResidentRegionLayoutRequest(document, 24, {}).renderEnv) as LayoutBlock[];
+    expect(blocks[0]).toMatchObject({ attrs: { listMarker: '1.', listMarkerFontFamily: 'Calibri' } });
+  } finally {
+    session.destroy();
+  }
+});

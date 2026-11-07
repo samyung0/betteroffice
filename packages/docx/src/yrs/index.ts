@@ -237,6 +237,8 @@ export interface YrsParagraphAttrs {
   listMarker?: string | null;
   listMarkerHidden?: boolean | null;
   listMarkerFontFamily?: string | null;
+  /** The level's theme and authored Latin font slots (`ListRendering.markerFontSlots`, #1921). */
+  listMarkerFonts?: import('../types/lists').ListRendering['markerFontSlots'] | null;
   listMarkerFontSize?: number | null;
   listMarkerBold?: boolean | null;
   listMarkerItalic?: boolean | null;

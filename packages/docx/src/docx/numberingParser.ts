@@ -156,6 +156,20 @@ export function createNumberingMap(definitions: NumberingDefinitions): Numbering
   };
 }
 
+/** A level's Latin font slots when one names a theme font, as docx-parse gives them (#1921). */
+function markerFontSlots(
+  fonts: NonNullable<ListLevel['rPr']>['fontFamily']
+): ListRendering['markerFontSlots'] {
+  if (fonts?.asciiTheme === undefined && fonts?.hAnsiTheme === undefined) return undefined;
+  const { ascii, hAnsi, asciiTheme, hAnsiTheme } = fonts;
+  return {
+    ...(ascii !== undefined && { ascii }),
+    ...(hAnsi !== undefined && { hAnsi }),
+    ...(asciiTheme !== undefined && { asciiTheme }),
+    ...(hAnsiTheme !== undefined && { hAnsiTheme }),
+  };
+}
+
 /**
  * Resolve a paragraph's `numPr` against the numbering definitions into the
  * `ListRendering` the layout pipeline needs (marker template, per-level
@@ -195,6 +209,7 @@ export function computeListRendering(
     numFmt: level.numFmt,
     markerHidden: level.rPr?.hidden || undefined,
     markerFontFamily: level.rPr?.fontFamily?.ascii || level.rPr?.fontFamily?.hAnsi || undefined,
+    markerFontSlots: markerFontSlots(level.rPr?.fontFamily),
     // w:sz is in half-points; convert to points for downstream use
     markerFontSize: level.rPr?.fontSize ? level.rPr.fontSize / 2 : undefined,
     markerBold: level.rPr?.bold,

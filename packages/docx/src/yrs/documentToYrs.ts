@@ -1222,6 +1222,7 @@ function paragraphAttrs(
     listMarker: paragraph.listRendering?.marker ?? null,
     listMarkerHidden: paragraph.listRendering?.markerHidden || null,
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || null,
+    listMarkerFonts: paragraph.listRendering?.markerFontSlots ?? null,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || null,
     listMarkerBold: paragraph.listRendering?.markerBold ?? null,
     listMarkerItalic: paragraph.listRendering?.markerItalic ?? null,

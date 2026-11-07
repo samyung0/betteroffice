@@ -230,6 +230,7 @@ const LIST_ATTRS = [
   'listMarker',
   'listMarkerHidden',
   'listMarkerFontFamily',
+  'listMarkerFonts',
   'listMarkerFontSize',
   'listMarkerBold',
   'listMarkerItalic',
