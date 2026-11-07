@@ -94,6 +94,11 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlideProfiled(slideIndex: number): ProfiledLayout;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  /**
+   * An EMF or WMF picture replayed as SVG bytes, or undefined when the engine
+   * cannot replay it (or carries no metafile replay).
+   */
+  metafileSvg(partPath: string): Uint8Array | undefined;
   /** serialize the presentation back to .pptx bytes, edits included. */
   save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
@@ -504,6 +509,10 @@ export function openPresentation(
     },
     mediaBytes(partPath: string): Uint8Array {
       return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    metafileSvg(partPath: string): Uint8Array | undefined {
+      const replay = (doc as { metafileSvg?: (path: string) => Uint8Array | undefined }).metafileSvg;
+      return replay ? wasmCall(() => replay.call(doc, partPath)) : undefined;
     },
     save(): Uint8Array {
       // Through the renderer, so edited normal-autofit text saves the scale it

@@ -1,6 +1,7 @@
 import {
   initWasm,
   installEmbeddedFonts,
+  metafileImageBytes,
   openPresentation,
   paintSlide,
   presentationImageBlob,
@@ -336,6 +337,14 @@ const PPTX_MIME =
   'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 
 // the png download name derived from the deck name: swap .pptx for the slide.
+// A picture's bytes for display: EMF and WMF pictures the browser cannot draw
+// go through the engine's SVG replay (upstream #1820); a refused replay paints
+// nothing, as the undecodable original would.
+function displayBytes(handle: PresentationHandle, assetId: string): Uint8Array | undefined {
+  const bytes = metafileImageBytes(handle.mediaBytes(assetId), () => handle.metafileSvg(assetId));
+  return bytes.byteLength ? bytes : undefined;
+}
+
 function pngName(fileName: string | undefined, slideIndex: number): string {
   const stem = (fileName ?? 'presentation.pptx').replace(/\.pptx$/i, '');
   return `${stem}-slide-${slideIndex + 1}.png`;
@@ -596,7 +605,10 @@ function PptxEditorContent({
   );
   const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
   const resolveDeckImage = useMemo(() => imageCacheRef.current.resolver(
-    (assetId) => handleRef.current?.mediaBytes(assetId), decodeImageError), [decodeImageError]);
+    (assetId) => {
+      const handle = handleRef.current;
+      return handle ? displayBytes(handle, assetId) : undefined;
+    }, decodeImageError), [decodeImageError]);
 
   useEffect(() => {
     if (!canvasReview.reviewing) return;
@@ -2727,7 +2739,7 @@ function PptxEditorContent({
     const images = imageCache();
     void slideToPng(frame, {
       scale: window.devicePixelRatio || 1,
-      resolveImage: images.resolver((assetId) => handle.mediaBytes(assetId), decodeImageError),
+      resolveImage: images.resolver((assetId) => displayBytes(handle, assetId), decodeImageError),
     })
       .then(async (blob) => {
         const bytes = new Uint8Array(await blob.arrayBuffer());

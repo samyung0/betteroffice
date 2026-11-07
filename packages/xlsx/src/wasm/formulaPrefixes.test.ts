@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 
-import { exportXlsxStructured, initWasm, openWorkbook } from '../index';
-import type { WorkbookHandle, XlsxEditStep, XlsxStructuredContent } from '../index';
+import { initWasm, openWorkbook } from '../index';
+import type { WorkbookHandle } from '../index';
 
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
@@ -51,24 +51,13 @@ async function formulaTexts(saved: Uint8Array): Promise<string[]> {
   return [...sheet.matchAll(/<f(?: [^>]*)?>([^<]*)<\/f>/g)].map((match) => unescapeXml(match[1]));
 }
 
-function exported(content: XlsxStructuredContent, a1: string): string | null | undefined {
-  return content.sheets[0].cells.find((cell) => cell.anchor.kind === 'cell' && cell.anchor.a1 === a1)?.formula;
-}
-
-async function expectShown(handle: WorkbookHandle, saved: Uint8Array): Promise<void> {
-  const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:D3' } }] });
-  if (!read.ok) throw new Error(read.failure.message);
-  const live = handle.exportStructured();
-  if (!live.ok) throw new Error(live.failure.message);
-  const snapshot = await exportXlsxStructured(saved);
+// Capy's handle shows formulas through cell() and rangeCells(); upstream's
+// readCells/exportStructured agent reads stay deleted (2026-10-17).
+function expectShown(handle: WorkbookHandle): void {
   for (const cell of CELLS) {
     expect(handle.cell(0, cell.row, cell.col).input).toBe(`=${cell.shown}`);
     expect(handle.rangeCells(0, cell.a1)[0][0].input).toBe(`=${cell.shown}`);
-    expect(read.ranges[0].cells[cell.row][cell.col].formula).toBe(cell.shown);
-    expect(exported(live.content, cell.a1)).toBe(cell.shown);
-    expect(exported(snapshot, cell.a1)).toBe(cell.shown);
   }
-  expect(handle.listDefinedNames().items[0].refersTo).toBe('SEQUENCE(3)');
 }
 
 describe('formula text without storage prefixes', () => {
@@ -78,34 +67,12 @@ describe('formula text without storage prefixes', () => {
     const source = await excelSaved();
     const handle = openWorkbook(source);
     try {
-      await expectShown(handle, source);
+      expectShown(handle);
       expect(handle.save()).toEqual(source);
       handle.editCells(0, CELLS.map((cell) => ({ row: cell.row, col: cell.col, input: handle.cell(0, cell.row, cell.col).input })));
       expect(handle.save()).toEqual(source);
       handle.editCells(0, [{ row: 4, col: 0, input: '5' }]);
       expect(await formulaTexts(handle.save())).toEqual(CELLS.map((cell) => cell.stored));
-    } finally {
-      handle.dispose();
-    }
-  });
-
-  it('writes read formulas back through setFormulas without a change', async () => {
-    const source = await excelSaved();
-    const handle = openWorkbook(source);
-    try {
-      const version = handle.version();
-      const read = handle.readCells({ ranges: [{ sheetId: 'sheet:0', range: { kind: 'a1', a1: 'A1:D3' } }] });
-      if (!read.ok) throw new Error(read.failure.message);
-      const steps = CELLS.map((cell): XlsxEditStep => ({
-        op: 'setFormulas',
-        target: { sheetId: 'sheet:0', range: { kind: 'a1', a1: cell.a1 } },
-        formulas: [[read.ranges[0].cells[cell.row][cell.col].formula ?? '']],
-      }));
-      expect(steps[0]).toMatchObject({ formulas: [['SEQUENCE(2,2)']] });
-      const applied = handle.applyEdits({ expectVersion: version, steps });
-      if (!applied.ok) throw new Error(applied.failure.message);
-      expect(handle.version()).toBe(version);
-      expect(handle.save()).toEqual(source);
     } finally {
       handle.dispose();
     }
@@ -124,7 +91,7 @@ describe('formula text without storage prefixes', () => {
     expect(await formulaTexts(saved)).toEqual(CELLS.map((cell) => cell.stored));
     const reopened = openWorkbook(saved);
     try {
-      await expectShown(reopened, saved);
+      expectShown(reopened);
     } finally {
       reopened.dispose();
     }
