@@ -1428,6 +1428,7 @@ fn nth_match_final_anchor_index_invalidates_on_spill_write() {
         },
         &budget,
         &mut Vec::new(),
+        &mut RecalcJournal::default(),
     )
     .unwrap();
     assert!(!budget.criteria_index_covers(SheetId(0), at));

@@ -975,6 +975,7 @@ pub fn register_measure_font_module(bytes: &[u8]) -> Result<u32, String> {
 /// Malformed bytes (attacker-controlled embedded fonts) are rejected as an
 /// error at this boundary, mirroring `FontStore::register`. Bytes identical to
 /// an earlier registration answer its id.
+#[cfg(target_arch = "wasm32")]
 #[cfg_attr(not(feature = "wasm-query"), wasm_bindgen)]
 pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     register_measure_font_module(bytes).map_err(js_error)

@@ -708,6 +708,7 @@ impl SlideRenderer {
             deck.height_emu,
             slide_index,
             None,
+            None,
         )
     }
 
@@ -1005,6 +1006,7 @@ impl SlideRenderer {
                         snapshot.width_emu,
                         snapshot.height_emu,
                         index,
+                        None,
                         Some(&shape_ids),
                     )
                     .map_err(|error| pptx_edit::EditError::Write(error.to_string()))?;
@@ -6903,7 +6905,6 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
             .underline
             .clone()
             .or_else(|| linked.then(|| "sng".to_owned())),
-        strike: properties.strike.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         kern_pt: properties.kern_pt,

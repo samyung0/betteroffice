@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_FRAME_BYTES, OPEN_SYNC_CLIENT } from './validation';
+import { DEFAULT_MAX_FRAME_BYTES } from './validation';
 import type { AwarenessPayload, AwarenessUpdate } from './types';
 import {
   MAX_AWARENESS_NAME_LENGTH,
