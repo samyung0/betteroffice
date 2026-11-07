@@ -189,7 +189,6 @@ describe('CI runner routing', () => {
       'ci.yml package-tests': ['kyora-8x8'],
       'ci.yml rust': ['kyora-8x16'],
       'ci.yml native-viewer': ['kyora-8x16'],
-      'ci.yml python': ['kyora-4x8'],
       'ci.yml route': ['ubuntu-latest'],
       'e2e.yml route': ['ubuntu-latest'],
       'e2e.yml corpus': ['kyora-8x8'],

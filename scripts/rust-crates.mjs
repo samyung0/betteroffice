@@ -4,7 +4,7 @@ import { FONT_PACK_CRATES } from './rust-font-packs.mjs';
 
 export const RUST_RELEASE_MANIFEST = 'crates/package.json';
 export const WORKSPACE_MANIFEST = 'Cargo.toml';
-export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
+export const STANDALONE_WORKSPACES = ['fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
   { name: 'betteroffice-wasm-alloc', dependency: 'wasm-alloc' },

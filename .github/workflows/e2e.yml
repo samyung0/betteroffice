@@ -100,17 +100,6 @@ jobs:
           bun run typecheck:e2e
           bun run test:e2e:harness
 
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
-        with:
-          version: '0.11.8'
-
-      - name: Build the Python bindings
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/bindings/target
-        run: |
-          uv tool install maturin==1.14.1
-          bun e2e/python-env.ts
-
       - name: Restore the pinned corpus documents
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
