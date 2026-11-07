@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import type { Theme } from '../types/drawingml';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
@@ -463,8 +464,20 @@ export interface YrsRenderEnv {
   /** Section document-grid snap pitch in px (w:docGrid). The engine derives this from sections; hosts may omit it. */
   docGridPitchPx?: number;
   defaultParagraphStyleId?: string;
+  /** Resolved paragraph style chain font size in pt, keyed by style id. */
+  paragraphStyleFontSizes?: Record<string, number>;
+  /** Resolved Hyperlink character style chain font size in pt, keyed by style id. */
+  hyperlinkStyleFontSizes?: Record<string, number>;
+  /** The docDefaults font size in pt. */
+  docDefaultFontSize?: number;
+  /** The docDefaults run language, which runs that name none inherit. */
+  docDefaultLanguage?: { latin?: string; eastAsia?: string; bidi?: string };
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
+  /** The document's theme fonts, for theme-font resolution. */
+  fontTheme?: Theme;
+  /** The first sized picture bullet in numbering, in points: a list paragraph's leading box (#1936). */
+  firstPictureBullet?: { width: number; height: number };
   /** The document default tab stop in twips. */
   defaultTabStopTwips?: number | null;
   /** Current page content height in CSS px, for proportional drawing constraints. */

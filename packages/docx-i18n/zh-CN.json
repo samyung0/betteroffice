@@ -55,8 +55,8 @@
     },
     "watermark": "水印",
     "break": "分隔符",
-    "sectionBreakContinuous": "分节符（连续）",
-    "sectionBreakNextPage": "分节符（下一页）"
+    "sectionBreakContinuous": "分节符(连续)",
+    "sectionBreakNextPage": "分节符(下一页)"
   },
   "layout": {
     "margins": "页边距",
@@ -102,9 +102,7 @@
     "subscriptShortcut": "下标(Ctrl+=)",
     "imageProperties": "图片属性",
     "imagePropertiesShortcut": "图片属性(替代文本、边框)...",
-    "clearFormatting": "清除格式",
-    "commentsAndChanges": null,
-    "moreItems": null
+    "clearFormatting": "清除格式"
   },
   "alignment": {
     "left": "左对齐",
@@ -954,28 +952,13 @@
   "loading": {
     "label": "正在加载"
   },
-  "agentPanel": {
-    "defaultTitle": "助手",
-    "toggle": "打开助手",
-    "close": "关闭面板",
-    "resizeHandle": "调整助手面板大小",
-    "thinking": "助手正在思考",
-    "composerPlaceholder": "向助手提问…",
-    "send": "发送",
-    "timeline": {
-      "working": "处理中… {count, plural, one {# 步} other {# 步}}",
-      "summary": "{count, plural, one {# 步} other {# 步}}",
-      "earlier": "+ {count, plural, one {# 个历史步骤} other {# 个历史步骤}}"
-    }
-  },
   "viewer": {
     "pageIndicator": "第 {current} 页，共 {total} 页"
   },
   "imageOverlay": {
     "deleteImage": "删除图片",
     "imageProperties": "图片属性",
-    "rotate": "旋转",
-    "replaceImage": null
+    "rotate": "旋转"
   },
   "revisions": {
     "cellDeleted": "已删除单元格",
@@ -985,7 +968,7 @@
     "paragraphMarkDeleted": "已删除段落分隔符",
     "paragraphMarkInserted": "已插入段落分隔符",
     "paragraphPropertiesChanged": "已更改段落属性",
-    "runPropertiesChanged": null,
+    "runPropertiesChanged": "已更改文本格式",
     "rowDeleted": "已删除行",
     "rowInserted": "已插入行",
     "rowPropertiesChanged": "已更改行属性",
@@ -1009,7 +992,7 @@
   },
   "hostMenus": {
     "edit": "编辑",
-    "view": "查看",
+    "view": "视图",
     "download": "下载",
     "wordDocument": "Word 文档 (.docx)",
     "selectAll": "全选",
@@ -1020,7 +1003,7 @@
     "showComments": "显示评论",
     "zoom": "缩放",
     "link": "链接",
-    "comment": "评论",
+    "comment": "批注",
     "text": "文本",
     "paragraphStyles": "段落样式",
     "alignIndent": "对齐和缩进",
@@ -1032,7 +1015,7 @@
     "decreaseIndent": "减少缩进",
     "bulletsNumbering": "项目符号和编号",
     "bulletedList": "项目符号列表",
-    "numberedList": "编号列表",
+    "numberedList": "编号",
     "textDirection": "文字方向",
     "leftToRight": "从左到右",
     "rightToLeft": "从右到左",

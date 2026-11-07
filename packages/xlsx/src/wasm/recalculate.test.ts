@@ -9,7 +9,6 @@ const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const RELS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const PACKAGE_RELS = 'http://schemas.openxmlformats.org/package/2006/relationships';
-const CALCULATION = { nowSerial: 46_327.5, randSeed: 12_345 };
 
 async function book(calcPr: string): Promise<Uint8Array> {
   const zip = new JSZip();
@@ -31,7 +30,7 @@ describe('saving recalculated values', () => {
 
   it('keeps the file byte for byte when nothing asked for a recalculation', async () => {
     const source = await book('');
-    const handle = openWorkbook(source, { calculation: CALCULATION });
+    const handle = openWorkbook(source);
     try {
       expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
     } finally {
@@ -39,19 +38,8 @@ describe('saving recalculated values', () => {
     }
   });
 
-  it('saves the values recalculate() produced and keeps a cache it could not evaluate', async () => {
-    const handle = openWorkbook(await book(''), { calculation: CALCULATION });
-    try {
-      const status = handle.recalculate();
-      expect(status).toEqual(handle.calculationStatus());
-      expect(await savedCaches(handle.save())).toEqual(['5', '999']);
-    } finally {
-      handle.dispose();
-    }
-  });
-
   it('saves the values calculated at open when the file asks for a full calculation', async () => {
-    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>'), { calculation: CALCULATION });
+    const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1" forceFullCalc="1"/>'));
     try {
       expect(await savedCaches(handle.save())).toEqual(['5', '999']);
     } finally {

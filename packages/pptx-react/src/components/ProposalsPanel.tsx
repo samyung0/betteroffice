@@ -359,7 +359,7 @@ function ShapeChange({ change }: { change: ProposalChange }) {
         <p style={styles.detail}>
           {t('proposals.geometry')}
           <br />
-          {rectangle(before)} → {rectangle(after)} pt
+          {t('proposals.geometryValues', { before: rectangle(before), after: rectangle(after) })}
         </p>
       )}
       {JSON.stringify({ ...before, x: 0, y: 0, width: 0, height: 0 }) !==

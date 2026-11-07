@@ -52,13 +52,6 @@ export interface EmbeddedFontFace {
   subsetted: boolean;
 }
 
-const documentFaces = new WeakMap<Document, EmbeddedFontFace[]>();
-
-/** @internal */
-export function retainEmbeddedFontFaces(document: Document, faces: EmbeddedFontFace[]): void {
-  documentFaces.set(document, faces);
-}
-
 interface EmbedKind {
   key: keyof Pick<FontInfo, 'embedRegular' | 'embedBold' | 'embedItalic' | 'embedBoldItalic'>;
   weight: 'normal' | 'bold';
@@ -175,8 +168,6 @@ export function getEmbeddedFontFaces(
  * @public
  */
 export async function extractEmbeddedFontFaces(document: Document): Promise<EmbeddedFontFace[]> {
-  const retained = documentFaces.get(document);
-  if (retained) return retained;
   const fontTable = document.package.fontTable;
   if (!fontTable || getEmbeddedFontFamilies(fontTable).size === 0) return [];
   const buffer = document.originalBuffer;

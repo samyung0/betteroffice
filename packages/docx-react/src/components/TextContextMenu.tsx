@@ -5,9 +5,8 @@
  * Shows Cut, Copy, Paste, and other text editing options.
  */
 
-import React, { useCallback, useEffect, useRef, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from 'react';
 import { useTranslation } from '../i18n';
-import { en as defaultLocale } from '@betteroffice/docx-i18n';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 import { Z_INDEX } from '../styles/zIndex';
 import { DrawnIcon, type DrawnIconName } from './ui/Icons';
@@ -525,25 +524,19 @@ export const TextContextMenu: React.FC<TextContextMenuProps> = ({
   // Filter out separators for keyboard navigation
   const navigableItems = menuItems.filter((item) => item.action !== 'separator');
 
-  // Handle click outside
-  useEffect(() => {
+  // Close on a press outside. Attached as the menu opens: the opening press
+  // cannot reach it, since `contextmenu` fires after that press's `pointerdown`.
+  useLayoutEffect(() => {
     if (!isOpen) return;
 
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: PointerEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
     };
 
-    // Use timeout to avoid immediately closing on right-click
-    const timer = setTimeout(() => {
-      document.addEventListener('mousedown', handleClickOutside);
-    }, 0);
-
-    return () => {
-      clearTimeout(timer);
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
+    document.addEventListener('pointerdown', handleClickOutside, true);
+    return () => document.removeEventListener('pointerdown', handleClickOutside, true);
   }, [isOpen, onClose]);
 
   // Handle keyboard navigation
@@ -811,33 +804,6 @@ export function useTextContextMenu(
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-/**
- * Get action label
- */
-export function getTextActionLabel(action: TextContextAction): string {
-  const labels: Record<TextContextAction, string> = {
-    cut: 'Cut',
-    copy: 'Copy',
-    paste: 'Paste',
-    pasteAsPlainText: 'Paste as Plain Text',
-    selectAll: 'Select All',
-    delete: 'Delete',
-    separator: '',
-    addRowAbove: 'Insert row above',
-    addRowBelow: 'Insert row below',
-    deleteRow: 'Delete row',
-    addColumnLeft: 'Insert column left',
-    addColumnRight: 'Insert column right',
-    deleteColumn: 'Delete column',
-    mergeCells: defaultLocale.table.mergeCells,
-    splitCell: defaultLocale.table.splitCell,
-    selectTable: defaultLocale.table.selectTable,
-    deleteTable: defaultLocale.table.deleteTable,
-    addComment: 'Comment',
-  };
-  return labels[action];
-}
 
 /**
  * Get action shortcut

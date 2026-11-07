@@ -22,10 +22,6 @@
     "types": ["bun", "node", "vite/client"]
   },
   "include": [
-    "Editor.tsx",
-    "Editor.test.tsx",
-    "session.ts",
-    "session.test.ts",
     "collaboration/createRoomTransport.ts",
     "collaboration/types.ts"
   ]

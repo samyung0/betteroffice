@@ -16,7 +16,7 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
-import type { ProposalShapeChange, ProposalTextChange } from '../proposals';
+import type { ProposalTextChange } from '../proposals';
 import { imageDecodeScale, setImageDecodeScale } from './browserImage';
 
 type TextChunks = typeof import('./textChunks');
@@ -34,9 +34,6 @@ export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
   maxShadowPixels?: number;
   textChanges?: readonly ProposalTextChange[];
-  shapeChanges?: readonly ProposalShapeChange[];
-  /** The family a run paints with in place of its own, e.g. an export's private face. */
-  fontFamily?: (font: { family: string; bold: boolean; italic: boolean; id: number }) => string | undefined;
 }
 
 interface ShadowBudget {
@@ -114,8 +111,6 @@ async function paintPrimitive(
 ): Promise<void> {
   ctx.save();
   try {
-    const deleted = 'shapeId' in primitive && options.shapeChanges?.some(change => change.shapeId === primitive.shapeId && change.kind === 'deleted');
-    if (deleted) ctx.globalAlpha *= 0.4;
     applyTransform(ctx, primitive);
     switch (primitive.kind) {
       case 'shape':
@@ -125,16 +120,14 @@ async function paintPrimitive(
         await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
-        paintTextBox(ctx, primitive, textChunks, options.textChanges, options.fontFamily);
+        paintTextBox(ctx, primitive, textChunks, options.textChanges);
         break;
       case 'placeholder':
         paintPlaceholder(ctx, primitive);
         break;
       case 'chart':
       case 'table':
-        await paintContainer(ctx, primitive, deleted ? { ...options,
-          shapeChanges: options.shapeChanges?.filter(change => change.shapeId !== primitive.shapeId),
-        } : options, deviceScale, shadowBudget, textChunks);
+        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget, textChunks);
         break;
     }
   } finally {
@@ -906,8 +899,7 @@ function paintTextBox(
   ctx: CanvasRenderingContext2D,
   textBox: TextBoxPrimitive,
   textChunks: TextChunks,
-  textChanges: readonly ProposalTextChange[] = [],
-  fontFamily?: PaintSlideOptions['fontFamily']
+  textChanges: readonly ProposalTextChange[] = []
 ): void {
   if (!textBox.overflow) {
     ctx.beginPath();
@@ -936,7 +928,7 @@ function paintTextBox(
       const [top, bottom] = highlightBand(line, run);
       ctx.fillRect(run.x, top, run.width, bottom - top);
     }
-    for (const run of line.runs) paintTextRun(ctx, run, line.baseline, textChunks, fontFamily);
+    for (const run of line.runs) paintTextRun(ctx, run, line.baseline, textChunks);
   }
   if (shadow) ctx.restore();
   paintTextChanges(ctx, textBox, changes, true);
@@ -978,13 +970,11 @@ function paintTextRun(
   ctx: CanvasRenderingContext2D,
   run: PositionedTextRun,
   baseline: number,
-  textChunks: TextChunks,
-  fontFamily?: PaintSlideOptions['fontFamily']
+  textChunks: TextChunks
 ): void {
   const style = run.italic ? 'italic ' : '';
   const weight = run.bold ? 'bold ' : '';
-  const family = fontFamily?.({ family: run.fontFamily, bold: run.bold === true, italic: run.italic === true, id: run.fontId }) ?? run.fontFamily;
-  ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(family)}`;
+  ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(run.fontFamily)}`;
   ctx.fillStyle = run.color;
   const spacing = run.letterSpacingPx ?? 0;
   ctx.letterSpacing = spacing === 0 ? '0px' : `${spacing}px`;

@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import type { HyperlinkData, useHyperlinkDialog } from '../../dialogs/HyperlinkDialog';
 import type { HyperlinkPopupData } from '../../ui/HyperlinkPopup';
 import type { PagedEditorRef } from '../PagedEditor';
+import { useTranslation } from '../../../i18n';
 
 /**
  * Owns the dialog-driven hyperlink flow (insert / edit / remove) and the
@@ -20,6 +21,7 @@ export function useHyperlinkActions({
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   focusActiveEditor: () => void;
 }) {
+  const { t } = useTranslation();
   const [hyperlinkPopupData, setHyperlinkPopupData] = useState<HyperlinkPopupData | null>(null);
 
   const handleHyperlinkSubmit = useCallback(
@@ -96,8 +98,8 @@ export function useHyperlinkActions({
     setHyperlinkPopupData(null);
     focusActiveEditor();
     // A read-only editor refuses the command: nothing to report.
-    if (removed) toast('Link removed');
-  }, [focusActiveEditor, hyperlinkPopupData, pagedEditorRef]);
+    if (removed) toast(t('editor.linkRemoved'));
+  }, [focusActiveEditor, hyperlinkPopupData, pagedEditorRef, t]);
 
   const handleHyperlinkPopupClose = useCallback(() => {
     setHyperlinkPopupData(null);

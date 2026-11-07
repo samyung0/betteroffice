@@ -106,7 +106,49 @@
       "documentColors": "Document colors",
       "default": "Default",
       "custom": "Custom color",
-      "chooseCustom": "Choose a custom color"
+      "chooseCustom": "Choose a custom color",
+      "colors": {
+        "black": "Black",
+        "charcoal": "Charcoal",
+        "darkGray": "Dark gray",
+        "gray": "Gray",
+        "silver": "Silver",
+        "lightGray": "Light gray",
+        "cloud": "Cloud",
+        "white": "White",
+        "darkRed": "Dark red",
+        "darkOrange": "Dark orange",
+        "darkYellow": "Dark yellow",
+        "darkGreen": "Dark green",
+        "darkTeal": "Dark teal",
+        "darkBlue": "Dark blue",
+        "darkPurple": "Dark purple",
+        "darkPink": "Dark pink",
+        "red": "Red",
+        "orange": "Orange",
+        "yellow": "Yellow",
+        "green": "Green",
+        "teal": "Teal",
+        "blue": "Blue",
+        "purple": "Purple",
+        "pink": "Pink",
+        "softRed": "Soft red",
+        "softOrange": "Soft orange",
+        "softYellow": "Soft yellow",
+        "softGreen": "Soft green",
+        "softTeal": "Soft teal",
+        "softBlue": "Soft blue",
+        "softPurple": "Soft purple",
+        "softPink": "Soft pink",
+        "paleRed": "Pale red",
+        "paleOrange": "Pale orange",
+        "paleYellow": "Pale yellow",
+        "paleGreen": "Pale green",
+        "paleTeal": "Pale teal",
+        "paleBlue": "Pale blue",
+        "palePurple": "Pale purple",
+        "palePink": "Pale pink"
+      }
     },
     "lineStyle": "Line style"
   },
@@ -121,7 +163,8 @@
     "cellMenuLabel": "Cell menu",
     "sheetTabMenuLabel": "Sheet tab menu",
     "renameSheetLabel": "Rename sheet",
-    "sheetNamePrefix": "Sheet"
+    "sheetNamePrefix": "Sheet",
+    "sheetProtected": "This cell is on a protected sheet."
   },
   "proposals": {
     "panelLabel": "Agent proposals",
@@ -189,5 +232,10 @@
     "wrapping": "Wrapping",
     "mergeCells": "Merge cells",
     "clearFormatting": "Clear formatting"
+  },
+  "presence": {
+    "label": "Collaborators",
+    "unavailableSheet": "Unavailable sheet",
+    "moreCollaborators": "{count, plural, one {# more collaborator} other {# more collaborators}}"
   }
 }

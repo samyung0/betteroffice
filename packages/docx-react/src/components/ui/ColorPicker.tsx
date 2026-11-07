@@ -745,7 +745,7 @@ export function ColorPicker({
           className="docx-color-picker-dropdown docx-popover docx-popover--colors"
           style={{ ...dropdownStyle, ...S_DROPDOWN }}
           role="dialog"
-          aria-label={`${defaultTitle} picker`}
+          aria-label={t('colorPicker.pickerLabel', { title: defaultTitle })}
           onMouseDown={(e) => {
             if ((e.target as HTMLElement).tagName !== 'INPUT') e.preventDefault();
           }}

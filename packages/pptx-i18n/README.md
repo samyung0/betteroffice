@@ -15,11 +15,11 @@ bun add @betteroffice/pptx-i18n
 Pass a locale to the editor's `i18n` prop:
 
 ```tsx
-import { de } from '@betteroffice/pptx-i18n';
+import { zhCN } from '@betteroffice/pptx-i18n';
 import { PptxEditor, type PptxAsyncEditorProps } from '@betteroffice/pptx-react';
 
 export function Editor({ file, fonts }: Pick<PptxAsyncEditorProps, 'file' | 'fonts'>) {
-  return <PptxEditor file={file} fonts={fonts} i18n={de} />;
+  return <PptxEditor file={file} fonts={fonts} i18n={zhCN} />;
 }
 ```
 
@@ -27,18 +27,14 @@ Override individual strings by spreading a locale. Keys that are missing or `nul
 back to English.
 
 ```ts
-const custom = { ...de, toolbar: { ...de.toolbar, addSlide: 'Neue Folie' } };
+const custom = { ...zhCN, toolbar: { ...zhCN.toolbar, addSlide: '添加幻灯片' } };
 ```
 
 ## Locales
 
-`en` (source), `ar`, `de`, `es`, `fr`, `he`, `hi`, `id`, `it`, `ja`, `ko`, `nl`, `pl`, `pt-BR`, `ru`,
-`tr`, `uk`, `vi`, `zh-CN` and `zh-TW`. The exports for `pt-BR`, `zh-CN` and `zh-TW` are `ptBR`,
-`zhCN` and `zhTW`. Every locale translates every string.
-
-Each locale is also its own subpath, for example `@betteroffice/pptx-i18n/pl`, so an app that picks
-the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and
-bundles all of them.
+`en` (source) and `zh-CN`, exported as `zhCN`. Each locale is also its own subpath,
+`@betteroffice/pptx-i18n/zh-CN`, so an app that picks the locale at runtime can load only the one it
+needs. `locales` maps both tags to their strings.
 
 ## Helpers
 
@@ -47,10 +43,10 @@ The package exports the types `LocaleStrings`, `PartialLocaleStrings`, `Translat
 Outside React, build a typed `t()` directly:
 
 ```ts
-import { createT, deepMerge, en, de, type LocaleStrings } from '@betteroffice/pptx-i18n';
+import { createT, deepMerge, en, zhCN, type LocaleStrings } from '@betteroffice/pptx-i18n';
 
-const t = createT(deepMerge(en, de) as LocaleStrings, 'de');
-t('toolbar.addSlide'); // 'Add slide'
+const t = createT(deepMerge(en, zhCN) as LocaleStrings, 'zh-CN');
+t('toolbar.addSlide'); // '添加幻灯片'
 ```
 
 ## Documentation

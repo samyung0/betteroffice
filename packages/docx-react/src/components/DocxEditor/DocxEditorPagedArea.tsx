@@ -37,6 +37,7 @@ import type { DocxEditorCollaborationOptions } from './types';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { partEditStory, type NoteEdit, type PartEdit, type PartEditTarget } from './partEdit';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
+import { useTranslation } from '../../i18n';
 
 /**
  * Body of the editor: the paged editor host, its sidebar overlay
@@ -234,6 +235,7 @@ export function DocxEditorPagedArea({
    */
   rustFontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>;
 }) {
+  const { t } = useTranslation();
   const sidebarCommentIds = useMemo(() => comments.map((comment) => comment.id), [comments]);
 
   // The open part, split into the two shapes its consumers address it by.
@@ -366,7 +368,7 @@ export function DocxEditorPagedArea({
 
   const floatingCommentButton =
     partEditTarget == null && floatingCommentBtn != null && !isAddingComment && !readOnly ? (
-      <Tooltip content="Add comment" side="bottom" delayMs={300}>
+      <Tooltip content={t('editor.addComment')} side="bottom" delayMs={300}>
         <button
           type="button"
           onMouseDown={(e) => {

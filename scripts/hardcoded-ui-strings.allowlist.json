@@ -24,14 +24,13 @@
     "reason": "Font name"
   },
   {
-    "text": "Full frame responses did not satisfy requested coverage and revision",
-    "file": "packages/docx-react/src/components/DocxEditor/peerless/framePresentation.ts",
-    "reason": "Internal error message for a stalled frame request, never shown in the UI"
+    "text": "Calibri",
+    "reason": "Font name"
   },
   {
-    "text": "Unable to decode slide image",
-    "file": "packages/pptx-react/src/viewer/sessionPaint.ts",
-    "reason": "Internal image decode error passed to the media resolver, never shown in the UI"
+    "text": "Aa",
+    "file": "packages/pptx-react/src/components/PresenterWindow.tsx",
+    "reason": "Glyph of the notes-size icon, drawn as SVG text; the label beside it is translated"
   },
   {
     "text": "Dynamic connector",
@@ -52,10 +51,5 @@
     "text": "The value is not a recognized boolean.",
     "file": "packages/vsdx-react/src/components/dataBinding/bindTable.ts",
     "reason": "Refusal text in the bindRowToShape API result; the data binding panel shows its own translated message"
-  },
-  {
-    "text": "BetterOffice",
-    "file": "apps/desktop/src/App.tsx",
-    "reason": "Product name in the title bar"
   }
 ]

@@ -211,6 +211,47 @@ async function withTallFontColumn(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
 }
 
+// the small fixture's sheet protected, holding A1 = 1 (locked, as every cell
+// by default) and B1 = 2 (its format unlocks it).
+async function withProtection(bytes: Uint8Array): Promise<Uint8Array> {
+  const zip = await JSZip.loadAsync(await withCells(bytes, { A1: 1, B1: 2 }));
+  zip.file(
+    'xl/styles.xml',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
+      '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>' +
+      '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>' +
+      '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+      '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>' +
+      '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0" applyProtection="1"><protection locked="0"/></xf></cellXfs>' +
+      '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>'
+  );
+  const types = await zip.file('[Content_Types].xml')!.async('string');
+  zip.file(
+    '[Content_Types].xml',
+    types.replace(
+      '</Types>',
+      '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>'
+    )
+  );
+  const rels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
+  zip.file(
+    'xl/_rels/workbook.xml.rels',
+    rels.replace(
+      '</Relationships>',
+      '<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>'
+    )
+  );
+  const sheet = await zip.file('xl/worksheets/sheet1.xml')!.async('string');
+  zip.file(
+    'xl/worksheets/sheet1.xml',
+    sheet
+      .replace('<c r="B1">', '<c r="B1" s="1">')
+      .replace('</sheetData>', '</sheetData><sheetProtection sheet="1" objects="1" scenarios="1"/>')
+  );
+  return new Uint8Array(await zip.generateAsync({ type: 'uint8array' }));
+}
+
 // cell positions the editor asks the worker for, and frames, from here on.
 function countEngine(proxy: WorkbookProxy) {
   const counts = { positions: 0, paints: 0 };
@@ -312,6 +353,8 @@ let wideColumn: Fixture;
 let tallFont: Fixture;
 // A1:B2 merged, rows 4 to 6 hidden.
 let shaped: Fixture;
+// a protected sheet: A1 locked, B1 unlocked.
+let protectedSheet: Fixture;
 let opened: string[] = [];
 
 beforeAll(async () => {
@@ -353,6 +396,7 @@ beforeAll(async () => {
   wideColumn = fixtureFrom(withWideColumn(source));
   tallFont = fixtureFrom(await withTallFontColumn(source));
   shaped = fixtureFrom(await withShape(smallBytes));
+  protectedSheet = fixtureFrom(await withProtection(smallBytes));
 });
 
 afterAll(async () => {
@@ -823,6 +867,33 @@ describe('XlsxEditor keyboard', () => {
     });
     await view.idle();
     expect(await view.input(89_999, 9)).toBe('xy');
+    expect(view.nameBox().value).toBe('J90001');
+  }, MANY_KEYS_MS);
+
+  it('moves on from where a jump landed for a key pressed right after the answer', async () => {
+    const view = await mountEditor(farColumn);
+    await view.click({ row: 0, col: 9 });
+    const workbook = view.workbook() as unknown as {
+      onSheet: (...args: unknown[]) => Promise<unknown>;
+    };
+    const onSheet = workbook.onSheet;
+    let answer: Promise<unknown> | undefined;
+    workbook.onSheet = (...args) => {
+      const result = onSheet.apply(workbook, args);
+      if (args[1] === 'selectionData') answer = result;
+      return result;
+    };
+    try {
+      // outside act, so React draws when a browser would: the second key comes
+      // after the jump settled and before the next frame.
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown', ctrlKey: true });
+      await answer;
+      for (let tick = 0; tick < 10; tick++) await Promise.resolve();
+      fireEvent.keyDown(view.surface, { key: 'ArrowDown' });
+    } finally {
+      workbook.onSheet = onSheet;
+    }
+    await view.idle();
     expect(view.nameBox().value).toBe('J90001');
   }, MANY_KEYS_MS);
 
@@ -3593,6 +3664,87 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(11, 1)).toBe('1000');
   });
 
+  // S5: needs the xlsx-wasm that reports `protected` in sheetInfo() and
+  // `locked` in cell() (XLSX track, Q698); it fails on capy-ci's wasm, which
+  // reports neither.
+  it('refuses an edit of a locked cell on a protected sheet before it opens, translated (Q698)', async () => {
+    const view = await mountEditor(protectedSheet, undefined, undefined, { i18n: zhCN });
+    await view.click({ row: 0, col: 0 });
+    await press(view.surface, 'x');
+    expect(view.editor() === null).toBe(true);
+    expect(refusal(view)).toBe('此单元格位于受保护的工作表上。');
+    view.typeFormula('7');
+    expect(view.formula()).toBe('1');
+    expect(await view.input(0, 0)).toBe('1');
+  });
+
+  it('edits an unlocked cell on a protected sheet (Q698)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await view.click({ row: 0, col: 1 });
+    await press(view.surface, 'q');
+    await press(view.editor()!, 'Enter');
+    expect(refusal(view)).toBe(null);
+    expect(await view.input(0, 1)).toBe('q');
+  });
+
+  // swaps the clipboard for `value` while `run` runs.
+  const withClipboard = async (value: Partial<Clipboard>, run: () => Promise<void>) => {
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value });
+    try {
+      await run();
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  };
+
+  // S5: these three need the xlsx-wasm with lockedInRangesJson and sheetInfo's
+  // `protected` (XLSX track, Q701); on capy-ci's wasm the clear, paste and cut
+  // go through.
+  it('refuses a clear over a locked cell of a protected sheet whole (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await view.click({ row: 0, col: 0 });
+    // A1:B1, B1 unlocked: the locked A1 refuses the whole clear.
+    await press(view.surface, 'ArrowRight', { shiftKey: true });
+    await press(view.surface, 'Delete');
+    expect(refusal(view)).toBe('This cell is on a protected sheet.');
+    expect([await view.input(0, 0), await view.input(0, 1)]).toEqual(['1', '2']);
+  });
+
+  it('refuses a paste over a locked cell of a protected sheet whole (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await withClipboard({ readText: async () => 'z' }, async () => {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'v', { ctrlKey: true });
+    });
+    expect(refusal(view)).toBe('This cell is on a protected sheet.');
+    expect(await view.input(0, 0)).toBe('1');
+  });
+
+  it('refuses a cut of a locked cell of a protected sheet, the clipboard untouched (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    const written: string[] = [];
+    await withClipboard({ write: writeInto(written) }, async () => {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'x', { ctrlKey: true });
+    });
+    expect([refusal(view), written]).toEqual(['This cell is on a protected sheet.', []]);
+    expect(await view.input(0, 0)).toBe('1');
+  });
+
+  it('clears and pastes into an unlocked cell of a protected sheet (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await view.click({ row: 0, col: 1 });
+    await press(view.surface, 'Delete');
+    expect(await view.input(0, 1)).toBe('');
+    await withClipboard({ readText: async () => 'z' }, async () => {
+      await press(view.surface, 'v', { ctrlKey: true });
+    });
+    expect(refusal(view)).toBe(null);
+    expect(await view.input(0, 1)).toBe('z');
+  });
+
   it('shows the refusal of text past 32,767 characters on the same line, translated', async () => {
     const view = await mountEditor(plain, undefined, undefined, { i18n: zhCN });
     await view.click({ row: 10, col: 1 });
@@ -4214,4 +4366,38 @@ describe('XlsxEditor cell text', () => {
     ]);
     await view.idle();
   });
+});
+
+describe('XlsxEditor input before the first frame', () => {
+  it('keeps the last press and the keys typed on the grid before its first frame, then applies them (Q689)', async () => {
+    let handle: WorkbookProxy | null = null;
+    let painted = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onFirstPaint={() => {
+          painted += 1;
+        }}
+        onReady={(api) => {
+          handle = api.handle;
+        }}
+      />
+    );
+    const surface = view.getByTestId('xlsx-scroll');
+    expect(painted).toBe(0);
+    // an earlier press is replaced by the last one.
+    fireEvent.mouseDown(surface, pointAt(plain, { row: 0, col: 3 }));
+    fireEvent.mouseDown(surface, pointAt(plain, { row: 2, col: 1 }));
+    for (const key of ['q', 'z', 'Enter']) fireEvent.keyDown(surface, { key });
+    expect(painted).toBe(0);
+    await waitFor(() => expect(painted).toBe(1));
+    await idleWith(() => handle);
+    expect((await handle!.cell(0, 2, 1)).input).toBe('qz');
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+  });
+});
+
+it('pins the editor root to ltr on a right-to-left page (upstream #1884)', async () => {
+  const view = await mountEditor();
+  expect(view.surface.closest('[role="application"]')?.getAttribute('dir')).toBe('ltr');
 });

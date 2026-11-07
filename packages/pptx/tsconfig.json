@@ -16,10 +16,7 @@
     "noFallthroughCasesInSwitch": true,
     "declaration": true,
     "declarationMap": true,
-    "types": ["bun", "node"],
-    "paths": {
-      "#session-worker": ["./src/session/sessionWorker.node.ts"]
-    }
+    "types": ["bun", "node"]
   },
   "include": ["src"],
   "exclude": ["node_modules", "dist"]

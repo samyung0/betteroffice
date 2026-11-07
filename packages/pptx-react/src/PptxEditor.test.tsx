@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
-import type { HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
+import type { HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { storyClipboard } from './clipboard';
@@ -693,6 +693,11 @@ describe('PptxEditor viewing transitions', () => {
   }, 60_000);
 });
 
+it('pins the editor root to ltr on a right-to-left page (upstream #1884)', () => {
+  const view = render(<PptxEditor fonts={[]} />);
+  expect((view.container.firstElementChild as HTMLElement).getAttribute('dir')).toBe('ltr');
+});
+
 describe('PptxEditor caret painting', () => {
   const frame: SlideDisplayList = {
     contractVersion: 1,
@@ -763,6 +768,37 @@ describe('PptxEditor caret painting', () => {
     );
 
     expect(calls).toEqual([[120, 10, 1.5, 20]]);
+  });
+
+  it('paints the caret in the colour of the text under it, or a contrasting one', () => {
+    const paints: Array<{ fill: unknown; rect: number[] }> = [];
+    const ctx = {
+      save: () => undefined,
+      restore: () => undefined,
+      setTransform: () => undefined,
+      fillRect: (...rect: number[]) => paints.push({ fill: ctx.fillStyle, rect }),
+      fillStyle: '' as unknown,
+    } as unknown as CanvasRenderingContext2D;
+    const box = frame.primitives[0] as TextBoxPrimitive;
+    const run = { text: 'abcde', start: 0, end: 5, x: 20, width: 100, fontId: 1, fontFamily: 'Arial',
+      fontSizePx: 16, bold: false, italic: false, underline: false, color: '#ffffff', glyphs: [] };
+    const dark: SlideDisplayList = {
+      ...frame,
+      background: { kind: 'solid', color: '#0b1f3a' },
+      primitives: [{ ...box, lines: [{ ...box.lines[0]!, runs: [run] }, box.lines[1]!] }],
+    };
+    const caret = { shapeId: 'shape', storyId: 'story', anchor: 3, focus: 3, focusLine: 0 };
+
+    paintSelection(ctx, dark, caret, 1, 1);
+    expect(paints.map(({ fill }) => fill)).toEqual(['#ffffff']);
+
+    paints.length = 0;
+    paintSelection(ctx, { ...dark, background: undefined }, caret, 1, 1);
+    expect(paints.map(({ fill }) => fill)).toEqual(['#000000']);
+
+    paints.length = 0;
+    paintSelection(ctx, dark, { ...caret, anchor: 7, focus: 7, focusLine: 1 }, 1, 1, true, '#c00000');
+    expect(paints.map(({ fill }) => fill)).toEqual(['#c00000']);
   });
 
   it('stops caret blinking while blurred or hidden', async () => {

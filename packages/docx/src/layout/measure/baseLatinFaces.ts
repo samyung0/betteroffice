@@ -1,6 +1,6 @@
 import { installBaseLatinFace } from '../../wasm/baseLatinFonts';
 import type { FontCoverage } from './fontCoverage';
-import type { FontDecoder } from '../../../../../shared/office-session/fontDecoder';
+import type { FontDecoder } from '@betteroffice/fonts';
 import type { BundledFontProvider } from './fontRegistry';
 
 type Loader = () => Promise<ArrayBuffer>;

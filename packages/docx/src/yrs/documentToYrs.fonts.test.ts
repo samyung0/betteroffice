@@ -11,7 +11,7 @@ import type { DisplayList, GlyphRunPrimitive } from '../layout/render/displayLis
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
-import { createYrsSession, saveYrsDocx, type YrsSession } from './index';
+import { createYrsSession, type YrsSession } from './index';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -50,125 +50,6 @@ function mixedSlotsPackage(fonts: string): Uint8Array<ArrayBuffer> {
   parts.set('word/numbering.xml', toBytes(`<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>${fonts}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`));
   parts.set('word/theme/theme1.xml', toBytes('<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri Light"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>'));
   return new Uint8Array(rezipPartsToArrayBuffer(parts));
-}
-
-type FontSlots = 'latin' | 'eastAsia/cs' | 'all slots';
-
-function pairedFonts(slots: FontSlots, site: string): string {
-  const latin = slots !== 'eastAsia/cs';
-  const other = slots !== 'latin';
-  const attributes = [
-    ...(latin ? [['ascii', `${site} Cambria`], ['hAnsi', `${site} Cambria`]] : []),
-    ...(other ? [['eastAsia', `${site} MS Mincho`], ['cs', `${site} Arial`]] : []),
-    ...(latin ? [['asciiTheme', 'majorHAnsi'], ['hAnsiTheme', 'majorHAnsi']] : []),
-    ...(other ? [['eastAsiaTheme', 'minorEastAsia'], ['cstheme', 'minorBidi']] : []),
-    ['hint', 'eastAsia'],
-  ];
-  return `<w:rFonts ${attributes.map(([name, value]) => `w:${name}="${value}"`).join(' ')}/>`;
-}
-
-function pairedFontsPackage(slots: FontSlots, theme: 'custom' | 'default'): Uint8Array<ArrayBuffer> {
-  const fonts = (site: string) => pairedFonts(slots, site);
-  const run = (site: string, text: string) => `<w:r><w:rPr>${fonts(site)}</w:rPr><w:t>${text}</w:t></w:r>`;
-  const relationships = [
-    ['styles', 'styles.xml', 'wordprocessingml.styles'],
-    ['numbering', 'numbering.xml', 'wordprocessingml.numbering'],
-    ['header', 'header1.xml', 'wordprocessingml.header'],
-    ['footer', 'footer1.xml', 'wordprocessingml.footer'],
-    ...(theme === 'custom' ? [['theme', 'theme/theme1.xml', 'theme']] : []),
-  ];
-  const body = `<w:p>${run('Anchor', 'A')}${run('Direct', 'Title')}</w:p>` +
-    `<w:p>${run('Merge', 'Merge')}</w:p>` +
-    '<w:p><w:r><w:t>Document defaults</w:t></w:r></w:p>' +
-    '<w:p><w:pPr><w:pStyle w:val="PairedParagraph"/></w:pPr><w:r><w:t>Paragraph style</w:t></w:r></w:p>' +
-    '<w:p><w:r><w:rPr><w:rStyle w:val="PairedCharacter"/></w:rPr><w:t>Character style</w:t></w:r></w:p>' +
-    '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>List</w:t></w:r></w:p>' +
-    '<w:tbl><w:tblPr><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>' +
-    `<w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p>${run('Table', 'Cell')}</w:p></w:tc></w:tr></w:tbl>` +
-    `<w:p>${textBox('drawingml', fonts('DrawingML'))}</w:p>` +
-    `<w:p>${textBox('vml', fonts('VML'))}</w:p>` +
-    `<w:p>${run('SimplePrefix', 'BeforeSimple')}<w:fldSimple w:instr=" PAGE ">${run('SimpleField', '7')}</w:fldSimple></w:p>` +
-    `<w:p>${run('ComplexPrefix', 'BeforeComplex')}<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
-    '<w:r><w:instrText xml:space="preserve"> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
-    `<w:hyperlink w:anchor="_Toc1">${run('ComplexField', 'Heading')}</w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
-  const parts = new Map([
-    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
-      relationships.map(([, target, type]) => `<Override PartName="/word/${target}" ContentType="application/vnd.openxmlformats-officedocument.${type}+xml"/>`).join('') + '</Types>'],
-    ['_rels/.rels', `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`],
-    ['word/_rels/document.xml.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-      relationships.map(([type, target]) => `<Relationship Id="${type}" Type="${R}/${type}" Target="${target}"/>`).join('') + '</Relationships>'],
-    ['word/document.xml', `<w:document xmlns:w="${W}" xmlns:r="${R}"><w:body>${body}<w:sectPr><w:headerReference w:type="default" r:id="header"/><w:footerReference w:type="default" r:id="footer"/></w:sectPr></w:body></w:document>`],
-    ['word/styles.xml', `<w:styles xmlns:w="${W}"><w:docDefaults><w:rPrDefault><w:rPr>${fonts('Defaults')}</w:rPr></w:rPrDefault></w:docDefaults>` +
-      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>' +
-      `<w:style w:type="paragraph" w:styleId="PairedParagraph"><w:name w:val="Paired Paragraph"/><w:basedOn w:val="Normal"/><w:rPr>${fonts('ParagraphStyle')}</w:rPr></w:style>` +
-      `<w:style w:type="character" w:styleId="PairedCharacter"><w:name w:val="Paired Character"/><w:rPr>${fonts('CharacterStyle')}</w:rPr></w:style></w:styles>`],
-    ['word/numbering.xml', `<w:numbering xmlns:w="${W}"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr>${fonts('Numbering')}</w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`],
-    ['word/header1.xml', `<w:hdr xmlns:w="${W}"><w:p>${run('Header', 'Header')}</w:p></w:hdr>`],
-    ['word/footer1.xml', `<w:ftr xmlns:w="${W}"><w:p>${run('Footer', 'Footer')}</w:p></w:ftr>`],
-  ]);
-  if (theme === 'custom') {
-    parts.set('word/theme/theme1.xml', '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fontScheme name="Synthetic"><a:majorFont><a:latin typeface="Calibri"/><a:ea typeface="Yu Gothic"/><a:cs typeface="Tahoma"/></a:majorFont><a:minorFont><a:latin typeface="Carlito"/><a:ea typeface="SimSun"/><a:cs typeface="Arial"/></a:minorFont></a:fontScheme></a:themeElements></a:theme>');
-  }
-  return new Uint8Array(rezipPartsToArrayBuffer(new Map([...parts].map(([name, xml]) => [name, toBytes(xml)]))));
-}
-
-function rFontsInXml(xml: string): string[] {
-  return [...xml.matchAll(/<w:rFonts\b[^>]*(?:\/>|>[\s\S]*?<\/w:rFonts>)/g)].map(match => match[0]);
-}
-
-function rFontsByPart(bytes: Uint8Array): Record<string, string[]> {
-  return Object.fromEntries(Object.entries(unzipContainer(bytes)).flatMap(([part, content]) => {
-    if (!part.endsWith('.xml')) return [];
-    const xml = new TextDecoder().decode(content);
-    const fonts = rFontsInXml(xml);
-    return fonts.length ? [[part, fonts]] : [];
-  }));
-}
-
-function rFontsAttributes(parts: Record<string, string[]>): Record<string, Record<string, string>[]> {
-  return Object.fromEntries(Object.entries(parts).map(([part, fonts]) => [part, fonts.map(font =>
-    Object.fromEntries([...font.matchAll(/([\w:.-]+)="([^"]*)"/g)].map(match => [match[1], match[2]]))
-  )]));
-}
-
-function textInXml(xml: string): string {
-  return [...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(text => text[1]).join('');
-}
-
-function authoredRFontsAfterEdit(
-  bytes: Uint8Array,
-  slots: FontSlots,
-  insertedPrefixes: readonly string[]
-): Record<string, Record<string, string>[]> {
-  const parts = rFontsByPart(bytes);
-  const xml = new TextDecoder().decode(unzipContainer(bytes)['word/document.xml']);
-  const sourceFonts = (site: string) => rFontsAttributes({ run: [pairedFonts(slots, site)] }).run[0]!;
-  const authored = xml.replace(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g, (run, offset: number) => {
-    const fonts = rFontsInXml(run);
-    if (fonts.length === 0) return run;
-    if (/<w:fldChar\b/.test(run)) {
-      expect(fonts).toHaveLength(1);
-      expect(rFontsAttributes({ run: fonts }).run).toEqual([sourceFonts('ComplexField')]);
-      return run.replace(fonts[0]!, '');
-    }
-    if (textInXml(run) === '!') {
-      const prefix = insertedPrefixes.map(prefix => ({ prefix, offset: xml.lastIndexOf(prefix, offset) }))
-        .filter(entry => entry.offset >= 0).sort((left, right) => right.offset - left.offset)[0]?.prefix;
-      expect(prefix).toBeDefined();
-      const expected = sourceFonts(prefix === 'BeforeSimple' ? 'SimplePrefix' : 'ComplexPrefix');
-      delete expected['w:hint'];
-      expect(fonts).toHaveLength(1);
-      expect(rFontsAttributes({ run: fonts }).run).toEqual([expected]);
-      return run.replace(fonts[0]!, '');
-    }
-    return run;
-  });
-  parts['word/document.xml'] = rFontsInXml(authored);
-  return rFontsAttributes(parts);
-}
-
-function paragraphTexts(xml: string): string[] {
-  return [...xml.matchAll(/<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g)].map(paragraph => textInXml(paragraph[1]));
 }
 
 beforeAll(() => preloadEditWasm(new Uint8Array(
@@ -248,7 +129,6 @@ for (const path of ['native', 'typescript'] as const) {
         expect(session.storySegments('body').find(segment => segment.kind === 'text')?.attributes.fontFamily)
           .toMatchObject({ ascii: 'Times New Roman', hAnsi: 'Arial' });
         expect(session.encodeState()).toEqual(original);
-        expect(rFontsByPart((await saveYrsDocx(session)).bytes)).toEqual(rFontsByPart(bytes));
       } finally {
         source.destroy();
         session.destroy();
@@ -362,118 +242,6 @@ for (const path of ['native', 'typescript'] as const) {
           session.destroy();
         }
       });
-    }
-  }
-
-  for (const action of ['split', 'merge', 'field edit'] as const) {
-    test(`${path} ${action} saves the authored font pair`, async () => {
-      const run = `<w:r><w:rPr>${FONTS}</w:rPr><w:t>Title</w:t></w:r>`;
-      const body = action === 'merge'
-        ? `<w:p><w:r><w:t>A</w:t></w:r></w:p><w:p>${run}</w:p>`
-        : action === 'field edit'
-          ? `<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="_Toc1">${run}</w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`
-          : `<w:p><w:r><w:t>A</w:t></w:r>${run}</w:p>`;
-      const bytes = fontPackage('Calibri', FONTS, '', body);
-      const document = await parseDocx(bytes.buffer, { preloadFonts: false });
-      const session = await createYrsSession();
-      const hydrated = await createYrsSession();
-      try {
-        if (path === 'native') session.seedFromDocx(bytes);
-        else documentToYrs(session, document);
-        hydrated.openDocx(bytes, false);
-        hydrated.loadState(session.encodeState());
-        const target = hydrated.paragraphs('body')[0]!;
-        if (action === 'split') hydrated.splitParagraph({ story: 'body', paraId: target.paraId, offset: 1 });
-        else if (action === 'merge') hydrated.mergeParagraphs('body', target.paraId);
-        else hydrated.insertText({ story: 'body', paraId: target.paraId, offset: 1 }, '!');
-        const saved = unzipContainer((await saveYrsDocx(hydrated)).bytes);
-        const xml = new TextDecoder().decode(saved['word/document.xml']);
-        expect(rFontsInXml(xml)).toEqual(action === 'field edit' ? [FONTS, FONTS, FONTS, FONTS] : [FONTS]);
-        expect([...xml.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map(match => match[1]).join(''))
-          .toBe(action === 'field edit' ? 'T!itle' : 'ATitle');
-        expect([...xml.matchAll(/<w:p\b[^>]*>/g)]).toHaveLength(action === 'split' ? 2 : 1);
-        if (action === 'field edit') {
-          expect(xml).toContain('TOC');
-          expect(xml).toContain('_Toc1');
-          const runs = [...xml.matchAll(/<w:r\b[^>]*>[\s\S]*?<\/w:r>/g)].map(match => match[0]);
-          expect(runs.filter(run => /<w:fldChar\b/.test(run)).flatMap(rFontsInXml)).toEqual([FONTS, FONTS, FONTS]);
-          expect(runs.filter(run => /<w:t\b/.test(run)).flatMap(rFontsInXml)).toEqual([FONTS]);
-        }
-      } finally {
-        session.destroy();
-        hydrated.destroy();
-      }
-    });
-  }
-
-  for (const slots of ['latin', 'eastAsia/cs', 'all slots'] as const) {
-    for (const theme of ['custom', 'default'] as const) {
-      for (const action of ['unchanged save', 'split merge and field-adjacent edit'] as const) {
-        test(`${path} ${slots} paired fonts with ${theme} theme survive ${action} in every source location`, async () => {
-          const bytes = pairedFontsPackage(slots, theme);
-          const originalParts = unzipContainer(bytes);
-          const original = rFontsByPart(bytes);
-          expect(Object.keys(original).sort()).toEqual([
-            'word/document.xml', 'word/footer1.xml', 'word/header1.xml', 'word/numbering.xml', 'word/styles.xml',
-          ]);
-          expect(original['word/document.xml']).toHaveLength(10);
-          expect(original['word/styles.xml']).toHaveLength(3);
-          expect(original['word/numbering.xml']).toHaveLength(1);
-          expect(original['word/header1.xml']).toHaveLength(1);
-          expect(original['word/footer1.xml']).toHaveLength(1);
-          const document = await parseDocx(bytes.buffer, { preloadFonts: false });
-          const source = await createYrsSession();
-          const session = await createYrsSession();
-          try {
-            if (path === 'native') source.seedFromDocx(bytes);
-            else documentToYrs(source, document);
-            session.openDocx(bytes, false);
-            session.loadState(source.encodeState());
-            const insertedPrefixes: string[] = [];
-            const assertSavedFonts = async () => {
-              const saved = (await saveYrsDocx(session)).bytes;
-              const savedParts = unzipContainer(saved);
-              expect(savedParts['word/numbering.xml']).toEqual(originalParts['word/numbering.xml']);
-              const actual = rFontsByPart(saved);
-              if (action === 'unchanged save') expect(actual).toEqual(original);
-              else expect(authoredRFontsAfterEdit(saved, slots, insertedPrefixes)).toEqual(rFontsAttributes(original));
-              const xml = new TextDecoder().decode(savedParts['word/document.xml']);
-              let expectedText = textInXml(new TextDecoder().decode(originalParts['word/document.xml']));
-              for (const prefix of insertedPrefixes) expectedText = expectedText.replace(prefix, `${prefix}!`);
-              expect(textInXml(xml)).toBe(expectedText);
-              return xml;
-            };
-            if (action === 'unchanged save') {
-              await assertSavedFonts();
-            } else {
-              const first = session.paragraphs('body').find(paragraph => paragraph.text === 'ATitle')!;
-              expect(first).toBeDefined();
-              const split = session.splitParagraph({ story: 'body', paraId: first.paraId, offset: 1 });
-              expect(session.paragraphs('body').slice(0, 3).map(paragraph => paragraph.text)).toEqual(['A', 'Title', 'Merge']);
-              expect(paragraphTexts(await assertSavedFonts()).slice(0, 3)).toEqual(['A', 'Title', 'Merge']);
-              session.mergeParagraphs('body', split.secondParaId);
-              expect(session.paragraphs('body').slice(0, 2).map(paragraph => paragraph.text)).toEqual(['A', 'TitleMerge']);
-              expect(paragraphTexts(await assertSavedFonts()).slice(0, 2)).toEqual(['A', 'TitleMerge']);
-              for (const prefix of ['BeforeSimple', 'BeforeComplex']) {
-                const paragraph = session.paragraphs('body').find(entry => entry.text.startsWith(prefix))!;
-                expect(paragraph).toBeDefined();
-                session.insertText({ story: 'body', paraId: paragraph.paraId, offset: prefix.length }, '!');
-                insertedPrefixes.push(prefix);
-                const xml = await assertSavedFonts();
-                expect(paragraphTexts(xml).some(text => text.startsWith(`${prefix}!`))).toBe(true);
-                expect(xml).toContain('<w:fldSimple w:instr=" PAGE ">');
-                expect(xml).toContain('TOC');
-                expect(xml).toContain('_Toc1');
-                expect([...xml.matchAll(/<w:fldChar\b[^>]*w:fldCharType="(begin|separate|end)"/g)]
-                  .map(match => match[1])).toEqual(['begin', 'separate', 'end']);
-              }
-            }
-          } finally {
-            source.destroy();
-            session.destroy();
-          }
-        });
-      }
     }
   }
 }

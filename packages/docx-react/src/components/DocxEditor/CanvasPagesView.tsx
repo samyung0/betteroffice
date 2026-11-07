@@ -33,6 +33,7 @@ import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
+import { useTranslation } from '../../i18n';
 
 // Canvas is the sole visible renderer. The editing/input subtree stays mounted
 // independently so hidden input focus and IME state survive initial
@@ -56,6 +57,7 @@ export function CanvasPagedArea({
   interactive?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   return (
     <>
       {renderer.status === 'ready' && renderer.displayList ? (
@@ -73,7 +75,7 @@ export function CanvasPagedArea({
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
-          <ParseError message={renderer.error?.message ?? 'Canvas renderer failed.'} />
+          <ParseError message={renderer.error?.message ?? t('errors.canvasRendererFailed')} />
         </div>
       ) : (
         <div data-testid="canvas-renderer-loading" role="status" style={{ minHeight: 240 }}>

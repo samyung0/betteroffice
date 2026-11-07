@@ -55,8 +55,7 @@ for (const code of codes) {
       const localePath = join(root, 'packages', name, `${code}.json`);
       if (!existsSync(localePath)) continue;
       const translated = new Map(leafEntries(readJson(localePath)));
-      const englishPaths = ['en.json', ...(name === 'pptx-i18n' ? ['proposals/en.json', 'menus/en.json'] : [])];
-      const englishEntries = englishPaths.flatMap(path => leafEntries(readJson(join(root, 'packages', name, path))));
+      const englishEntries = leafEntries(readJson(join(root, 'packages', name, 'en.json')));
       for (const [key, source] of englishEntries) {
         if (typeof source !== 'string') continue;
         const allowed = accepted.get(normalize(source, 'en'));

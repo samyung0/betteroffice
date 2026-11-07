@@ -7,6 +7,7 @@ import {
   resolveAwarenessCursor,
   type AwarenessPeer,
 } from '@betteroffice/xlsx/collaboration';
+import { useTranslation } from '../i18n';
 
 const MAX_PRESENCE_CHIPS = 8;
 const MAX_REMOTE_SELECTIONS = 32;
@@ -116,6 +117,7 @@ export function PresenceStrip({
   sheetNames,
   activeSheet,
 }: PresenceStripProps) {
+  const { t } = useTranslation();
   if (peers.length === 0) return null;
   const visiblePeers = peers.slice(0, MAX_PRESENCE_CHIPS);
   const hiddenPeers = peers.length - visiblePeers.length;
@@ -123,7 +125,7 @@ export function PresenceStrip({
   return (
     <div
       data-testid="xlsx-presence-strip"
-      aria-label="Collaborators"
+      aria-label={t('presence.label')}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -137,7 +139,7 @@ export function PresenceStrip({
         const onOtherSheet = peer.cursor !== null && peerSheet !== activeSheet;
         const color = normalizeAwarenessColor(peer.user.color, peer.clientId);
         const sheetLabel =
-          peerSheet >= 0 ? sheetNames[peerSheet] : peer.cursor ? 'Unavailable sheet' : undefined;
+          peerSheet >= 0 ? sheetNames[peerSheet] : peer.cursor ? t('presence.unavailableSheet') : undefined;
         const title =
           onOtherSheet || peerSheet < 0
             ? `${peer.user.name} — ${sheetLabel}`
@@ -172,8 +174,8 @@ export function PresenceStrip({
       {hiddenPeers > 0 && (
         <span
           data-testid="xlsx-presence-overflow"
-          title={`${hiddenPeers} more collaborators`}
-          aria-label={`${hiddenPeers} more collaborators`}
+          title={t('presence.moreCollaborators', { count: hiddenPeers })}
+          aria-label={t('presence.moreCollaborators', { count: hiddenPeers })}
           style={{
             display: 'inline-grid',
             placeItems: 'center',

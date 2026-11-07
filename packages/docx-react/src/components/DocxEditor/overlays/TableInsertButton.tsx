@@ -9,6 +9,7 @@
 
 import React from 'react';
 import { DrawnIcon } from '../../ui/Icons';
+import { useTranslation } from '../../../i18n';
 
 export interface TableInsertButtonProps {
   type: 'row' | 'column';
@@ -27,7 +28,8 @@ export function TableInsertButton({
   onMouseEnter,
   onMouseLeave,
 }: TableInsertButtonProps) {
-  const label = type === 'row' ? 'Insert row below' : 'Insert column to the right';
+  const { t } = useTranslation();
+  const label = type === 'row' ? t('table.insertRowBelow') : t('table.insertColumnToTheRight');
   return (
     <button
       type="button"

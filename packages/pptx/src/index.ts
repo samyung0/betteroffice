@@ -1,5 +1,7 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { decodePresentationImage, presentationImageBlob } from './render/image';
+/** @internal */
+export { metafileImageBytes } from './render/image';
 export type { PresentationImageDecodeOptions } from './render/image';
 export { installEmbeddedFonts, removeFontFaces } from './render/fonts';
 export type { EmbeddedFontSource } from './render/fonts';

@@ -1,55 +1,56 @@
 import { useEffect, useRef, useState } from 'react';
+import type { TranslationKey } from '@betteroffice/xlsx-i18n';
 import { useTranslation } from '../../i18n';
 import { ToolbarIcon } from './ToolbarIcon';
 import { ToolbarDropdown, menuColors, menuFontFamily } from './ToolbarPrimitives';
 
 export interface PaletteColor {
-  name: string;
+  nameKey: TranslationKey;
   value: string;
 }
 
 /** Eight columns: neutrals, then dark, strong, soft and pale hues. */
 export const PALETTE: readonly PaletteColor[] = [
-  { name: 'Black', value: '#000000' },
-  { name: 'Charcoal', value: '#434343' },
-  { name: 'Dark gray', value: '#666666' },
-  { name: 'Gray', value: '#999999' },
-  { name: 'Silver', value: '#b7b7b7' },
-  { name: 'Light gray', value: '#cccccc' },
-  { name: 'Cloud', value: '#eeeeee' },
-  { name: 'White', value: '#ffffff' },
-  { name: 'Dark red', value: '#991b1b' },
-  { name: 'Dark orange', value: '#9a3412' },
-  { name: 'Dark yellow', value: '#a16207' },
-  { name: 'Dark green', value: '#3f6212' },
-  { name: 'Dark teal', value: '#0f766e' },
-  { name: 'Dark blue', value: '#1d4ed8' },
-  { name: 'Dark purple', value: '#6d28d9' },
-  { name: 'Dark pink', value: '#9d174d' },
-  { name: 'Red', value: '#dc2626' },
-  { name: 'Orange', value: '#ea580c' },
-  { name: 'Yellow', value: '#ca8a04' },
-  { name: 'Green', value: '#65a30d' },
-  { name: 'Teal', value: '#0d9488' },
-  { name: 'Blue', value: '#2563eb' },
-  { name: 'Purple', value: '#7c3aed' },
-  { name: 'Pink', value: '#db2777' },
-  { name: 'Soft red', value: '#fca5a5' },
-  { name: 'Soft orange', value: '#fdba74' },
-  { name: 'Soft yellow', value: '#fde047' },
-  { name: 'Soft green', value: '#bef264' },
-  { name: 'Soft teal', value: '#5eead4' },
-  { name: 'Soft blue', value: '#93c5fd' },
-  { name: 'Soft purple', value: '#c4b5fd' },
-  { name: 'Soft pink', value: '#f9a8d4' },
-  { name: 'Pale red', value: '#fee2e2' },
-  { name: 'Pale orange', value: '#ffedd5' },
-  { name: 'Pale yellow', value: '#fef9c3' },
-  { name: 'Pale green', value: '#ecfccb' },
-  { name: 'Pale teal', value: '#ccfbf1' },
-  { name: 'Pale blue', value: '#dbeafe' },
-  { name: 'Pale purple', value: '#ede9fe' },
-  { name: 'Pale pink', value: '#fce7f3' },
+  { nameKey: 'toolbar.palette.colors.black', value: '#000000' },
+  { nameKey: 'toolbar.palette.colors.charcoal', value: '#434343' },
+  { nameKey: 'toolbar.palette.colors.darkGray', value: '#666666' },
+  { nameKey: 'toolbar.palette.colors.gray', value: '#999999' },
+  { nameKey: 'toolbar.palette.colors.silver', value: '#b7b7b7' },
+  { nameKey: 'toolbar.palette.colors.lightGray', value: '#cccccc' },
+  { nameKey: 'toolbar.palette.colors.cloud', value: '#eeeeee' },
+  { nameKey: 'toolbar.palette.colors.white', value: '#ffffff' },
+  { nameKey: 'toolbar.palette.colors.darkRed', value: '#991b1b' },
+  { nameKey: 'toolbar.palette.colors.darkOrange', value: '#9a3412' },
+  { nameKey: 'toolbar.palette.colors.darkYellow', value: '#a16207' },
+  { nameKey: 'toolbar.palette.colors.darkGreen', value: '#3f6212' },
+  { nameKey: 'toolbar.palette.colors.darkTeal', value: '#0f766e' },
+  { nameKey: 'toolbar.palette.colors.darkBlue', value: '#1d4ed8' },
+  { nameKey: 'toolbar.palette.colors.darkPurple', value: '#6d28d9' },
+  { nameKey: 'toolbar.palette.colors.darkPink', value: '#9d174d' },
+  { nameKey: 'toolbar.palette.colors.red', value: '#dc2626' },
+  { nameKey: 'toolbar.palette.colors.orange', value: '#ea580c' },
+  { nameKey: 'toolbar.palette.colors.yellow', value: '#ca8a04' },
+  { nameKey: 'toolbar.palette.colors.green', value: '#65a30d' },
+  { nameKey: 'toolbar.palette.colors.teal', value: '#0d9488' },
+  { nameKey: 'toolbar.palette.colors.blue', value: '#2563eb' },
+  { nameKey: 'toolbar.palette.colors.purple', value: '#7c3aed' },
+  { nameKey: 'toolbar.palette.colors.pink', value: '#db2777' },
+  { nameKey: 'toolbar.palette.colors.softRed', value: '#fca5a5' },
+  { nameKey: 'toolbar.palette.colors.softOrange', value: '#fdba74' },
+  { nameKey: 'toolbar.palette.colors.softYellow', value: '#fde047' },
+  { nameKey: 'toolbar.palette.colors.softGreen', value: '#bef264' },
+  { nameKey: 'toolbar.palette.colors.softTeal', value: '#5eead4' },
+  { nameKey: 'toolbar.palette.colors.softBlue', value: '#93c5fd' },
+  { nameKey: 'toolbar.palette.colors.softPurple', value: '#c4b5fd' },
+  { nameKey: 'toolbar.palette.colors.softPink', value: '#f9a8d4' },
+  { nameKey: 'toolbar.palette.colors.paleRed', value: '#fee2e2' },
+  { nameKey: 'toolbar.palette.colors.paleOrange', value: '#ffedd5' },
+  { nameKey: 'toolbar.palette.colors.paleYellow', value: '#fef9c3' },
+  { nameKey: 'toolbar.palette.colors.paleGreen', value: '#ecfccb' },
+  { nameKey: 'toolbar.palette.colors.paleTeal', value: '#ccfbf1' },
+  { nameKey: 'toolbar.palette.colors.paleBlue', value: '#dbeafe' },
+  { nameKey: 'toolbar.palette.colors.palePurple', value: '#ede9fe' },
+  { nameKey: 'toolbar.palette.colors.palePink', value: '#fce7f3' },
 ];
 
 export interface ColorPickerProps {
@@ -209,14 +210,15 @@ export function ColorPalette({
       >
         {PALETTE.map((color) => {
           const selected = current === color.value;
+          const name = t(color.nameKey);
           return (
             <button
               key={color.value}
               type="button"
               role="gridcell"
-              aria-label={color.name}
+              aria-label={name}
               aria-selected={selected}
-              title={`${color.name} (${color.value})`}
+              title={`${name} (${color.value})`}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => onPick(color.value)}
               style={{

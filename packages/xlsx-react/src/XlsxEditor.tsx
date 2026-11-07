@@ -8,6 +8,7 @@
  */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   activeCell,
   buildA11yGrid,
@@ -73,7 +74,7 @@ import {
   XLSX_MAX_COLUMNS,
   XLSX_MAX_ROWS,
 } from '@betteroffice/xlsx/collaboration';
-import type { Translations } from '@betteroffice/xlsx-i18n';
+import type { TranslationKey, Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { EditorToolbar } from './components/EditorToolbar';
 import type {
@@ -361,6 +362,13 @@ function cellTextStyle(formatting: SelectionFormatting | null): CellTextStyle {
 // the engine's cell text limit (Excel's): a longer draft may be refused.
 const MAX_CELL_TEXT_CHARS = 32_767;
 
+// the line under the formula bar for each refused edit.
+const REFUSAL_MESSAGES: Record<'formula' | 'cell-text' | 'protected', TranslationKey> = {
+  formula: 'editor.formulaRefused',
+  'cell-text': 'editor.cellTextTooLong',
+  protected: 'editor.sheetProtected',
+};
+
 // a draft the engine may refuse, a formula or text past the limit, closes only
 // once the engine took it (UTF-16 length bounds the engine's character count).
 function mayBeRefused(value: string): boolean {
@@ -583,6 +591,18 @@ function deriveLimits(
   const usedCols = (used?.end.col ?? 0) + 1;
   const rowsPerPage = Math.max(1, Math.floor(viewportHeight / rowH));
   return { rows: XLSX_MAX_ROWS, cols: XLSX_MAX_COLUMNS, usedRows, usedCols, rowsPerPage };
+}
+
+// `range` in A1, as the engine takes ranges.
+function rangeA1(range: CellRange): string {
+  return `${cellAddress(range.top, range.left)}:${cellAddress(range.bottom, range.right)}`;
+}
+
+// a clear, paste or cut over a locked cell of a protected sheet, refused whole (Q701).
+class ProtectedCellsError extends Error {
+  constructor() {
+    super('the range holds a locked cell of a protected sheet');
+  }
 }
 
 // what clear and cut act on: the part of `range` inside the sheet's used
@@ -917,6 +937,10 @@ function XlsxEditorContent({
   const jumpRef = useRef<Promise<void> | null>(null);
   const queuedKeysRef = useRef<KeyInput[]>([]);
   const [jumped, setJumped] = useState(0);
+  // the last press on the grid before its workbook's first frame, relative to
+  // the scroll container: it selects its cell once that frame is painted, and
+  // the keys held meanwhile act there (Q689).
+  const heldPressRef = useRef<{ x: number; y: number } | null>(null);
   const flushEditorRef = useRef<() => Promise<void>>(async () => {});
   const [editing, setEditing] = useState<EditState | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -925,7 +949,7 @@ function XlsxEditorContent({
   // what the engine refused and the selection it was refused on: shown under
   // the formula bar until the draft changes or the selection moves.
   const [refusal, setRefusal] = useState<{
-    kind: 'formula' | 'cell-text';
+    kind: 'formula' | 'cell-text' | 'protected';
     selection: Selection | null;
   } | null>(null);
   // a double click while a commit awaits the engine opens the editor once it landed.
@@ -1042,9 +1066,29 @@ function XlsxEditorContent({
       : undefined;
   };
 
+  // whether a cell refuses edits, a locked cell on a protected sheet (Q698):
+  // `undefined` while the frame on screen does not say.
+  const lockedHere = useCallback(
+    (row: number, col: number): boolean | undefined => {
+      if (!shownHere) return undefined;
+      if (!shownHere.sheetInfo.protected) return false;
+      const shownSelection = shownHere.view.selection;
+      const active =
+        shownSelection && sameCell(activeCell(shownSelection), { row, col }) ? shownHere.active : null;
+      return shownHere.cells[`${row}:${col}`]?.locked ?? active?.locked;
+    },
+    [shownHere]
+  );
+  // whether the sheet on screen may refuse a clear, paste or cut (Q701):
+  // false once its frame says it is unprotected.
+  const mayBeProtected = useCallback(
+    () => !shownHere || Boolean(shownHere.sheetInfo.protected),
+    [shownHere]
+  );
+
   // the name box and formula bar's cell, the active one: its address at once,
   // its text from the frame (or the input just committed to it) once the frame has it.
-  const focusedCell: CellEdit | null = useMemo(() => {
+  const focusedCell: Omit<CellEdit, 'locked'> | null = useMemo(() => {
     if (!selection || !sheetInfo) return null;
     const { row, col } = activeCell(selection);
     const a1 = cellAddress(row, col);
@@ -1075,7 +1119,9 @@ function XlsxEditorContent({
           ? 'formula'
           : e instanceof CellTextTooLongError
             ? 'cell-text'
-            : null;
+            : e instanceof ProtectedCellsError
+              ? 'protected'
+              : null;
       if (kind) setRefusal({ kind, selection: selectionRef.current });
       else if (e instanceof EditTooLargeError && onNotice) onNotice('edit-too-large');
       else reportError(e);
@@ -1570,6 +1616,23 @@ function XlsxEditorContent({
     );
     if (firstPaintPendingRef.current) {
       firstPaintPendingRef.current = false;
+      const press = heldPressRef.current;
+      heldPressRef.current = null;
+      const grid = shown.displayList.grid;
+      if (press && grid) {
+        const area = scroll.getBoundingClientRect();
+        const rect = canvas.getBoundingClientRect();
+        const addr = cellAtPoint(
+          grid,
+          (area.left + press.x - rect.left) / view.zoom,
+          (area.top + press.y - rect.top) / view.zoom
+        );
+        if (addr) {
+          selectionRef.current = selectionAt(addr);
+          setSelection(selectionRef.current);
+        }
+      }
+      if (queuedKeysRef.current.length > 0) setJumped((n) => n + 1);
       onFirstPaintRef.current?.();
     }
   }, [shown]);
@@ -1890,6 +1953,46 @@ function XlsxEditorContent({
       if (!handle || !selection || readOnly) return;
       const { row, col } = activeCell(selection);
       const sheetId = activeSheetId;
+      // a locked cell on a protected sheet refuses the edit before it opens,
+      // as Excel and Google Sheets do (Q698).
+      const locked = lockedHere(row, col);
+      if (locked) {
+        setRefusal({ kind: 'protected', selection });
+        return;
+      }
+      if (locked === undefined) {
+        // the frame on screen does not say: the worker reads the cell (and,
+        // without a frame of this sheet, whether it is protected; `null` when
+        // the worker is on another sheet by now, which drops the edit). Keys
+        // pressed meanwhile wait behind it, as behind a jump.
+        const sheetProtected: Promise<boolean | null> = shownHere
+          ? Promise.resolve(shownHere.sheetInfo.protected)
+          : handle
+              .sheetInfo()
+              .then((info) => (info.sheetIds[info.activeSheet] === sheetId ? info.protected : null));
+        const done = Promise.all([handle.onSheet(sheetId, 'cell', activeSheet, row, col), sheetProtected])
+          .then(
+            ([cell, guarded]) => {
+              const current = selectionRef.current;
+              if (handleRef.current !== handle || readOnlyRef.current || guarded === null) return;
+              if (!current || !sameCell(activeCell(current), { row, col })) return;
+              if (guarded && cell.locked) {
+                setRefusal({ kind: 'protected', selection: current });
+                return;
+              }
+              const value = seed ?? cell.input;
+              setEditing((open) => open ?? { row, col, value, sheetId, arrowsPoint: seed !== undefined });
+              requestReveal();
+            },
+            () => undefined
+          )
+          .finally(() => {
+            if (jumpRef.current === done) jumpRef.current = null;
+            setJumped((n) => n + 1);
+          });
+        jumpRef.current = done;
+        return;
+      }
       const known = seed ?? knownInput(row, col);
       if (known !== undefined) {
         setEditing({ row, col, value: known, sheetId, arrowsPoint: seed !== undefined });
@@ -1912,7 +2015,7 @@ function XlsxEditorContent({
           requestReveal();
         });
     },
-    [selection, activeSheet, activeSheetId, readOnly, requestReveal, knownInput]
+    [selection, activeSheet, activeSheetId, readOnly, requestReveal, knownInput, lockedHere, shownHere]
   );
 
   // commit the open editor, optionally stepping (or with `extend`, extending)
@@ -2026,14 +2129,32 @@ function XlsxEditorContent({
 
   // the engine clears only the cells of `target` inside the used range that
   // hold content, so a sparse used range costs its stored cells.
+  // A locked cell anywhere in the selection of a protected sheet refuses the
+  // whole clear (Q701): the engine is asked first, unless the frame on screen
+  // says the sheet is unprotected, and keys wait behind its answer.
   const clearRange = useCallback(
     (target: Selection) => {
-      const r = inUsedRange(normalizeRange(target), usedRange());
-      if (!r) return;
-      const range = `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
-      onSheet(activeSheetId, 'clearContents', activeSheet, range).then(applyResult, reportEditError);
+      const selected = normalizeRange(target);
+      const r = inUsedRange(selected, usedRange());
+      const clear = () =>
+        r && onSheet(activeSheetId, 'clearContents', activeSheet, rangeA1(r)).then(applyResult);
+      if (!mayBeProtected()) {
+        clear()?.catch(reportEditError);
+        return;
+      }
+      const done = onSheet(activeSheetId, 'lockedInRanges', activeSheet, [rangeA1(selected)])
+        .then((locked) => {
+          if (locked) throw new ProtectedCellsError();
+          return clear();
+        })
+        .then(() => undefined, reportEditError)
+        .finally(() => {
+          if (jumpRef.current === done) jumpRef.current = null;
+          setJumped((n) => n + 1);
+        });
+      jumpRef.current = done;
     },
-    [activeSheet, activeSheetId, applyResult, onSheet, reportEditError, usedRange]
+    [activeSheet, activeSheetId, applyResult, onSheet, reportEditError, usedRange, mayBeProtected]
   );
 
   const clearCells = useCallback(() => {
@@ -2169,14 +2290,21 @@ function XlsxEditorContent({
     const sheetId = activeSheetId;
     const rangeOf = (selected: Selection | null) => {
       const r = selected && inUsedRange(normalizeRange(selected), usedRange());
-      return r && `${cellAddress(r.top, r.left)}:${cellAddress(r.bottom, r.right)}`;
+      return r && rangeA1(r);
     };
     let range = landing ? null : rangeOf(selection);
-    // a clear past the engine's update cap is refused before anything is copied.
+    const guarded = mayBeProtected();
+    // a clear past the engine's update cap, or over a locked cell of a
+    // protected sheet (Q701), is refused before anything is copied.
     const check = handle
       ? async () => {
-          if (landing) range = rangeOf(await landing);
+          const source = landing ? await landing : selection;
+          if (landing) range = rangeOf(source);
           if (range) await handle.inSheet(sheetId, 'checkClearContents', activeSheet, range);
+          if (!guarded || !source) return;
+          const sourceA1 = rangeA1(normalizeRange(source));
+          if (await handle.inSheet(sheetId, 'lockedInRanges', activeSheet, [sourceA1]))
+            throw new ProtectedCellsError();
         }
       : undefined;
     setCutReading(true);
@@ -2202,6 +2330,7 @@ function XlsxEditorContent({
     track,
     applyResult,
     reportEditError,
+    mayBeProtected,
   ]);
 
   const pasteSelection = useCallback(async (landing?: Promise<Selection | null>) => {
@@ -2224,10 +2353,30 @@ function XlsxEditorContent({
     const grid = fromTsv(text);
     if (grid.length === 0) return;
     const r = normalizeRange(target);
+    const width = grid.reduce((widest, rowArr) => Math.max(widest, rowArr.length), 1);
+    const written = {
+      top: r.top,
+      left: r.left,
+      bottom: r.top + grid.length - 1,
+      right: r.left + width - 1,
+    };
+    // a paste over a locked cell of a protected sheet is refused whole (Q701).
+    if (mayBeProtected()) {
+      let locked: boolean;
+      try {
+        locked = await onSheet(activeSheetId, 'lockedInRanges', activeSheet, [rangeA1(written)]);
+      } catch (e) {
+        reportEditError(e);
+        return;
+      }
+      if (readOnlyRef.current || handleRef.current !== handle) return;
+      if (locked) {
+        reportEditError(new ProtectedCellsError());
+        return;
+      }
+    }
     const edits: CellInputEdit[] = [];
-    let width = 1;
     grid.forEach((rowArr, dr) => {
-      width = Math.max(width, rowArr.length);
       rowArr.forEach((input, dc) =>
         edits.push({
           row: r.top + dr,
@@ -2241,10 +2390,19 @@ function XlsxEditorContent({
     });
     onSheet(activeSheetId, 'editCells', activeSheet, edits).then(applyResult, reportEditError);
     setSelection({
-      anchor: { row: r.top, col: r.left },
-      focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
+      anchor: { row: written.top, col: written.left },
+      focus: { row: written.bottom, col: written.right },
     });
-  }, [selection, activeSheet, activeSheetId, applyResult, onSheet, readOnly, reportEditError]);
+  }, [
+    selection,
+    activeSheet,
+    activeSheetId,
+    applyResult,
+    onSheet,
+    readOnly,
+    reportEditError,
+    mayBeProtected,
+  ]);
 
 
   const formatSelection = useCallback(
@@ -2621,7 +2779,9 @@ function XlsxEditorContent({
             : selectionKeyReducer(from, key, bounds, data, hidden, merges);
           if (action.type !== 'move') return;
           selectionRef.current = action.selection;
-          setSelection(action.selection);
+          // drawn before the jump settles: a key pressed right after acts
+          // from where it landed, not from the selection it left.
+          flushSync(() => setSelection(action.selection));
           requestReveal();
         })
         .finally(() => {
@@ -2681,6 +2841,26 @@ function XlsxEditorContent({
   // grid-level keyboard: chrome shortcuts first, then the pure selection reducer.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // before the workbook's first frame the grid keys wait in the jump queue
+      // and act once it is painted, as DOCX holds typing before its geometry
+      // (Q689); the chrome shortcuts have nothing to act on yet.
+      if (file && !sheetInfo) {
+        const held: KeyInput = {
+          key: e.key,
+          shiftKey: e.shiftKey,
+          metaKey: e.metaKey,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+        };
+        if (
+          e.key === 'Escape' ||
+          selectionKeyReducer(selectionAt({ row: 0, col: 0 }), held, limits()).type !== 'none'
+        ) {
+          queuedKeysRef.current.push(held);
+          e.preventDefault();
+        }
+        return;
+      }
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing) return;
       // an open formula-bar draft (a refused one stays open after its blur)
@@ -2779,6 +2959,7 @@ function XlsxEditorContent({
       if (gridKey(key)) e.preventDefault();
     },
     [
+      file,
       selection,
       sheetInfo,
       editing,
@@ -2821,6 +3002,15 @@ function XlsxEditorContent({
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      // before the workbook's first frame there is no cell under the press:
+      // the last one is kept and selects its cell on that frame (Q689).
+      if (file && !sheetInfo) {
+        const area = scrollRef.current?.getBoundingClientRect();
+        if (e.button === 0 && area) {
+          heldPressRef.current = { x: e.clientX - area.left, y: e.clientY - area.top };
+        }
+        return;
+      }
       // the editor input is a dom overlay above the canvas, so a press inside
       // it is the editor's own — it places a caret, and must not commit, reach
       // a chart painted under it, or move the grid.
@@ -2920,6 +3110,8 @@ function XlsxEditorContent({
       focusContainer();
     },
     [
+      file,
+      sheetInfo,
       editing,
       formulaDraft,
       selection,
@@ -3479,6 +3671,7 @@ function XlsxEditorContent({
 
   return (
     <div
+      dir="ltr"
       className={className}
       role="application"
       aria-label={t('editor.appLabel')}
@@ -3602,6 +3795,14 @@ function XlsxEditorContent({
                 // Read-only, not disabled: its text still selects and copies.
                 readOnly={readOnly || committing}
                 onChange={(e) => {
+                  // a locked cell on a protected sheet takes no draft (Q698).
+                  if (formulaDraft === null && selection) {
+                    const { row, col } = activeCell(selection);
+                    if (lockedHere(row, col)) {
+                      setRefusal({ kind: 'protected', selection });
+                      return;
+                    }
+                  }
                   onPendingChange?.(true);
                   if (!formulaPinRef.current && selection)
                     formulaPinRef.current = { sheetId: activeSheetId, ...activeCell(selection) };
@@ -3681,7 +3882,7 @@ function XlsxEditorContent({
             pointerEvents: 'none',
           }}
         >
-          {t(refusal.kind === 'formula' ? 'editor.formulaRefused' : 'editor.cellTextTooLong')}
+          {t(REFUSAL_MESSAGES[refusal.kind])}
         </div>
       )}
       {!readOnly && features.proposals && showProposals && proposalsPanelOpen && (

@@ -57,6 +57,7 @@ const SHEET_FIRST = new Set<WorkbookMethod>([
   'editCells',
   'clearContents',
   'checkClearContents',
+  'lockedInRanges',
   'moveChart',
   'patchRangeStyle',
   'setNumberFormat',

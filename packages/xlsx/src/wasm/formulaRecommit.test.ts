@@ -3,7 +3,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 
-import type { WorkbookHandle, XlsxEditStep, XlsxRangeTarget } from '../index';
 import { initWasm, openWorkbook } from './loader';
 
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
@@ -32,23 +31,16 @@ async function book(calcPr = ''): Promise<Uint8Array> {
   return zip.generateAsync({ type: 'uint8array' });
 }
 
-function target(a1: string): XlsxRangeTarget {
-  return { sheetId: 'sheet:0', range: { kind: 'a1', a1 } };
-}
-
-function read(handle: WorkbookHandle, a1: string) {
-  const result = handle.readCells({ ranges: [target(a1)] });
-  if (!result.ok) throw new Error(result.failure.message);
-  return result.ranges[0].cells[0][0];
-}
-
-function apply(handle: WorkbookHandle, steps: XlsxEditStep[]): void {
-  const result = handle.applyEdits({ expectVersion: handle.version(), steps });
-  if (!result.ok) throw new Error(result.failure.message);
+async function savedCaches(bytes: Uint8Array): Promise<Record<string, string | null>> {
+  const sheet = await (await JSZip.loadAsync(bytes)).file('xl/worksheets/sheet1.xml')!.async('string');
+  return Object.fromEntries([...sheet.matchAll(/<c r="([A-Z]+\d+)"[^>]*>(.*?)<\/c>/g)]
+    .map((cell) => [cell[1], /<v>(.*?)<\/v>/.exec(cell[2])?.[1] ?? null]));
 }
 
 const FORMULAS = CELLS.filter((cell) => cell.formula !== null && !cell.style);
 
+// Capy's handle reads and edits through cell() and editCells(); upstream's
+// readCells/applyEdits agent API stays deleted (2026-10-17).
 describe('re-committing shown formulas', () => {
   beforeAll(() => initWasm(new Uint8Array(readFileSync(WASM))));
 
@@ -56,17 +48,11 @@ describe('re-committing shown formulas', () => {
     const source = await book();
     const handle = openWorkbook(source);
     try {
-      const version = handle.version();
       for (const cell of CELLS) {
-        expect(handle.cell(0, 0, cell.col).input).toBe(cell.shown);
-        expect(read(handle, cell.a1).formula ?? null).toBe(cell.formula);
+        expect(handle.cell(0, 0, cell.col)).toMatchObject({ input: cell.shown, isFormula: cell.formula !== null && !cell.style });
       }
       handle.editCells(0, FORMULAS.map((cell) => ({ row: 0, col: cell.col, input: handle.cell(0, 0, cell.col).input })));
-      apply(handle, FORMULAS.map((cell): XlsxEditStep => ({ op: 'setCellInputs', target: target(cell.a1), inputs: [[cell.shown]] })));
-      apply(handle, FORMULAS.map((cell): XlsxEditStep => ({ op: 'setFormulas', target: target(cell.a1), formulas: [[read(handle, cell.a1).formula ?? '']] })));
-      expect(handle.version()).toBe(version);
       expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));
-      expect(read(handle, 'B1').value).toEqual({ kind: 'number', value: 5 });
     } finally {
       handle.dispose();
     }
@@ -75,27 +61,19 @@ describe('re-committing shown formulas', () => {
   it('takes a typed external reference as a formula and keeps cached external values', async () => {
     const handle = openWorkbook(await book('<calcPr fullCalcOnLoad="1"/>'));
     try {
-      expect(read(handle, 'B1').value).toEqual({ kind: 'number', value: 5 });
-      expect(read(handle, 'D1').value).toEqual({ kind: 'number', value: 42 });
-      apply(handle, [
-        { op: 'setCellInputs', target: target('A2'), inputs: [['=[1]Sheet1!B2*2']] },
-        { op: 'setFormulas', target: target('B2'), formulas: [['[2]!Rate']] },
-      ]);
-      expect(read(handle, 'A2').formula).toBe('[1]Sheet1!B2*2');
-      expect(read(handle, 'B2').formula).toBe('[2]!Rate');
+      handle.editCells(0, [{ row: 1, col: 0, input: '=[1]Sheet1!B2*2' }]);
+      expect(handle.cell(0, 1, 0)).toMatchObject({ input: '=[1]Sheet1!B2*2', isFormula: true });
+      expect(await savedCaches(handle.save())).toMatchObject({ B1: '5', D1: '42' });
     } finally {
       handle.dispose();
     }
   });
 
-  it('enters a formula typed into a Text-formatted cell as text, as Excel does, but sets one through setFormulas', async () => {
+  it('enters a formula typed into a Text-formatted cell as text, as Excel does', async () => {
     const handle = openWorkbook(await book());
     try {
       handle.editCells(0, [{ row: 0, col: 4, input: handle.cell(0, 0, 4).input }]);
-      expect(read(handle, 'E1')).toMatchObject({ value: { kind: 'text', value: '=A1*2' } });
-      expect(read(handle, 'E1').formula ?? null).toBeNull();
-      apply(handle, [{ op: 'setFormulas', target: target('E1'), formulas: [['A1*3']] }]);
-      expect(read(handle, 'E1')).toMatchObject({ formula: 'A1*3', value: { kind: 'number', value: 63 } });
+      expect(handle.cell(0, 0, 4).isFormula).toBe(false);
     } finally {
       handle.dispose();
     }

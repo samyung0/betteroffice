@@ -229,7 +229,8 @@
     "canvasStale": "Targets changed. Open Review details to inspect the updated preview before applying.",
     "previousPosition": "Previous",
     "proposedPosition": "Proposed",
-    "loadingDiff": "Loading changes…"
+    "loadingDiff": "Loading changes…",
+    "geometryValues": "{before} → {after} pt"
   },
   "presence": {
     "label": "Collaborators",
