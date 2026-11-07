@@ -385,6 +385,12 @@ export interface WorkbookHandle extends CollaborationReplica {
    * from the count of its filled cells; changes nothing.
    */
   checkClearContents(sheet: number, range: string): void;
+  /**
+   * whether `ranges` (A1, as `clearContents` takes them) hold a locked cell of
+   * a protected sheet: the editor refuses a clear, paste or cut over one (Q701).
+   * It answers from formats, so whole rows and columns are cheap.
+   */
+  lockedInRanges(sheet: number, ranges: string[]): boolean;
   /** raw op-list escape hatch for structural ops (insert/delete rows, merges…). */
   applyOps(ops: unknown[]): EditResult;
   /** `applyOps` with the facade's stage timings attached. */
@@ -739,6 +745,12 @@ export function openWorkbook(
     },
     checkClearContents(sheet: number, range: string): void {
       wasmCall(() => doc.checkClearContentsJson(JSON.stringify({ sheet, range })));
+    },
+    lockedInRanges(sheet: number, ranges: string[]): boolean {
+      // S5: the regenerated xlsx_wasm.d.ts declares lockedInRangesJson (XLSX track, Q701).
+      const locked = (doc as { lockedInRangesJson?: (args: string) => string }).lockedInRangesJson;
+      if (typeof locked !== 'function') throw new Error('this xlsx wasm has no lockedInRangesJson');
+      return parseJson(() => locked.call(doc, JSON.stringify({ sheet, ranges })));
     },
     applyOps(ops: unknown[]): EditResult {
       return parseJson(() => doc.applyOpsJson(JSON.stringify({ ops })), true);

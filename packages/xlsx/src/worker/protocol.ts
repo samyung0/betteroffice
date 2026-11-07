@@ -28,6 +28,7 @@ export const WORKBOOK_METHODS = [
   'editCells',
   'clearContents',
   'checkClearContents',
+  'lockedInRanges',
   'applyOps',
   'undo',
   'redo',

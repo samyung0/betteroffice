@@ -3687,6 +3687,64 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(0, 1)).toBe('q');
   });
 
+  // swaps the clipboard for `value` while `run` runs.
+  const withClipboard = async (value: Partial<Clipboard>, run: () => Promise<void>) => {
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value });
+    try {
+      await run();
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
+    }
+  };
+
+  // S5: these three need the xlsx-wasm with lockedInRangesJson and sheetInfo's
+  // `protected` (XLSX track, Q701); on capy-ci's wasm the clear, paste and cut
+  // go through.
+  it('refuses a clear over a locked cell of a protected sheet whole (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await view.click({ row: 0, col: 0 });
+    // A1:B1, B1 unlocked: the locked A1 refuses the whole clear.
+    await press(view.surface, 'ArrowRight', { shiftKey: true });
+    await press(view.surface, 'Delete');
+    expect(refusal(view)).toBe('This cell is on a protected sheet.');
+    expect([await view.input(0, 0), await view.input(0, 1)]).toEqual(['1', '2']);
+  });
+
+  it('refuses a paste over a locked cell of a protected sheet whole (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await withClipboard({ readText: async () => 'z' }, async () => {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'v', { ctrlKey: true });
+    });
+    expect(refusal(view)).toBe('This cell is on a protected sheet.');
+    expect(await view.input(0, 0)).toBe('1');
+  });
+
+  it('refuses a cut of a locked cell of a protected sheet, the clipboard untouched (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    const written: string[] = [];
+    await withClipboard({ write: writeInto(written) }, async () => {
+      await view.click({ row: 0, col: 0 });
+      await press(view.surface, 'x', { ctrlKey: true });
+    });
+    expect([refusal(view), written]).toEqual(['This cell is on a protected sheet.', []]);
+    expect(await view.input(0, 0)).toBe('1');
+  });
+
+  it('clears and pastes into an unlocked cell of a protected sheet (Q701)', async () => {
+    const view = await mountEditor(protectedSheet);
+    await view.click({ row: 0, col: 1 });
+    await press(view.surface, 'Delete');
+    expect(await view.input(0, 1)).toBe('');
+    await withClipboard({ readText: async () => 'z' }, async () => {
+      await press(view.surface, 'v', { ctrlKey: true });
+    });
+    expect(refusal(view)).toBe(null);
+    expect(await view.input(0, 1)).toBe('z');
+  });
+
   it('shows the refusal of text past 32,767 characters on the same line, translated', async () => {
     const view = await mountEditor(plain, undefined, undefined, { i18n: zhCN });
     await view.click({ row: 10, col: 1 });
