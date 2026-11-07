@@ -9,7 +9,7 @@ use betteroffice_xlsx::{
 use office_service::{
     CellStyle, Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format,
     InspectQuery, apply_commands, create, export, inspect, inspect_scoped, seed, sha256_hex,
-    starter,
+    starter, xlsx_pending_effects,
 };
 use serde_json::{Value, json};
 
@@ -872,6 +872,19 @@ fn agent_reads_show_saved_formulas_without_storage_prefixes() {
     }])
     .unwrap();
     assert_eq!(book.cells("Data", "C1"), ["C1==XLOOKUP(3,A1:A3,B1:B3)→30"]);
+    // The pending change an agent reads with the document shows it the same way (Q706).
+    let effects = xlsx_pending_effects(&book.base, book.checkpoint()).unwrap();
+    let c1 = effects
+        .iter()
+        .find(|effect| effect.label == "Data!C1")
+        .unwrap();
+    assert_eq!(
+        (c1.before.as_deref(), c1.after.as_deref()),
+        (
+            Some("=XLOOKUP(2,A1:A3,B1:B3)"),
+            Some("=XLOOKUP(3,A1:A3,B1:B3)")
+        )
+    );
 }
 
 #[test]

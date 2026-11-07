@@ -980,9 +980,37 @@ pub(crate) fn pending_effects(
         }
     };
     if let Some(effects) = reader.effects(checkpoint.state)? {
-        return Ok(effects);
+        return Ok(shown_formulas(effects, &reader.workbook));
     }
-    XlsxSession::open(base, Some(checkpoint.state))?.effects()
+    let session = XlsxSession::open(base, Some(checkpoint.state))?;
+    Ok(shown_formulas(session.effects()?, &session.workbook))
+}
+
+/// `effects` with each formula as people see it, without the storage prefixes
+/// (`_xlfn.`, `_xlws.`) the save writes: an agent reads them with the
+/// document (Q706, as [`cell_value`] for Q697). A cell's defined names are
+/// those of its sheet in `workbook`, named by the effect's `Sheet!A1` label.
+fn shown_formulas(mut effects: Vec<NetEffect>, workbook: &Workbook) -> Vec<NetEffect> {
+    let model = workbook.model();
+    let defined = DefinedFunctionNames::new(&model.defined_names);
+    for effect in &mut effects {
+        let sheet = effect
+            .label
+            .rsplit_once('!')
+            .and_then(|(name, _)| model.sheets.iter().position(|sheet| sheet.name == name));
+        let names = defined.visible_from(sheet.map(|index| SheetId(index as u32)));
+        for text in [&mut effect.before, &mut effect.after]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(formula) = text.strip_prefix('=')
+                && let std::borrow::Cow::Owned(shown) = display_formula(formula, names)
+            {
+                *text = format!("={shown}");
+            }
+        }
+    }
+    effects
 }
 
 pub(crate) fn check(base: &[u8], checkpoint: Checkpoint) -> Result<()> {
