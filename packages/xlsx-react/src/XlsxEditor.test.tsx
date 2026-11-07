@@ -2854,6 +2854,46 @@ describe('XlsxEditor host integration', () => {
     }
   });
 
+  it('marks the canvas settled when landed faces repaint the frame', async () => {
+    let faces = false;
+    const created: unknown[][] = [];
+    const painter = {
+      adopt: () => {},
+      paint: (_list: unknown, paint: () => void) => {
+        paint();
+        return faces;
+      },
+      dispose: () => {},
+    };
+    const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(
+      async () =>
+        ({
+          createDefaultFontPainter: (...args: unknown[]) => {
+            created.push(args);
+            return painter;
+          },
+        }) as unknown as Awaited<ReturnType<typeof defaultFontPainterModule.load>>
+    );
+    try {
+      let firstPaint = false;
+      const view = render(
+        <XlsxEditor file={plain.bytes.slice()} onFirstPaint={() => (firstPaint = true)} />
+      );
+      await waitFor(() => expect(firstPaint).toBe(true));
+      await waitFor(() => expect(created).toHaveLength(1));
+      await act(async () => {
+        fireEvent.scroll(view.getByTestId('xlsx-scroll'));
+      });
+      const canvas = () => view.container.querySelector('canvas')?.dataset.defaultFonts;
+      await waitFor(() => expect(canvas()).toBe('pending'));
+      faces = true;
+      act(() => (created[0][1] as () => void)());
+      expect(canvas()).toBe('settled');
+    } finally {
+      load.mockRestore();
+    }
+  });
+
   it('defaultFonts false paints with the browser fonts and loads no painter', async () => {
     const load = spyOn(defaultFontPainterModule, 'load');
     try {

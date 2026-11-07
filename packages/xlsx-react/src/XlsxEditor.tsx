@@ -882,7 +882,12 @@ function XlsxEditorContent({
       const painted = paintedRef.current;
       const ctx = painted?.canvas.getContext('2d');
       if (!painted || !ctx || painted.canvas !== canvasRef.current) return;
-      paintDisplayList(ctx, painted.frame, (window.devicePixelRatio || 1) * painted.zoom);
+      // Through the painter, as a shown frame is, so the canvas says when its faces settled.
+      painted.canvas.dataset.defaultFonts = paintWithDefaultFonts(painted.frame, () =>
+        paintDisplayList(ctx, painted.frame, (window.devicePixelRatio || 1) * painted.zoom)
+      )
+        ? 'settled'
+        : 'pending';
     },
     () => {
       if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled';
