@@ -43,16 +43,17 @@ function memoryLimits(bytes: Uint8Array): Limits {
   throw new Error('module defines no memory');
 }
 
+// Capy's module set: the editors that link the font decoder carry their glue.
 const ENGINES = [
   { name: 'docx edit', wasm: 'packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm', glue: 'packages/docx/src/wasm/generated/edit/docx_edit.js' },
+  { name: 'docx layout', wasm: 'packages/docx/src/wasm/generated/layout/docx_layout_bg.wasm' },
   { name: 'docx opc', wasm: 'packages/docx/src/wasm/generated/opc/ooxml_opc_bg.wasm' },
   { name: 'docx parse', wasm: 'packages/docx/src/wasm/generated/parse/docx_parse_bg.wasm' },
-  { name: 'docx preflight', wasm: 'packages/docx/src/wasm/generated/preflight/docx_preflight_bg.wasm' },
-  { name: 'docx query', wasm: 'packages/docx/src/wasm/generated/query/docx_query_bg.wasm' },
+  { name: 'docx viewer', wasm: 'packages/docx/src/wasm/generated/viewer/docx_view_wasm_bg.wasm' },
   { name: 'pptx', wasm: 'packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm', glue: 'packages/pptx/src/wasm/generated/pptx_wasm.js' },
-  { name: 'pptx editor core', wasm: 'packages/pptx/src/wasm/generated/pptx_wasm_lean_bg.wasm' },
+  { name: 'pptx viewer', wasm: 'packages/pptx/src/wasm/generated/viewer/pptx_view_wasm_bg.wasm' },
   { name: 'xlsx', wasm: 'packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm', glue: 'packages/xlsx/src/wasm/generated/xlsx_wasm.js' },
-  { name: 'xlsx lean', wasm: 'packages/xlsx/src/wasm/generated/xlsx_wasm_lean_bg.wasm' },
+  { name: 'xlsx viewer', wasm: 'packages/xlsx/src/wasm/generated/viewer/xlsx_view_wasm_bg.wasm' },
   { name: 'vsdx', wasm: 'packages/vsdx/src/wasm/generated/vsdx_wasm_bg.wasm', glue: 'packages/vsdx/src/wasm/generated/vsdx_wasm.js' },
 ];
 const DECODER = 'packages/fonts/src/decoder/fontpack.wasm';

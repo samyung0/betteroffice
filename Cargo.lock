@@ -321,17 +321,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "betteroffice-ooxml-font-preflight"
-version = "0.5.1"
-dependencies = [
- "betteroffice-ooxml-text",
- "miniz_oxide",
- "quick-xml",
- "serde_json",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "betteroffice-ooxml-raster"
 version = "0.5.1"
 dependencies = [
