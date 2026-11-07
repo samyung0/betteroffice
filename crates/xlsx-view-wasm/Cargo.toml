@@ -19,7 +19,7 @@ xlsx-model.workspace = true
 xlsx-parse.workspace = true
 xlsx-render.workspace = true
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
