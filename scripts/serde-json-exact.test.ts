@@ -4,30 +4,23 @@ import { resolve } from 'node:path';
 const ROOT = resolve(import.meta.dir, '..');
 const WASM = 'wasm32-unknown-unknown';
 
-const ARTIFACTS: Array<[name: string, dir: string, target: string | undefined, args: string[]]> = [
-  ['docx edit', 'crates/docx-edit', WASM, ['--features', 'wasm,tiff,metafile,heap-stats']],
-  ['docx parse', 'crates/docx-parse', WASM, ['--features', 'wasm-layout,tiff,metafile']],
-  ['docx preflight', 'crates/ooxml-font-preflight', WASM, ['--features', 'wasm']],
-  ['docx query', 'crates/docx-layout', WASM, ['--features', 'wasm-query']],
-  ['pptx', 'crates/pptx-wasm', WASM, []],
-  ['pptx lean', 'crates/pptx-wasm', WASM, ['--no-default-features']],
-  ['xlsx', 'crates/xlsx-wasm', WASM, []],
-  ['xlsx lean', 'crates/xlsx-wasm', WASM, ['--no-default-features']],
-  ['xlsx raster', 'crates/xlsx-raster-wasm', WASM, []],
-  ['vsdx', 'crates/vsdx-wasm', WASM, []],
-  ['docx native', 'bindings/docx-native', undefined, []],
-  ['pptx native', 'bindings/pptx-native', undefined, []],
-  ['xlsx native', 'bindings/xlsx-native', undefined, []],
-  ['docx python', 'bindings/python-docx', undefined, []],
-  ['pptx python', 'bindings/python-pptx', undefined, []],
-  ['vsdx python', 'bindings/python-vsdx', undefined, []],
-  ['xlsx python', 'bindings/python-xlsx', undefined, []],
+// Capy's wasm artifacts that read JSON, with the features their build scripts pass.
+const ARTIFACTS: Array<[name: string, dir: string, args: string[]]> = [
+  ['docx layout', 'crates/docx-layout', []],
+  ['docx view', 'crates/docx-view-wasm', []],
+  ['docx edit', 'crates/docx-edit', ['--features', 'wasm,tiff,metafile']],
+  ['docx parse', 'crates/docx-parse', ['--features', 'wasm,tiff,metafile']],
+  ['pptx view', 'crates/pptx-view-wasm', []],
+  ['pptx', 'crates/pptx-wasm', []],
+  ['xlsx view', 'crates/xlsx-view-wasm', []],
+  ['xlsx', 'crates/xlsx-wasm', []],
+  ['vsdx', 'crates/vsdx-wasm', []],
 ];
 
-for (const [name, dir, target, args] of ARTIFACTS) {
+for (const [name, dir, args] of ARTIFACTS) {
   test(`${name} reads JSON numbers back exactly`, () => {
     const run = Bun.spawnSync([
-      'cargo', 'tree', '--manifest-path', `${dir}/Cargo.toml`, ...(target ? ['--target', target] : []),
+      'cargo', 'tree', '--manifest-path', `${dir}/Cargo.toml`, '--target', WASM,
       '-e', 'normal', '--prefix', 'none', '-f', '{p} [{f}]', ...args,
     ], { cwd: ROOT });
     expect(run.exitCode, run.stderr.toString()).toBe(0);
