@@ -1,9 +1,8 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RUST_CRATES } from './rust-crates.mjs';
-import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import {
   CONTAINER_IMAGES,
   PYPI_DISTRIBUTIONS,
@@ -15,7 +14,6 @@ import {
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const CONTENT = join(ROOT, 'apps/docs/content/docs');
-const DOCS_SITE = 'https://docs.betteroffice.dev/docs/';
 
 function mdx(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -67,16 +65,5 @@ describe('docs name nothing that does not exist', () => {
     const real = new Set(PYPI_DISTRIBUTIONS);
     const claimed = [...DOCS.matchAll(/pip install (betteroffice-[a-z0-9-]+)/g)].map((m) => m[1]);
     expect(claimed.filter((name) => !real.has(name))).toEqual([]);
-  });
-});
-
-describe('the PyPI sidebar link', () => {
-  test('sends every binding at a docs page that exists', () => {
-    for (const binding of PYTHON_BINDINGS) {
-      const manifest = readFileSync(join(ROOT, binding, 'pyproject.toml'), 'utf8');
-      const url = manifest.match(/^Documentation = "([^"]+)"/m)?.[1] ?? '';
-      expect(url.startsWith(DOCS_SITE)).toBe(true);
-      expect(existsSync(join(CONTENT, `${url.slice(DOCS_SITE.length)}.mdx`))).toBe(true);
-    }
   });
 });

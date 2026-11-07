@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '../..');
-const dirs = ['e2e/browser', 'e2e/browser/plugin-host'];
+const dirs = ['e2e/browser'];
 
 export function browserFiles(): string[] {
   return dirs

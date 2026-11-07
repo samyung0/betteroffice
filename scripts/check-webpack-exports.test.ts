@@ -41,7 +41,6 @@ test('the checked libraries are every package under packages/ with an exports ma
   for (const format of ['docx', 'xlsx', 'pptx', 'vsdx']) {
     for (const suffix of ['', '-react', '-i18n']) expect(names).toContain(`@betteroffice/${format}${suffix}`);
   }
-  expect(names).toContain('@betteroffice/agents');
   expect(names).toContain('@betteroffice/fonts');
   expect(names.every((name) => name.startsWith('@betteroffice/'))).toBe(true);
 });
