@@ -732,12 +732,8 @@ fn agent_formulas_pass_the_rules_or_are_refused_naming_one() {
                 "the function PY is not available; use a function the spreadsheet engine supports",
             ),
         ),
-        (
-            "=CELL(\"filename\")",
-            Some(
-                "the function CELL is not available; use a function the spreadsheet engine supports",
-            ),
-        ),
+        // The engine has CELL since #2096; "filename" is empty text there, as for an unsaved book.
+        ("=CELL(\"filename\")", None),
         (
             "='[1]Sheet1'!A1",
             Some("the reference to '[1]Sheet1' names another workbook, which is not allowed"),
