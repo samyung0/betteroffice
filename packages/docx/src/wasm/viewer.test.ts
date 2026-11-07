@@ -167,12 +167,10 @@ describe('DOCX viewer wasm', () => {
   });
 
   // Fallback metrics wrap too since upstream #1766 (one em per character, kept by Q604), so the
-  // line count no longer tells them apart: measured text is drawn as glyph runs.
+  // line count no longer tells them apart: measured text is drawn as glyph runs. Since #1931
+  // the viewer measures with the bundled fonts by default, so there is no unmeasured baseline.
   test('measures with the configured fonts, so long paragraphs wrap at their glyph widths', async () => {
     const bytes = new Uint8Array(await readFile(fixture));
-    const unmeasured = await openDocumentViewer(bytes);
-    expect(wrappedGlyphRuns(unmeasured.displayList())).toBe(0);
-    unmeasured.dispose();
     const font = await readFile(
       resolve(root, 'crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf')
     );

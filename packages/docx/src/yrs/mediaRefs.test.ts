@@ -15,7 +15,8 @@ function imageSources(session: ReturnType<typeof createEditSession>): string[] {
     if (Array.isArray(value)) value.forEach(visit);
     else if (value && typeof value === 'object') {
       const record = value as Record<string, unknown>;
-      if (record.kind === 'image' && typeof record.src === 'string') sources.push(record.src);
+      // Inline charts are image runs without a source since #1899.
+      if (record.kind === 'image' && typeof record.src === 'string' && !record.inlineChart) sources.push(record.src);
       Object.values(record).forEach(visit);
     }
   };

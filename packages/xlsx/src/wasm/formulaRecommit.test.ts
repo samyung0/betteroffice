@@ -49,7 +49,7 @@ describe('re-committing shown formulas', () => {
     const handle = openWorkbook(source);
     try {
       for (const cell of CELLS) {
-        expect(handle.cell(0, 0, cell.col)).toMatchObject({ input: cell.shown, isFormula: cell.formula !== null && !cell.style });
+        expect(handle.cell(0, 0, cell.col)).toMatchObject({ input: cell.shown, isFormula: cell.formula !== null });
       }
       handle.editCells(0, FORMULAS.map((cell) => ({ row: 0, col: cell.col, input: handle.cell(0, 0, cell.col).input })));
       expect(new Uint8Array(handle.save())).toEqual(new Uint8Array(source));

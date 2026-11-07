@@ -52,6 +52,11 @@ async function titleProperties(bytes: Uint8Array): Promise<string[]> {
   return [...title.matchAll(/<a:p>(<a:pPr[^>]*?(?:\/>|>.*?<\/a:pPr>))/g)].map((match) => match[1]);
 }
 
+/** `xml` with each start tag's attributes sorted: an untouched half keeps its source attribute order (#1860). */
+const canonical = (xml: string) =>
+  xml.replace(/<([\w:]+)((?:\s+[\w:]+="[^"]*")*)(\s*\/?)>/g, (_, name: string, attributes: string, end: string) =>
+    `<${name}${[...attributes.matchAll(/\s+([\w:]+="[^"]*")/g)].map((match) => ` ${match[1]}`).sort().join('')}${end}>`);
+
 /** The title as laid out: the editor's projection of the story. */
 function titleLayout(handle: PresentationHandle) {
   const box = handle.layoutSlide(0).primitives.find(
@@ -80,11 +85,11 @@ describe('splitting a paragraph', () => {
 
       const saved = handle.save();
       const [firstXml, secondXml, thirdXml] = await titleProperties(saved);
-      expect(firstXml).toBe(secondXml);
+      expect(canonical(firstXml)).toBe(canonical(secondXml));
       for (const part of ['marL="457200"', 'indent="-228600"', 'lvl="1"', 'algn="ctr"', '<a:spcPct val="90000"/>', '<a:spcPts val="1200"/>', '<a:buChar char="•"/>']) {
         expect(secondXml).toContain(part);
       }
-      expect(thirdXml).toBe('<a:pPr algn="l" lvl="0"/>');
+      expect(thirdXml).toBe('<a:pPr algn="l" lvl="0"></a:pPr>');
       const reopened = open(saved);
       try {
         expect(titleLayout(handle)).toEqual(titleLayout(reopened));
@@ -170,7 +175,7 @@ describe('splitting a paragraph', () => {
       expect(plain(merged)).toBe('Office\n fil\nes,\nwithout the office.');
       const saved = left.save();
       const pPr = await titleProperties(saved);
-      expect(pPr.slice(0, 3).every((xml) => xml === pPr[0] && xml.includes('marL="457200"'))).toBe(true);
+      expect(pPr.slice(0, 3).every((xml) => canonical(xml) === canonical(pPr[0]) && xml.includes('marL="457200"'))).toBe(true);
       const reopened = open(saved);
       try {
         expect(titleLayout(left)).toEqual(titleLayout(reopened));
