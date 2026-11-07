@@ -45,3 +45,10 @@ crates/docx-edit/tests/fixtures/alternate-main-part.*.png
 /g*.log
 /gate.sh
 /gate2.sh
+
+# Built by scripts/build-fonts-decoder.ts (#1878).
+/packages/fonts/src/decoder/
+
+# Pack crates read packages/fonts-*/assets in the repo; scripts/rust-font-packs.mjs
+# copies them in only to package a release (#2072).
+/crates/betteroffice-fonts-*/assets/

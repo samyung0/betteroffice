@@ -463,20 +463,27 @@ describe('loading', () => {
     expect(a).toEqual(b);
   });
 
+  // Capy keeps font bytes only in the engines' WASM (1a69c151a): with
+  // `retain: false` a packed face is decoded once per concurrent request and
+  // dropped once it settles.
   test('keeps no bytes once a load settles: concurrent loads share a fetch, later ones fetch again', async () => {
     const realFetch = globalThis.fetch;
     const face = resolveMetricCompatFace('Calibri', false, false)!;
-    const bytes = await Bun.file(new URL(`../assets/${face.file}`, import.meta.url)).arrayBuffer();
+    const bytes = await Bun.file(new URL(`../../fonts-latin/assets/${face.file}`, import.meta.url)).arrayBuffer();
     let fetches = 0;
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (input: string | URL) => {
+      // No decoder at the base: it falls back to the package's own (#2062).
+      if (String(input).endsWith('.wasm')) return new Response('missing', { status: 404 });
       fetches++;
       return new Response(bytes);
     }) as unknown as typeof fetch;
     try {
-      const provider = createFontProvider({ baseUrl: 'https://example.test/settle/' });
+      const provider = createFontProvider({ baseUrl: 'https://example.test/settle/' }, { retain: false });
       const load = provider.resolve('Calibri', false, false)!;
       const [a, b] = await Promise.all([load(), load()]);
-      expect(a).toBe(b);
+      // One fetch and decode; each caller owns its buffer (upstream #1972).
+      expect(a).not.toBe(b);
+      expect(new Uint8Array(a)).toEqual(new Uint8Array(b));
       expect(fetches).toBe(1);
       await load();
       expect(fetches).toBe(2);

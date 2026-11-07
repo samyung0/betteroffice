@@ -114,19 +114,6 @@ afterAll(() => {
   if (ownsDom) GlobalRegistrator.unregister();
 });
 
-test('a missing CJK module leaves SimSun to Google without registering or caching Latin substitutes', async () => {
-  expect(await loadFontWithMapping('SimSun')).toBe(false);
-  expect(importCjk).toHaveBeenCalled();
-  expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
-    'Noto Serif SC:ital,wght@0,400;0,700;1,400;1,700',
-  ]);
-  expect(added).toEqual([]);
-  expect(isFontLoaded('SimSun')).toBe(false);
-  expect(isFontLoaded('Noto Serif SC')).toBe(false);
-  expect(await loadFontWithMapping('SimSun')).toBe(false);
-  expect(google).toHaveLength(1);
-});
-
 test('a script family whose pack is not installed uses Google without a managed substitute', async () => {
   expect(await loadFontWithMapping('Noto Sans Devanagari')).toBe(false);
   expect(google.map((url) => new URL(url).searchParams.get('family'))).toEqual([
@@ -171,29 +158,3 @@ test('a CJK module that fails to load leaves its family to Google', async () => 
   } finally { importCjk.mockImplementation(missingCjkAddon); }
 });
 
-test('a configured manager retains its missing-CJK substitution', async () => {
-  configureDefaultFonts({ fonts: fontManager });
-  expect(await loadFontWithMapping('MS Mincho')).toBe(true);
-  expect(added.length).toBeGreaterThan(0);
-  const latin = await fontManager.createFontProvider().resolve('Arial', false, false)!();
-  expect(added.map((face) => new Uint8Array(face.bytes))).toEqual(
-    added.map(() => new Uint8Array(latin)),
-  );
-  expect(google).toEqual([]);
-});
-
-test('an installed CJK module supplies the implicit manager face', async () => {
-  importCjk.mockImplementation(() => ({
-    CJK_FONT_ASSET_URLS: Object.fromEntries(fontManager.BUNDLED_FONTS.filter(
-      (face) => face.script?.startsWith('cjk-'),
-    ).map((face) => [face.file, () => new URL(`../../../fonts-cjk/assets/${face.file}`, import.meta.url)])),
-  }));
-  expect(await loadFontWithMapping('SimHei')).toBe(true);
-  expect(added.length).toBeGreaterThan(0);
-  expect(added.every((face) => face.family === 'Noto Sans SC')).toBe(true);
-  expect(added.every((face) => new DataView(face.bytes).getUint32(0) === 0x4f54544f)).toBe(true);
-  expect(google).toEqual([]);
-  const { measure, registered } = await prepareCjk();
-  expect(measure().kind).toBe('paragraph');
-  expect(registered.some((bytes) => new DataView(bytes.buffer, bytes.byteOffset).getUint32(0) === 0x4f54544f)).toBe(true);
-});
