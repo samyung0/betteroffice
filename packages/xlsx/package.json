@@ -34,23 +34,28 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./editor": {
       "types": "./dist/editor.d.ts",
-      "import": "./dist/editor.js"
+      "import": "./dist/editor.js",
+      "default": "./dist/editor.js"
     },
     "./viewer": {
       "types": "./dist/viewer.d.ts",
-      "import": "./dist/viewer.js"
+      "import": "./dist/viewer.js",
+      "default": "./dist/viewer.js"
     },
     "./headless": {
       "types": "./dist/headless.d.ts",
-      "import": "./dist/headless.js"
+      "import": "./dist/headless.js",
+      "default": "./dist/headless.js"
     },
     "./collaboration": {
       "types": "./dist/collaboration.d.ts",
-      "import": "./dist/collaboration.js"
+      "import": "./dist/collaboration.js",
+      "default": "./dist/collaboration.js"
     }
   },
   "files": [

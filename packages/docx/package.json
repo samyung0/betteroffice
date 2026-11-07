@@ -26,7 +26,8 @@
     },
     "./viewer": {
       "types": "./dist/viewer.d.mts",
-      "import": "./dist/viewer.mjs"
+      "import": "./dist/viewer.mjs",
+      "default": "./dist/viewer.mjs"
     },
     "./styles": {
       "types": "./dist/styles/index.d.mts",
