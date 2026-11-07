@@ -4895,6 +4895,7 @@ mod tests {
     #[test]
     #[cfg(feature = "base-latin")]
     fn first_font_invalidates_backstop_only_extents() {
+        let _float_pass = FloatPass::enter();
         let fonts = crate::MeasureFonts::default();
         let _scope = fonts.enter();
         let mut config = MeasurementConfig {
