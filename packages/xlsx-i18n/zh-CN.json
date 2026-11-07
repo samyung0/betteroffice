@@ -106,7 +106,49 @@
       "documentColors": "文档颜色",
       "default": "默认",
       "custom": "自定义颜色",
-      "chooseCustom": "选择自定义颜色"
+      "chooseCustom": "选择自定义颜色",
+      "colors": {
+        "black": "黑色",
+        "charcoal": "炭灰色",
+        "darkGray": "深灰色",
+        "gray": "灰色",
+        "silver": "银色",
+        "lightGray": "浅灰色",
+        "cloud": "云灰色",
+        "white": "白色",
+        "darkRed": "深红色",
+        "darkOrange": "深橙色",
+        "darkYellow": "深黄色",
+        "darkGreen": "深绿色",
+        "darkTeal": "深青色",
+        "darkBlue": "深蓝色",
+        "darkPurple": "深紫色",
+        "darkPink": "深粉色",
+        "red": "红色",
+        "orange": "橙色",
+        "yellow": "黄色",
+        "green": "绿色",
+        "teal": "青色",
+        "blue": "蓝色",
+        "purple": "紫色",
+        "pink": "粉色",
+        "softRed": "浅红色",
+        "softOrange": "浅橙色",
+        "softYellow": "浅黄色",
+        "softGreen": "浅绿色",
+        "softTeal": "浅青色",
+        "softBlue": "浅蓝色",
+        "softPurple": "浅紫色",
+        "softPink": "浅粉色",
+        "paleRed": "淡红色",
+        "paleOrange": "淡橙色",
+        "paleYellow": "淡黄色",
+        "paleGreen": "淡绿色",
+        "paleTeal": "淡青色",
+        "paleBlue": "淡蓝色",
+        "palePurple": "淡紫色",
+        "palePink": "淡粉色"
+      }
     },
     "lineStyle": "线条样式"
   },
@@ -189,5 +231,10 @@
     "wrapping": "换行",
     "mergeCells": "合并单元格",
     "clearFormatting": "清除格式"
+  },
+  "presence": {
+    "label": "协作者",
+    "unavailableSheet": "不可用的工作表",
+    "moreCollaborators": "{count, plural, other {还有 # 位协作者}}"
   }
 }

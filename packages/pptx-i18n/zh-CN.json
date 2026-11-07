@@ -229,7 +229,8 @@
     "canvasStale": "目标已更改，请在应用前打开审阅详情查看更新后的预览",
     "previousPosition": "之前",
     "proposedPosition": "提议",
-    "loadingDiff": "正在加载更改…"
+    "loadingDiff": "正在加载更改…",
+    "geometryValues": "{before} → {after} pt"
   },
   "presence": {
     "label": "协作者",

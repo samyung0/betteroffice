@@ -4,12 +4,13 @@ import { allowedStrings, allows, scanDirectories, scanSource } from './hardcoded
 
 const root = resolve(import.meta.dir, '..');
 
+// apps/desktop is left out: Capy doesn't ship it, and its sources no longer
+// build against Capy's editors (Q700).
 const EDITOR_SOURCES = [
   'packages/docx-react/src',
   'packages/xlsx-react/src',
   'packages/pptx-react/src',
   'packages/vsdx-react/src',
-  'apps/desktop/src',
 ];
 
 const allowlist = allowedStrings(root);

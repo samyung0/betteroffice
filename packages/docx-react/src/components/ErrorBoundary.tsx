@@ -17,6 +17,8 @@ import React, {
 import type { ReactNode, ErrorInfo, CSSProperties } from 'react';
 import { ErrorManager } from '@betteroffice/docx';
 import type { ErrorSeverity, ErrorNotification } from '@betteroffice/docx';
+import { createT, en } from '@betteroffice/docx-i18n';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../i18n';
 import { DrawnIcon } from './ui/Icons';
 
@@ -765,30 +767,30 @@ export function isParseError(error: Error): boolean {
 /**
  * Get user-friendly error message
  */
-export function getUserFriendlyMessage(error: Error): string {
+export function getUserFriendlyMessage(error: Error, t: TFunction = createT(en)): string {
   const message = error.message.toLowerCase();
 
   if (message.includes('network') || message.includes('fetch')) {
-    return 'Network error. Please check your internet connection and try again.';
+    return t('errors.userFriendly.network');
   }
 
   if (message.includes('parse') || message.includes('xml') || message.includes('invalid')) {
-    return 'The document could not be parsed. It may be corrupted or in an unsupported format.';
+    return t('errors.userFriendly.parse');
   }
 
   if (message.includes('permission') || message.includes('access')) {
-    return 'Access denied. You may not have permission to access this file.';
+    return t('errors.userFriendly.permission');
   }
 
   if (message.includes('not found') || message.includes('404')) {
-    return 'The requested file was not found.';
+    return t('errors.userFriendly.notFound');
   }
 
   if (message.includes('timeout')) {
-    return 'The operation timed out. Please try again.';
+    return t('errors.userFriendly.timeout');
   }
 
-  return 'An unexpected error occurred. Please try again.';
+  return t('errors.userFriendly.unexpected');
 }
 
 // ============================================================================

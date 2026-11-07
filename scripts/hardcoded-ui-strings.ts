@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import ts from 'typescript';
 
 export interface HardcodedString {
@@ -260,7 +260,10 @@ export function allows(entry: AllowedString, item: HardcodedString): boolean {
 export function scanDirectories(root: string, directories: string[], allowlist: AllowedString[] = []): HardcodedString[] {
   return directories
     .flatMap((directory) =>
-      sourceFiles(join(root, directory)).flatMap((file) => scanSource(relative(root, file), readFileSync(file, 'utf8'))),
+      // Allowlist paths use '/', on Windows too.
+      sourceFiles(join(root, directory)).flatMap((file) =>
+        scanSource(relative(root, file).split(sep).join('/'), readFileSync(file, 'utf8'))
+      ),
     )
     .filter((item) => !allowlist.some((entry) => allows(entry, item)));
 }

@@ -55,7 +55,7 @@ export function ImageWrapDropdown({
       options={translatedOptions}
       activeValue={activeValue}
       triggerIcon={currentOption.iconName}
-      tooltipContent={`Wrap: ${currentOption.label}`}
+      tooltipContent={t('imageWrap.tooltipPrefix', { label: currentOption.label })}
       onSelect={onChange}
       disabled={disabled}
       testId="toolbar-image-wrap"

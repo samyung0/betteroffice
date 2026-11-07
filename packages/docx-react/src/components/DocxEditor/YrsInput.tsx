@@ -54,6 +54,7 @@ import {
   type CaretSelectionChange,
   type LayoutUpdateOrigin,
 } from './internals/viewportAnchoring';
+import { useTranslation } from '../../i18n';
 
 export interface YrsDisplaySelection {
   anchor: number;
@@ -263,6 +264,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   },
   ref
 ) {
+  const { t } = useTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // The press input waits behind, if any.
   const inputHoldRef = useRef<{ end: () => void } | null>(null);
@@ -1613,7 +1615,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       data-yrs-story={story}
       data-pointer-placement={placementPending ? 'pending' : 'ready'}
       data-selection-head={displaySelection()?.head}
-      aria-label="Document input"
+      aria-label={t('editor.documentInput')}
       autoCapitalize="sentences"
       autoCorrect="on"
       spellCheck
