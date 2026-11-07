@@ -16,6 +16,7 @@ use yrs::{
 
 mod comments;
 mod deck;
+mod metafile;
 mod model;
 pub mod paragraph;
 mod proposal_diff;
@@ -26,6 +27,8 @@ mod story;
 mod undo;
 
 pub use deck::baseline_snapshot;
+#[doc(hidden)]
+pub use metafile::MetafileSvgCache;
 pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
@@ -33,6 +36,8 @@ pub use search::TextSearchMatch;
 /// The renderer's autofit refit compares a story with its seed (upstream #1526).
 #[doc(hidden)]
 pub use story::baseline_story;
+/// The renderer styles the slide-number runs it inserts from their source run (upstream #1834).
+pub use story::style_from_run_properties;
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "wasm")]
@@ -87,6 +92,7 @@ pub struct DeckSession {
     epoch: Arc<AtomicU64>,
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
+    metafile_svgs: RefCell<MetafileSvgCache>,
 }
 
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
@@ -155,6 +161,7 @@ impl DeckSession {
             epoch,
             _epoch_observer,
             state_update: RefCell::new(None),
+            metafile_svgs: Default::default(),
         })
     }
 
@@ -192,6 +199,7 @@ impl DeckSession {
             epoch,
             _epoch_observer,
             state_update: RefCell::new(None),
+            metafile_svgs: Default::default(),
         })
     }
 

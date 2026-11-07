@@ -80,8 +80,6 @@ const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
 const MAX_TEXT_RUNS: usize = 100_000;
-/// Source paragraphs a joined story paragraph takes its languages from.
-const MAX_LANGUAGE_SOURCES: usize = 64;
 /// Larger edited shapes save unfitted, as when no fonts are registered.
 const MAX_FITTED_TEXT_UTF16: u32 = 65_536;
 /// Chart parts one slide may draw, shared across its charts.
@@ -803,6 +801,7 @@ impl SlideRenderer {
         Ok(requests.faces)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layout_resolved(
         &self,
         package: &PptxPackage,
@@ -4055,16 +4054,6 @@ fn content_from_story(
                         .unwrap_or_default();
                     let sources: Vec<&pptx_parse::TextParagraph> = if !with_languages {
                         Vec::new()
-                    } else if paragraph.source_paragraphs.len() > 1 {
-                        paragraph
-                            .source_paragraphs
-                            .iter()
-                            .take(MAX_LANGUAGE_SOURCES)
-                            .filter_map(|joined| {
-                                source
-                                    .and_then(|body| source_paragraph(body, &story.id, &joined.id))
-                            })
-                            .collect()
                     } else if source_para.is_some() {
                         source_para.into_iter().collect()
                     } else {
@@ -8925,7 +8914,6 @@ mod tests {
                     bold: false,
                     italic: false,
                     underline: false,
-                    strike: None,
                     color: "#000000".to_owned(),
                     caps: TextCaps::None,
                     strike: None,
@@ -9167,13 +9155,12 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
-            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
             strike: None,
             highlight: None,
         };
-        let mut variants = vec![style.clone(); 10];
+        let mut variants = vec![style.clone(); 9];
         variants[0].color = "#A99A72".to_owned();
         variants[1].bold = true;
         variants[2].italic = true;
@@ -9183,9 +9170,8 @@ mod tests {
         variants[6].face = renderer
             .resolve_face("Arial", true, false, &mut SubstitutionLog::default())
             .unwrap();
-        variants[7].strike = Some("sngStrike".to_owned());
-        variants[8].strike = Some("dblStrike".to_owned());
-        variants[9].strike = Some("noStrike".to_owned());
+        variants[7].strike = Some(Strike::Single);
+        variants[8].strike = Some(Strike::Double);
         for changed in variants {
             let mut original_key = Vec::new();
             let mut changed_key = Vec::new();
@@ -9272,7 +9258,6 @@ mod tests {
             bold: false,
             italic: false,
             underline: true,
-            strike: None,
             color: "#A99A72".to_owned(),
             caps: TextCaps::None,
             strike: None,
@@ -9355,7 +9340,6 @@ mod tests {
             bold: false,
             italic: false,
             underline: false,
-            strike: None,
             color: "#000000".to_owned(),
             caps: TextCaps::None,
             strike: None,
@@ -9571,7 +9555,7 @@ mod tests {
         let mut renderer = SlideRenderer::new();
         let face = |index: usize| {
             let mut bytes =
-                include_bytes!("../../docx-edit/tests/fonts/LiberationSans-Regular.ttf").to_vec();
+                include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf").to_vec();
             bytes.extend_from_slice(&(index as u32).to_le_bytes());
             bytes
         };
@@ -12031,9 +12015,6 @@ mod tests {
             source_id: 0,
             kind: ShapeKind::Shape,
             name: String::new(),
-            title: None,
-            description: None,
-            decorative: false,
             x: 0,
             y: 0,
             width: 0,
@@ -12041,9 +12022,7 @@ mod tests {
             rotation_deg: 0.0,
             flip_h: false,
             flip_v: false,
-            inherited: None,
             hidden: false,
-            text_box: false,
             aspect_ratio_locked: false,
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -12055,7 +12034,7 @@ mod tests {
             media_part_path: None,
             pending_media: None,
             blip_effects: Vec::new(),
-            table_structure: None,
+            text_anchor: None,
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),
@@ -12403,6 +12382,7 @@ mod tests {
                 snapshot.width_emu,
                 snapshot.height_emu,
                 0,
+                None,
                 Some(&shapes),
             )
             .unwrap();
@@ -13367,9 +13347,6 @@ mod tests {
             source_id: 1,
             kind: ShapeKind::Shape,
             name: "Title".to_owned(),
-            title: None,
-            description: None,
-            decorative: false,
             x: 0,
             y: 0,
             width: 0,

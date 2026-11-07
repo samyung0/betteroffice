@@ -2,7 +2,7 @@
 mod fixture;
 
 use pptx_edit::DeckSession;
-use pptx_render::{Primitive, SlideRenderer};
+use pptx_render::{Primitive, SlideRenderer, Strike};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
@@ -26,20 +26,20 @@ fn positioned_runs_inherit_strike_and_respect_no_strike() {
         })
         .collect::<Vec<_>>();
     for (text, strike) in [
-        ("A", Some("sngStrike")),
-        ("B", Some("dblStrike")),
+        ("A", Some(Strike::Single)),
+        ("B", Some(Strike::Double)),
         ("C", None),
-        ("D", Some("dblStrike")),
+        ("D", Some(Strike::Double)),
         ("E", None),
-        ("M", Some("sngStrike")),
+        ("M", Some(Strike::Single)),
         ("N", None),
-        ("L", Some("dblStrike")),
+        ("L", Some(Strike::Double)),
         ("O", None),
         ("P", None),
-        ("Q", Some("sngStrike")),
+        ("Q", Some(Strike::Single)),
     ] {
         let run = runs.iter().find(|run| run.text.contains(text)).unwrap();
-        assert_eq!(run.strike.as_deref(), strike, "{text}");
+        assert_eq!(run.strike, strike, "{text}");
     }
 }
 
@@ -78,8 +78,4 @@ fn adjacent_plain_and_no_strike_runs_coalesce() {
         runs.iter()
             .any(|run| run.text == "PQ" && run.strike.is_none())
     );
-    assert!(runs.iter().all(|run| matches!(
-        run.strike.as_deref(),
-        None | Some("sngStrike" | "dblStrike")
-    )));
 }

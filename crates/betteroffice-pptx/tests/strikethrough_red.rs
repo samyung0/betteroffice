@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use betteroffice_pptx::{EditCtx, PngTarget, Presentation, Primitive, RenderOptions};
+use betteroffice_pptx::{EditCtx, Presentation, Primitive, RenderOptions};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 const NS: &str = r#"xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
@@ -89,7 +89,7 @@ fn single_strike_paints_a_continuous_rule_through_the_run() {
         })
         .expect("expected the Struck run in the display list");
     let rendered = presentation
-        .render_png(PngTarget { slide: 0 }, &RenderOptions::default())
+        .render_png(0, &RenderOptions::default())
         .unwrap();
     let mut reader = png::Decoder::new(Cursor::new(&rendered.bytes))
         .read_info()

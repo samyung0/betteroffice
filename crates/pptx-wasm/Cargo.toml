@@ -14,7 +14,7 @@ wasm-opt = ["-O3"]
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
-pptx-edit = { workspace = true, features = ["wasm"] }
+pptx-edit = { workspace = true, features = ["metafile-svg", "wasm"] }
 pptx-parse.workspace = true
 pptx-render.workspace = true
 serde = { version = "1", features = ["derive"] }

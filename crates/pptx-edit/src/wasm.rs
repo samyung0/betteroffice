@@ -450,6 +450,13 @@ impl PptxDocument {
         self.session.media_bytes(part_path).map_err(js_error)
     }
 
+    /// An EMF or WMF picture's SVG display copy (#1820), replayed once and cached; `undefined`
+    /// for a part with none.
+    #[wasm_bindgen(js_name = metafileSvg)]
+    pub fn metafile_svg(&self, part_path: &str) -> Option<Vec<u8>> {
+        self.session.metafile_svg(part_path).map(|svg| svg.to_vec())
+    }
+
     /// Serializes the deck back to `.pptx` bytes, edits included.
     #[wasm_bindgen(js_name = saveBytes)]
     pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {

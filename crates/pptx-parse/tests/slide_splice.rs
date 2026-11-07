@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use pptx_parse::{
-    BackgroundWrite, DeckWrite, ParagraphWrite, Placeholder, RunProperties, RunWrite, ShapeAdd,
-    ShapePatch, ShapeWrite, SlideWrite, TableRowSource, TableStructure, TextTarget, TextWrite,
-    parse_pptx, write_pptx_with_edits,
+    DeckWrite, ParagraphWrite, Placeholder, RunProperties, RunWrite, ShapeAdd, ShapePatch,
+    ShapeWrite, SlideWrite, TableRowSource, TableStructure, TextTarget, TextWrite, parse_pptx,
+    write_pptx_with_edits,
 };
 
 const ROOT_START: &str = r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#;
@@ -94,6 +94,7 @@ fn table_patch(row: usize, text: &str) -> ShapePatch {
                     text: text.to_owned(),
                     properties: RunProperties::default(),
                 }],
+                ..ParagraphWrite::default()
             }],
         }],
         ..ShapePatch::default()
@@ -118,13 +119,14 @@ fn text_patch(text: &str) -> ShapePatch {
                     text: text.to_owned(),
                     properties: RunProperties::default(),
                 }],
+                ..ParagraphWrite::default()
             }],
         }],
         ..ShapePatch::default()
     }
 }
 
-fn save(bytes: &[u8], shapes: Vec<ShapeWrite>, background: Option<BackgroundWrite>) -> Vec<u8> {
+fn save(bytes: &[u8], shapes: Vec<ShapeWrite>) -> Vec<u8> {
     let package = parse_pptx(bytes).unwrap();
     write_pptx_with_edits(
         &package,
@@ -132,7 +134,6 @@ fn save(bytes: &[u8], shapes: Vec<ShapeWrite>, background: Option<BackgroundWrit
             slides: vec![SlideWrite::Patch {
                 part_path: "ppt/slides/slide1.xml".to_owned(),
                 shapes,
-                background,
                 layout_part_path: None,
             }],
             comments: None,
@@ -164,7 +165,6 @@ fn a_text_edit_keeps_the_untouched_shape_byte_identical() {
             ShapeWrite::Keep { source_index: 1 },
             ShapeWrite::Keep { source_index: 2 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains(UNTOUCHED), "{xml}");
@@ -186,7 +186,6 @@ fn a_space_changed_to_more_whitespace_keeps_the_new_text() {
                 source_index: 0,
                 patch: Box::new(text_patch(text)),
             }],
-            None,
         );
         let xml = saved_slide(&saved);
         assert!(xml.contains(expected), "{xml}");
@@ -204,7 +203,6 @@ fn a_space_typed_into_an_empty_text_element_is_written() {
             source_index: 0,
             patch: Box::new(text_patch(" ")),
         }],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<a:t> </a:t>"), "{xml}");
@@ -250,12 +248,12 @@ fn clearing_a_table_cell_space_leaves_an_empty_text_element() {
                             text: String::new(),
                             properties: RunProperties::default(),
                         }],
+                        ..ParagraphWrite::default()
                     }],
                 }],
                 ..ShapePatch::default()
             }),
         }],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<a:t/>"), "{xml}");
@@ -285,6 +283,8 @@ fn an_added_and_a_removed_shape_keep_the_survivors_byte_identical() {
                 adjust_values: BTreeMap::new(),
                 fill: None,
                 outline: None,
+                text_anchor: None,
+                placeholder: None,
                 paragraphs: Some(vec![ParagraphWrite {
                     source_index: None,
                     source_paragraphs: Vec::new(),
@@ -298,12 +298,12 @@ fn an_added_and_a_removed_shape_keep_the_survivors_byte_identical() {
                         text: "Added text".to_owned(),
                         properties: RunProperties::default(),
                     }],
+                    ..ParagraphWrite::default()
                 }]),
                 picture: None,
             })),
             ShapeWrite::Keep { source_index: 2 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(
@@ -350,7 +350,6 @@ fn a_placeholder_patch_keeps_the_other_shape_byte_identical() {
             },
             ShapeWrite::Keep { source_index: 1 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(
@@ -366,46 +365,6 @@ fn a_placeholder_patch_keeps_the_other_shape_byte_identical() {
         xml.contains("<!-- other stays -->"),
         "survivor bytes require the splice: {xml}"
     );
-}
-
-#[test]
-fn a_background_patch_keeps_the_shapes_byte_identical() {
-    let first = kept_shape(2, "First", "First text");
-    let second = kept_shape(3, "Second", "Second text");
-    let body = format!(
-        "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"112233\"/></a:solidFill><a:effectLst/></p:bgPr></p:bg>{}",
-        sp_tree(&format!(
-            "<!-- first stays -->{first}<!-- second stays -->{second}"
-        ))
-    );
-    let slide = slide_xml(&body);
-    let saved = save(
-        &deck(&slide),
-        vec![
-            ShapeWrite::Keep { source_index: 0 },
-            ShapeWrite::Keep { source_index: 1 },
-        ],
-        Some(BackgroundWrite::Clear),
-    );
-    let xml = saved_slide(&saved);
-    assert!(!xml.contains("<p:bg>"), "{xml}");
-    assert!(
-        xml.contains(first.as_str()),
-        "survivor bytes require the splice: {xml}"
-    );
-    assert!(
-        xml.contains(second.as_str()),
-        "survivor bytes require the splice: {xml}"
-    );
-    assert!(
-        xml.contains("<!-- first stays -->"),
-        "survivor bytes require the splice: {xml}"
-    );
-    assert!(
-        xml.contains("<!-- second stays -->"),
-        "survivor bytes require the splice: {xml}"
-    );
-    assert_eq!(parse_pptx(&saved).unwrap().slides.len(), 1);
 }
 
 #[test]
@@ -425,7 +384,6 @@ fn a_comment_and_pi_before_a_removed_shape_survive() {
             },
             ShapeWrite::Keep { source_index: 2 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<!-- before removed -->"), "{xml}");
@@ -456,7 +414,6 @@ fn a_comment_between_two_removed_shapes_survives() {
             },
             ShapeWrite::Keep { source_index: 3 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<!-- between removed -->"), "{xml}");
@@ -480,7 +437,6 @@ fn a_removed_last_shape_keeps_the_following_comment() {
             source_index: 0,
             patch: Box::new(text_patch("First edited")),
         }],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<!-- tail stays -->"), "{xml}");
@@ -505,7 +461,6 @@ fn a_comment_with_whitespace_before_a_removed_shape_survives() {
             },
             ShapeWrite::Keep { source_index: 2 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(xml.contains("<!-- gap stays -->"), "{xml}");
@@ -536,7 +491,6 @@ fn reordered_untouched_shapes_keep_their_source_bytes() {
                 patch: Box::new(text_patch("Edited text")),
             },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     for survivor in [&first, &second, &third, &fourth] {
@@ -566,7 +520,6 @@ fn a_reordered_edited_shape_keeps_the_other_shapes_byte_identical() {
             ShapeWrite::Keep { source_index: 1 },
             ShapeWrite::Keep { source_index: 0 },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     for survivor in [&first, &second, &fourth] {
@@ -597,7 +550,6 @@ fn a_large_table_of_identical_rows_splices_and_scales() {
                     source_index: 0,
                     patch: Box::new(table_patch(rows / 2, "Edited")),
                 }],
-                None,
             );
             let elapsed = started.elapsed();
             best = Some(best.map_or(elapsed, |current| current.min(elapsed)));
@@ -620,11 +572,7 @@ fn deleting_one_of_two_shapes_in_an_alternate_content_choice_keeps_the_other() {
         let slide = slide_xml(&sp_tree(&format!(
             r#"<mc:AlternateContent><mc:Choice xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" Requires="a">{deleted}<!-- inside wrapper -->{kept}</mc:Choice><mc:Fallback>{fallback}</mc:Fallback></mc:AlternateContent>"#
         )));
-        let saved = save(
-            &deck(&slide),
-            vec![ShapeWrite::Keep { source_index: 1 }],
-            None,
-        );
+        let saved = save(&deck(&slide), vec![ShapeWrite::Keep { source_index: 1 }]);
         let xml = saved_slide(&saved);
         assert!(
             xml.contains(kept.as_str()),
@@ -656,7 +604,6 @@ fn a_moved_one_object_alternate_content_wrapper_keeps_its_bytes() {
                 patch: Box::new(text_patch("Edited text")),
             },
         ],
-        None,
     );
     let xml = saved_slide(&saved);
     assert!(

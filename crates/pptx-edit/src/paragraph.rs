@@ -4,7 +4,7 @@
 use ooxml_drawingml::{ColorValue, ResolvedCellStyle};
 use pptx_parse::{
     Bullet, ParagraphProperties, Placeholder, PptxPackage, Presentation, RunProperties, ShapeNode,
-    Slide, SlideLayout, SlideMaster, TextBody,
+    Slide, SlideLayout, SlideMaster, TextBody, TextParagraph, TextRun,
 };
 
 use crate::deck::shape_base;
@@ -155,6 +155,179 @@ pub fn normalize_placeholder_type(value: Option<&str>) -> &str {
         "obj" => "body",
         value => value,
     }
+}
+
+/// The source paragraph a seeded paragraph id names.
+pub fn source_paragraph<'b>(
+    body: &'b TextBody,
+    story_id: &str,
+    paragraph_id: &str,
+) -> Option<&'b TextParagraph> {
+    body.paragraphs.get(crate::model::source_paragraph_index(
+        paragraph_id,
+        story_id,
+    )?)
+}
+
+/// The leading and trailing bytes `source` and `target` share, compared by character, the
+/// trailing ones within what the leading ones leave.
+fn common_ends(source: &str, target: &str) -> (usize, usize) {
+    let prefix: usize = source
+        .chars()
+        .zip(target.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let suffix = source[prefix..]
+        .chars()
+        .rev()
+        .zip(target[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    (prefix, suffix)
+}
+
+type FieldSpan<'a> = (std::ops::Range<usize>, Option<String>, &'a TextRun);
+
+/// A source paragraph's field results as byte spans of `text`, its current text, empty results
+/// included, with each field's source run. `None` when a field left the unchanged leading or
+/// trailing text.
+fn field_spans<'a>(source: &'a TextParagraph, text: &str) -> Option<Vec<FieldSpan<'a>>> {
+    let mut seeded = String::new();
+    let mut fields = Vec::new();
+    for run in &source.runs {
+        let start = seeded.len();
+        seeded.push_str(&run.text);
+        if run.field_id.is_some() || run.field_type.is_some() {
+            fields.push((start..seeded.len(), run.field_type.clone(), run));
+        }
+    }
+    let (prefix, suffix) = common_ends(&seeded, text);
+    let (tail, moved_tail) = (seeded.len() - suffix, text.len() - suffix);
+    fields
+        .into_iter()
+        .map(|(span, field_type, run)| {
+            if span.end <= prefix {
+                Some((span, field_type, run))
+            } else if span.start >= tail {
+                let start = moved_tail + (span.start - tail);
+                Some((start..start + span.len(), field_type, run))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Per live run, the replacement for a run a located `slidenum` field overlaps, or `None` to
+/// keep the live run.
+pub fn slide_number_run_texts(
+    source: &TextParagraph,
+    live_runs: &[&str],
+    slide_number: i64,
+) -> Vec<Option<String>> {
+    let mut replacements = vec![None; live_runs.len()];
+    let live: String = live_runs.iter().copied().collect();
+    let Some(spans) = field_spans(source, &live) else {
+        return replacements;
+    };
+    let mut boundaries = Vec::with_capacity(live_runs.len() + 1);
+    boundaries.push(0);
+    for run in live_runs {
+        boundaries.push(boundaries.last().unwrap() + run.len());
+    }
+    let mut edits: Vec<Vec<(usize, usize, String)>> = vec![Vec::new(); live_runs.len()];
+    for (span, field_type, _) in &spans {
+        if field_type.as_deref() != Some("slidenum") {
+            continue;
+        }
+        if span.is_empty() {
+            if let Some(index) = live_runs
+                .iter()
+                .enumerate()
+                .find(|(index, _)| {
+                    boundaries[*index] < span.start && span.start < boundaries[index + 1]
+                })
+                .map(|(index, _)| index)
+            {
+                let at = span.start - boundaries[index];
+                edits[index].push((at, at, slide_number.to_string()));
+            }
+            continue;
+        }
+        let mut first = true;
+        for (index, bounds) in boundaries.windows(2).enumerate() {
+            let start = bounds[0].max(span.start);
+            let end = bounds[1].min(span.end);
+            if start >= end {
+                continue;
+            }
+            let replacement = if first {
+                slide_number.to_string()
+            } else {
+                String::new()
+            };
+            first = false;
+            edits[index].push((start - bounds[0], end - bounds[0], replacement));
+        }
+    }
+    for (index, mut run_edits) in edits.into_iter().enumerate() {
+        if run_edits.is_empty() {
+            continue;
+        }
+        run_edits.sort_by_key(|(start, end, _)| (*start, *end));
+        let original = live_runs[index];
+        let mut text = String::with_capacity(original.len());
+        let mut cursor = 0;
+        for (start, end, replacement) in run_edits {
+            if start < cursor {
+                continue;
+            }
+            text.push_str(&original[cursor..start]);
+            text.push_str(&replacement);
+            cursor = end;
+        }
+        text.push_str(&original[cursor..]);
+        if text != original {
+            replacements[index] = Some(text);
+        }
+    }
+    replacements
+}
+
+/// The live byte offsets, at run boundaries, of located empty `slidenum` fields that lie at a
+/// run boundary or in a paragraph with no runs, with each field's source run.
+pub fn slide_number_insertions<'a>(
+    source: &'a TextParagraph,
+    live_runs: &[&str],
+) -> Vec<(usize, &'a TextRun)> {
+    let live: String = live_runs.iter().copied().collect();
+    let Some(spans) = field_spans(source, &live) else {
+        return Vec::new();
+    };
+    let mut boundaries = Vec::with_capacity(live_runs.len() + 1);
+    boundaries.push(0);
+    for run in live_runs {
+        boundaries.push(boundaries.last().unwrap() + run.len());
+    }
+    let mut insertions = Vec::new();
+    for (span, field_type, run) in &spans {
+        if field_type.as_deref() != Some("slidenum") || !span.is_empty() {
+            continue;
+        }
+        if live_runs
+            .iter()
+            .enumerate()
+            .any(|(index, _)| boundaries[index] < span.start && span.start < boundaries[index + 1])
+        {
+            continue;
+        }
+        if boundaries.contains(&span.start) {
+            insertions.push((span.start, *run));
+        }
+    }
+    insertions
 }
 
 /// The text bodies a shape's paragraphs inherit from, most specific first.

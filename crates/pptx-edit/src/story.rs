@@ -363,7 +363,8 @@ impl DeckSession {
             });
         }
         if !text.is_empty() {
-            insert_styled_text(&story, &mut txn, index, text, style);
+            let style = typed_style(&story, &txn, index, style);
+            insert_styled_text(&story, &mut txn, index, text, &style);
         }
         let length = text.encode_utf16().count() as u32;
         Ok(TextReceipt {
@@ -421,6 +422,13 @@ impl DeckSession {
                 length: final_pilcrow,
             });
         }
+        // Typing over a selection continues its first character's run.
+        let style = typed_style(
+            &story,
+            &txn,
+            if start < end { start + 1 } else { start },
+            style,
+        );
         remove_joining(&story, &mut txn, start, end);
         let mut index = start;
         for (line_index, line) in text.split('\n').enumerate() {
@@ -429,7 +437,7 @@ impl DeckSession {
                 index += 1;
             }
             if !line.is_empty() {
-                insert_styled_text(&story, &mut txn, index, line, style);
+                insert_styled_text(&story, &mut txn, index, line, &style);
                 index += line.encode_utf16().count() as u32;
             }
         }
@@ -1518,6 +1526,43 @@ fn insert_styled_text(
     }
 }
 
+/// `style` for text typed at `index`: with no strike of its own, it keeps the `noStrike` of the run
+/// it continues, so it stays un-struck under an inherited strike, as PowerPoint and Google Slides
+/// type into such a run.
+fn typed_style<T: ReadTxn>(story: &TextRef, txn: &T, index: u32, style: &TextStyle) -> TextStyle {
+    let mut style = style.clone();
+    if style.strike.is_none() && continues_no_strike(story, txn, index) {
+        style.strike = Some("noStrike".to_owned());
+    }
+    style
+}
+
+/// Whether the run typing at `index` continues, the character before it in its paragraph or else
+/// the one after, turns strike off.
+fn continues_no_strike<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> bool {
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let end = offset + out_len(&diff.insert);
+        let no_strike = matches!(diff.insert, Out::Any(Any::String(_))).then(|| {
+            diff.attributes
+                .as_ref()
+                .and_then(|attrs| attrs.get("strike"))
+                == Some(&Any::from("noStrike"))
+        });
+        if offset < index
+            && index <= end
+            && let Some(no_strike) = no_strike
+        {
+            return no_strike;
+        }
+        if offset <= index && index < end {
+            return no_strike.unwrap_or(false);
+        }
+        offset = end;
+    }
+    false
+}
+
 fn style_values(style: &TextStyle) -> [(&'static str, Any); 12] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
@@ -1610,7 +1655,8 @@ fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {
     }
 }
 
-fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
+/// A source run's properties as a run style, as seeding reads them.
+pub fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,

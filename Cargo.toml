@@ -1,11 +1,6 @@
 [workspace]
 members = ["crates/*"]
-exclude = [
-    "apps/native-viewer",
-    "third_party/yrs",
-    # The on-demand metafile SVG module (#2154): the PPTX track decides it with #1820.
-    "crates/metafile-svg-wasm",
-]
+exclude = ["apps/native-viewer", "third_party/yrs"]
 resolver = "3"
 
 [workspace.package]

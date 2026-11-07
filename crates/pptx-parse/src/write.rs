@@ -3554,7 +3554,6 @@ fn span_elements(
     }
     let ranges = align_span(segments, source_runs, span);
     let mut output = Vec::new();
-    let mut last_source = None;
     let mut offset = 0;
     let mut range_index = 0;
     let mut range_start = 0;
@@ -3580,7 +3579,6 @@ fn span_elements(
                 output.push(XmlNode::Element(segment_element(
                     segment, template, theme, prefixes,
                 )));
-                last_source = None;
                 offset += 1;
                 break;
             }
@@ -3594,23 +3592,7 @@ fn span_elements(
             } else {
                 segment_element(&piece, source.child("rPr"), theme, prefixes)
             };
-            let previous = output.last_mut().and_then(|node| match node {
-                XmlNode::Element(previous)
-                    if last_source == Some(range.source)
-                        && previous.local_name() == "r"
-                        && element.local_name() == "r"
-                        && previous.child("rPr") == element.child("rPr") =>
-                {
-                    previous.child_mut("t")
-                }
-                _ => None,
-            });
-            if let Some(previous) = previous {
-                previous.children.push(XmlNode::Text(piece.text.to_owned()));
-            } else {
-                output.push(XmlNode::Element(element));
-            }
-            last_source = Some(range.source);
+            output.push(XmlNode::Element(element));
             offset += length;
             remaining = &remaining[length..];
             if remaining.is_empty() {
@@ -5327,17 +5309,7 @@ mod tests {
     fn an_edit_spanning_several_runs_keeps_each_survivor_on_its_source_run() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[
-                ("See", RunProperties::default()),
-                (
-                    "the doc",
-                    RunProperties {
-                        strike: Some("sngStrike".to_owned()),
-                        ..RunProperties::default()
-                    },
-                ),
-                (" now", RunProperties::default()),
-            ],
+            &[("Seethe doc now", RunProperties::default())],
         );
         assert!(
             xml.contains(r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See</a:t></a:r>"#),
@@ -5590,17 +5562,7 @@ mod tests {
     fn text_typed_at_the_end_of_a_link_stays_inside_it() {
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
-            &[
-                ("See ", RunProperties::default()),
-                (
-                    "the docsX",
-                    RunProperties {
-                        strike: Some("sngStrike".to_owned()),
-                        ..RunProperties::default()
-                    },
-                ),
-                (" today", RunProperties::default()),
-            ],
+            &[("See the docsX today", RunProperties::default())],
         );
         assert!(
             xml.contains(&format!("<a:r>{LINK_PROPERTIES}<a:t>the docsX</a:t></a:r>")),
@@ -5609,20 +5571,13 @@ mod tests {
 
         let bold = RunProperties {
             bold: Some(true),
-            strike: Some("sngStrike".to_owned()),
             ..RunProperties::default()
         };
         let xml = rebuilt_paragraph(
             LINKED_PARAGRAPH,
             &[
                 ("See ", RunProperties::default()),
-                (
-                    "the docs",
-                    RunProperties {
-                        strike: Some("sngStrike".to_owned()),
-                        ..RunProperties::default()
-                    },
-                ),
+                ("the docs", RunProperties::default()),
                 ("X", bold),
                 (" today", RunProperties::default()),
             ],
