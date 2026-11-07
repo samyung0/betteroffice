@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
-use betteroffice_xlsx::Workbook;
-use serde_json::json;
+use betteroffice_xlsx::{CalculationOptions, CellRef, SheetId, Workbook};
 
 const MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 
@@ -114,20 +113,16 @@ fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     ooxml_opc::unzip_parts(bytes).unwrap().into_iter().collect()
 }
 
-/// one agent write: `setCellValues` through the batch API, the call the
-/// agent tools make before they save.
+/// one write through Capy's cell edit, the call its agent tools and editor make
+/// before they save (upstream wrote through its agent batch API).
 fn agent_write(workbook: &mut Workbook, sheet: usize, a1: &str, value: f64) -> Result<(), String> {
-    let request = json!({
-        "expectVersion": workbook.version(),
-        "source": "agent",
-        "steps": [{
-            "op": "setCellValues",
-            "target": { "sheetId": format!("sheet:{sheet}"), "range": { "kind": "a1", "a1": a1 } },
-            "values": [[{ "kind": "number", "value": value }]]
-        }]
-    });
     workbook
-        .apply_edits_json(&request.to_string())
+        .edit_cell(
+            SheetId(sheet as u32),
+            CellRef::parse_a1(a1).map_err(|error| error.to_string())?,
+            &value.to_string(),
+            CalculationOptions::default(),
+        )
         .map(|_| ())
         .map_err(|error| error.to_string())
 }

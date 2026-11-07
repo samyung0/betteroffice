@@ -84,7 +84,6 @@ fn goldens() -> Vec<Golden> {
             kind: ChartRefKind::Values,
             formula: "Sheet1!$A$1".into(),
         }],
-        raw_xml: Some("<chart/>".into()),
     };
     let patch = StylePatch {
         bold: Some(true),
@@ -413,8 +412,7 @@ fn goldens() -> Vec<Golden> {
                 r##""charts":[{"part":"xl/charts/chart1.xml","##,
                 r##""drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"##,
                 r##""anchor":{"kind":"absolute","pos":{"x":1,"y":2},"extent":{"cx":3,"##,
-                r##""cy":4}},"refs":[{"kind":"values","formula":"Sheet1!$A$1"}],"##,
-                r##""rawXml":"<chart/>"}]}"##,
+                r##""cy":4}},"refs":[{"kind":"values","formula":"Sheet1!$A$1"}]}]}"##,
             ),
             minimal: r##"{"type":"setCharts","sheet":2,"charts":[]}"##,
             canonical_minimal: r##"{"type":"setCharts","sheet":2,"charts":[]}"##,

@@ -96,6 +96,8 @@ pub(crate) enum AuthorityError {
 struct WorkbookBase {
     bootstrap_client_id: u64,
     date_system: DateSystem,
+    /// `calcPr fullPrecision`; off rounds formula results as displayed.
+    full_precision: bool,
     defined_names: Vec<DefinedName>,
     fingerprint: String,
     /// The schema `fingerprint` hashes for: the stable one in a replica, the
@@ -138,6 +140,7 @@ impl WorkbookBase {
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
+            full_precision: model.full_precision,
             defined_names: model.defined_names.clone(),
             fingerprint,
             schema: SCHEMA_VERSION,
@@ -180,6 +183,7 @@ impl WorkbookBase {
         WorkbookModel {
             sheets: Vec::new(),
             date_system: self.date_system,
+            full_precision: self.full_precision,
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
@@ -3542,6 +3546,10 @@ fn fingerprint_model_for_schema(
         _ => b"betteroffice-xlsx-yrs-v8".as_slice(),
     };
     hasher.update(domain);
+    // a precision-off workbook calculates differently, so it is another base
+    if !model.full_precision {
+        hasher.update(b"fullPrecision=0");
+    }
     let base = serde_json::to_vec(&(
         model.date_system,
         &model.defined_names,

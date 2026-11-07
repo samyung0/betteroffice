@@ -1224,6 +1224,48 @@ mod tests {
         ooxml_opc::rezip_parts(&parts).unwrap()
     }
 
+    /// upstream #2100: a file asking for a full calculation on load saves the
+    /// values the session calculated when it opened, stale caches replaced.
+    #[test]
+    fn a_file_asking_for_a_full_calculation_saves_the_values_from_open() {
+        use xlsx_model::CellProvider;
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::parse_a1("A1").unwrap(),
+            Cell {
+                value: CellValue::Number { value: 999.0 },
+                formula: Some("SUM(2,3)".into()),
+                style: None,
+            },
+        );
+        let model = WorkbookModel {
+            sheets: vec![sheet],
+            ..WorkbookModel::default()
+        };
+        let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+        let workbook = &mut parts
+            .iter_mut()
+            .find(|(name, _)| name == "xl/workbook.xml")
+            .unwrap()
+            .1;
+        *workbook = String::from_utf8(workbook.clone())
+            .unwrap()
+            .replace("</workbook>", r#"<calcPr fullCalcOnLoad="1"/></workbook>"#)
+            .into_bytes();
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        for session in [
+            Session::open(&bytes, None).unwrap(),
+            Session::open_collaborative(&bytes, 7, None).unwrap(),
+        ] {
+            let saved = ooxml_opc::unzip_parts(&session.save().unwrap()).unwrap();
+            let saved = xlsx_parse::parse_workbook(&saved).unwrap();
+            assert_eq!(
+                saved.value(SheetId(0), CellRef::parse_a1("A1").unwrap()),
+                CellValue::Number { value: 5.0 }
+            );
+        }
+    }
+
     fn formula_xlsx() -> Vec<u8> {
         let mut sheet = Sheet::new("Data");
         sheet.set_cell(
