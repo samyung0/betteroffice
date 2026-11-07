@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { cn } from "../../lib/cn";
-import type { CollaborationStatus } from "./types";
+import type { CollaborationStatus } from "../../../../shared/editor-host/collaboration/types";
 
 interface CollaborationControlsProps {
   status: CollaborationStatus;
