@@ -12,6 +12,7 @@ export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) =>
 export const __wbindgen_start: () => void;
 export const allocationFailure: () => number;
 export const betteroffice_memory_grows: () => number;
+export const decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
 export const memory: WebAssembly.Memory;
 export const xlsxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_applyFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -40,6 +41,7 @@ export const xlsxdocument_encodeStateAsUpdate: (a: number) => [number, number];
 export const xlsxdocument_encodeStateVector: (a: number) => [number, number];
 export const xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
 export const xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
+export const xlsxdocument_lockedInRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_open: (a: number, b: number) => [number, number, number];

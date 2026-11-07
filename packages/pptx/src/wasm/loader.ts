@@ -1,4 +1,5 @@
 import initWasmModule, {
+  decodeFontFace as decodePackedFontFace,
   decodeTiffPng,
   parsePptxJson,
   PptxDocument,
@@ -6,7 +7,6 @@ import initWasmModule, {
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
-import * as engineGlue from './generated/pptx_wasm.js';
 import { toError } from './errors';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
@@ -283,13 +283,6 @@ export function initWasm(
   return initialization;
 }
 
-type EngineFontDecoder = (
-  bytes: Uint8Array,
-  codec: string,
-  dict: Uint8Array | undefined,
-  maxOutput: number | undefined
-) => { font: Uint8Array; payload?: Uint8Array };
-
 function ownFontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer> {
   return (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).slice();
 }
@@ -297,17 +290,14 @@ function ownFontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer> 
 /**
  * Decodes one packed font face (`.ttf.zst`, `.otf.zst`) with this engine's
  * linked decoder, for `@betteroffice/fonts` as its runtime decoder, so the
- * page never fetches the standalone `fontpack.wasm`. Looked up by name until
- * the generated glue declares it; a module built without it fails here.
+ * page never fetches the standalone `fontpack.wasm`.
  */
 export async function decodeFontFace(
   bytes: ArrayBuffer | Uint8Array,
   { codec, dict, maxOutput }: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number }
 ): Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }> {
   await initWasm();
-  const decode = (engineGlue as unknown as Record<string, unknown>).decodeFontFace as EngineFontDecoder | undefined;
-  if (typeof decode !== 'function') throw new Error('decodeFontFace is not available in the pptx wasm');
-  const face = decode(ownFontBytes(bytes), codec, dict === undefined ? undefined : ownFontBytes(dict), maxOutput);
+  const face = decodePackedFontFace(ownFontBytes(bytes), codec, dict === undefined ? undefined : ownFontBytes(dict), maxOutput);
   return {
     font: ownFontBytes(face.font).buffer,
     ...(face.payload === undefined ? {} : { payload: ownFontBytes(face.payload).buffer }),
@@ -515,12 +505,7 @@ export function openPresentation(
       return wasmCall(() => registerFont(renderer, face));
     },
     requestedFontFaces(slideId?: string): PptxRequestedFontFace[] {
-      // Looked up by name until the generated glue declares it.
-      const request = (renderer as unknown as {
-        requestedFontFacesJson?: (document: PptxDocument, slideId?: string) => string;
-      }).requestedFontFacesJson;
-      if (!request) throw new Error('requestedFontFacesJson is not available in the pptx wasm');
-      return jsonWasmCall<{ faces: PptxRequestedFontFace[] }>(() => request.call(renderer, doc, slideId)).faces;
+      return jsonWasmCall<{ faces: PptxRequestedFontFace[] }>(() => renderer.requestedFontFacesJson(doc, slideId)).faces;
     },
     embeddedFonts(): PptxEmbeddedFontFace[] {
       return wasmCall(() => {
@@ -556,8 +541,7 @@ export function openPresentation(
       return wasmCall(() => doc.mediaBytes(partPath));
     },
     metafileSvg(partPath: string): Uint8Array | undefined {
-      const replay = (doc as { metafileSvg?: (path: string) => Uint8Array | undefined }).metafileSvg;
-      return replay ? wasmCall(() => replay.call(doc, partPath)) : undefined;
+      return wasmCall(() => doc.metafileSvg(partPath));
     },
     save(): Uint8Array {
       // Through the renderer, so edited normal-autofit text saves the scale it

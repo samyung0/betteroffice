@@ -262,9 +262,6 @@ for (const path of ['native', 'typescript'] as const) {
   }
 }
 
-// S5: the layout half needs the docx-edit wasm whose restyle takes
-// `listMarkerFonts` with a style's numbering and whose bridge applies it
-// (DOCX track, #1921); capy-ci's ignores it and shows the authored name.
 test("a restyle that brings numbering from a style shows its level's theme marker font (#1921)", async () => {
   const bytes = styledListPackage('<w:rFonts w:ascii="Times New Roman" w:asciiTheme="minorHAnsi" w:hAnsi="Arial"/>');
   const document = await parseDocx(bytes.buffer, { preloadFonts: false });

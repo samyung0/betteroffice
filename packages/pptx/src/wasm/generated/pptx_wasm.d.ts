@@ -1,5 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
+export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }
+
 
 export class PptxDocument {
     private constructor();
@@ -36,6 +38,11 @@ export class PptxDocument {
     insertTextProfiledJson(args: string): string;
     listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
+    /**
+     * An EMF or WMF picture's SVG display copy (#1820), replayed once and cached; `undefined`
+     * for a part with none.
+     */
+    metafileSvg(part_path: string): Uint8Array | undefined;
     moveShapeJson(args: string): string;
     moveShapeProfiledJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -119,6 +126,15 @@ export class PptxRenderer {
     registerFallbackFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
     /**
+     * The faces layout can ask for, one slide's (by id) or the whole deck's,
+     * each with the script buckets its text needs, as
+     * `{"faces":[{"family","bold","italic","scripts"?}]}` in first-use order,
+     * without laying anything out (upstream #1934, #2027). A superset of what
+     * layout requests: a face a shape or chart budget skips may be listed, so
+     * a host can load a deck's faces before its first paint.
+     */
+    requestedFontFacesJson(document: PptxDocument, slide_id?: string | null): string;
+    /**
      * Saves `document` with the normal-autofit scales this renderer refit
      * its edited text to (upstream #1526); `PptxDocument.saveBytes` keeps
      * the stored ones.
@@ -130,6 +146,13 @@ export class PptxRenderer {
 }
 
 export function compileSlideJson(slide_json: string): string;
+
+/**
+ * Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+ * Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+ * The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+ */
+export function decodeFontFace(bytes: Uint8Array, codec: string, dict?: Uint8Array | null, maxOutput?: number | null): DecodedFontFace;
 
 export function decodeTiffPng(data: Uint8Array): Uint8Array;
 
@@ -152,6 +175,7 @@ export interface InitOutput {
     readonly __wbindgen_start: () => void;
     readonly betteroffice_memory_grows: () => number;
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
+    readonly decodeFontFace: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
     readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly memory: WebAssembly.Memory;
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
@@ -187,6 +211,7 @@ export interface InitOutput {
     readonly pptxdocument_insertTextProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_metafileSvg: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -238,6 +263,7 @@ export interface InitOutput {
     readonly pptxrenderer_registerEmbeddedFontsJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_registerFallbackFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly pptxrenderer_requestedFontFacesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pptxrenderer_saveBytes: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_setActiveSlide: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
     readonly pptxrenderer_slideLayoutKey: (a: number, b: number, c: number) => [number, number, number, number];

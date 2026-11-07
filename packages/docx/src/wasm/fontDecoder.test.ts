@@ -6,8 +6,7 @@ import { preloadEditWasm } from './edit';
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(new URL('./generated/edit/docx_edit_bg.wasm', import.meta.url)))), 30_000);
 
-// S5: the committed wasm predates the decoder export; passes once S5 rebuilds it.
-test('S5: the root font decoder decodes packs with the DOCX edit engine, returning ArrayBuffers', async () => {
+test('the root font decoder decodes packs with the DOCX edit engine, returning ArrayBuffers', async () => {
   for (const entry of fontCases()) {
     const backing = new Uint8Array(entry.bytes.length + 2);
     backing.set(entry.bytes, 1);

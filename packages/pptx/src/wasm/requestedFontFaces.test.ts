@@ -15,8 +15,7 @@ beforeAll(async () => {
   deck = pptx;
 });
 
-// S5: the committed wasm predates requestedFontFacesJson; passes once S5 rebuilds it.
-test('S5: the deck lists every face its slides request, before any layout', () => {
+test('the deck lists every face its slides request, before any layout', () => {
   const handle = openPresentation(deck, { clientId: 9301 });
   try {
     const faces = handle.requestedFontFaces();

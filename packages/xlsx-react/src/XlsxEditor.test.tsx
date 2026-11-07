@@ -3726,9 +3726,6 @@ describe('XlsxEditor formula entry', () => {
     expect(await view.input(11, 1)).toBe('1000');
   });
 
-  // S5: needs the xlsx-wasm that reports `protected` in sheetInfo() and
-  // `locked` in cell() (XLSX track, Q698); it fails on capy-ci's wasm, which
-  // reports neither.
   it('refuses an edit of a locked cell on a protected sheet before it opens, translated (Q698)', async () => {
     const view = await mountEditor(protectedSheet, undefined, undefined, { i18n: zhCN });
     await view.click({ row: 0, col: 0 });
@@ -3761,9 +3758,6 @@ describe('XlsxEditor formula entry', () => {
     }
   };
 
-  // S5: these four need the xlsx-wasm with lockedInRangesJson and sheetInfo's
-  // `protected` (XLSX track, Q701); on capy-ci's wasm the clear, paste and cut
-  // go through.
   it('refuses a clear over a locked cell of a protected sheet whole (Q701)', async () => {
     const view = await mountEditor(protectedSheet);
     await view.click({ row: 0, col: 0 });
