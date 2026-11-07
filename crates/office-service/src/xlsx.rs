@@ -8,6 +8,7 @@ use betteroffice_xlsx::{
     Op, SheetId, StylePatch, Workbook,
 };
 use serde::Serialize;
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 
 use crate::common::{assert_checkpoint, image_mime_type, sha256_hex, storable_text};
 use crate::env;
@@ -246,15 +247,17 @@ impl XlsxSession {
 
     pub fn editable(&self) -> Result<Vec<Entry>> {
         let sheets = self.projection(false)?;
+        let defined = DefinedFunctionNames::new(&self.workbook.model().defined_names);
         let mut entries = Vec::new();
         for (index, sheet) in array(sheets.get("sheets")).iter().enumerate() {
             let (sheet_id, name) = (text(sheet.get("id")), text(sheet.get("name")));
+            let names = defined.visible_from(Some(SheetId(index as u32)));
             self.each_cell(index, false, |cell| {
                 let address = text(cell.get("address"));
                 entries.push(Entry {
                     id: text(cell.get("id")),
                     label: format!("{name}!{address}"),
-                    value: cell_value(&cell),
+                    value: cell_value(&cell, names),
                     position: format!("{sheet_id}:{address}"),
                 });
                 Ok(())
@@ -359,8 +362,11 @@ impl XlsxSession {
         };
         let before = self.cell_at(index, &address)?;
         let input = read_input(&self.workbook)?;
+        let defined = DefinedFunctionNames::new(&self.workbook.model().defined_names);
+        let names = defined.visible_from(Some(SheetId(index as u32)));
+        let listed = |cell: &J| cell_value(cell, names);
         if expected_value != input
-            && expected_value != before.as_ref().map(cell_value).unwrap_or_default()
+            && expected_value != before.as_ref().map(listed).unwrap_or_default()
         {
             // The cell as inspect lists it; an empty cell is not listed.
             return Err(Error::Edit {
@@ -368,7 +374,7 @@ impl XlsxSession {
                 message: "the cell differs from expected_value".into(),
                 details: before.as_ref().map(|cell| {
                     serde_json::json!({
-                        "block": { "id": text(cell.get("id")), "type": "cell", "text": cell_value(cell) }
+                        "block": { "id": text(cell.get("id")), "type": "cell", "text": listed(cell) }
                     })
                 }),
             });
@@ -1021,11 +1027,12 @@ pub(crate) fn js_string(value: &J) -> String {
     }
 }
 
-/// office-checkpoint.ts `xlsxCellValue`.
-fn cell_value(cell: &J) -> String {
+/// office-checkpoint.ts `xlsxCellValue`, a formula shown as the grid shows it:
+/// without the storage prefixes (`_xlfn.`, `_xlws.`) the save writes.
+fn cell_value(cell: &J, names: FormulaNames<'_>) -> String {
     match cell.get("formula") {
         Some(J::Null) | None => {}
-        Some(formula) => return format!("={}", js_string(formula)),
+        Some(formula) => return format!("={}", display_formula(&js_string(formula), names)),
     }
     let value = cell.get("value");
     if value

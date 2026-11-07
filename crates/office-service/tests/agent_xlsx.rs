@@ -3,12 +3,13 @@
 //! and the starter workbook.
 
 use betteroffice_xlsx::{
-    CellRange, CellRef, DefinedName, NumberFormatMutation, Sheet, SheetId, StylePatch, Workbook,
-    WorkbookModel,
+    CalculationOptions, CellRange, CellRef, DefinedName, NumberFormatMutation, Sheet, SheetId,
+    StylePatch, Workbook, WorkbookModel,
 };
 use office_service::{
     CellStyle, Checkpoint, Command, CommandResult, Determinism, EditCode, Error, Format,
-    InspectQuery, apply_commands, create, export, inspect_scoped, seed, sha256_hex, starter,
+    InspectQuery, apply_commands, create, export, inspect, inspect_scoped, seed, sha256_hex,
+    starter,
 };
 use serde_json::{Value, json};
 
@@ -819,6 +820,62 @@ fn agent_formulas_pass_the_rules_or_are_refused_naming_one() {
         .unwrap_err(),
         invalid("C3: the HYPERLINK function is not allowed")
     );
+}
+
+/// A saved XLOOKUP is stored as Excel writes it, `_xlfn.XLOOKUP(`; the agent
+/// reads it as people see it in the grid, and writes it back in that form.
+#[test]
+fn agent_reads_show_saved_formulas_without_storage_prefixes() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut workbook = Workbook::from_model(model).unwrap();
+    for (address, input) in [
+        ("A1", "1"),
+        ("A2", "2"),
+        ("A3", "3"),
+        ("B1", "10"),
+        ("B2", "20"),
+        ("B3", "30"),
+        ("C1", "=XLOOKUP(2,A1:A3,B1:B3)"),
+    ] {
+        workbook
+            .edit_cell(
+                SheetId(0),
+                CellRef::parse_a1(address).unwrap(),
+                input,
+                CalculationOptions::default(),
+            )
+            .unwrap();
+    }
+    let base = workbook.save().unwrap();
+    let sheet = ooxml_opc::unzip_parts(&base)
+        .unwrap()
+        .into_iter()
+        .find(|(name, _)| name == "xl/worksheets/sheet1.xml")
+        .map(|(_, bytes)| String::from_utf8(bytes).unwrap())
+        .unwrap();
+    assert!(
+        sheet.contains("<f>_xlfn.XLOOKUP(2,A1:A3,B1:B3)</f>"),
+        "{sheet}"
+    );
+
+    let mut book = Book::new(base);
+    assert_eq!(book.cells("Data", "C1"), ["C1==XLOOKUP(2,A1:A3,B1:B3)→20"]);
+    let listed = inspect(&book.base, book.checkpoint()).unwrap();
+    let c1 = listed
+        .iter()
+        .find(|entry| entry.label == "Data!C1")
+        .unwrap();
+    assert_eq!(c1.value, "=XLOOKUP(2,A1:A3,B1:B3)");
+
+    book.apply(&[Command::SetCell {
+        sheet: "Data".into(),
+        cell: "C1".into(),
+        expected_value: "=XLOOKUP(2,A1:A3,B1:B3)".into(),
+        value: "=XLOOKUP(3,A1:A3,B1:B3)".into(),
+    }])
+    .unwrap();
+    assert_eq!(book.cells("Data", "C1"), ["C1==XLOOKUP(3,A1:A3,B1:B3)→30"]);
 }
 
 #[test]
