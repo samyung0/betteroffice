@@ -77,16 +77,18 @@ fn assert_widths(actual: &[f64], expected: &[f64]) {
     }
 }
 
+/// Capy's seed gives a cell without `w:tcW` its share of the grid columns it
+/// spans (upstream's bridge drops that synthetic width): here the two columns
+/// after the skipped one, 3000 of 3300 twips.
 #[test]
-#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
-fn bridge_preserves_leading_grid_columns_and_drops_legacy_synthetic_cell_widths() {
+fn bridge_preserves_leading_grid_columns_and_the_spanned_share() {
     docx_layout::with_private_measure_fonts(|| {
         let mut blocks = lower(r#"<w:gridBefore w:val="1"/>"#, 2);
         let LayoutBlock::Table(table) = &blocks[0] else {
             panic!("table");
         };
         assert_eq!(table.rows[0].grid_before, Some(1));
-        assert_eq!(table.rows[0].cells[0].width_value, None);
+        assert_eq!(table.rows[0].cells[0].width_value, Some(91.0));
         let font = docx_layout::register_measure_font(FONT).unwrap();
         let config = MeasurementConfig {
             font_chains: [("arial|0|0".to_owned(), vec![font])].into(),
@@ -171,7 +173,7 @@ fn bridge_leaves_unskipped_rows_without_new_layout_properties() {
 }
 
 #[test]
-#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
+#[ignore = "needs upstream's fixed-layout column algorithm (the first row's w:tcW over w:tblGrid); Capy's grid keeps the authored w:tblGrid under w:tblLayout fixed (2026-10-06, Q702)"]
 fn imported_fixed_layout_keeps_cell_preferences_with_grid_before() {
     docx_layout::with_private_measure_fonts(|| {
         let cells = ["First", "Second", "Third"]
@@ -201,7 +203,6 @@ fn imported_fixed_layout_keeps_cell_preferences_with_grid_before() {
 }
 
 #[test]
-#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
 fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
     docx_layout::with_private_measure_fonts(|| {
         let cells =
@@ -211,7 +212,8 @@ fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
         let (table, measure) =
             measured_fixed_table(&[1500, 1500], 3000, &format!("{full}{skipped}"));
         assert_eq!(table.rows[1].cells[0].col_span, Some(1.0));
-        assert_eq!(table.rows[1].cells[0].width_value, None);
+        // Capy's seed: the cell's share of the one column it covers.
+        assert_eq!(table.rows[1].cells[0].width_value, Some(50.0));
         assert_eq!(docx_layout::table_grid::count_table_columns(&table), 2);
         assert_eq!(measure.column_widths, [100.0, 100.0]);
         assert_eq!(measure.total_width, 200.0);
@@ -222,7 +224,7 @@ fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
 }
 
 #[test]
-#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
+#[ignore = "needs upstream's fixed-layout column algorithm (the first row's w:tcW over w:tblGrid); Capy's grid keeps the authored w:tblGrid under w:tblLayout fixed (2026-10-06, Q702)"]
 fn mixed_skipped_rows_keep_main_grid_and_unskipped_widths() {
     docx_layout::with_private_measure_fonts(|| {
         let cells = ["First", "Second", "Third"]

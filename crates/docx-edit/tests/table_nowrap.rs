@@ -40,7 +40,6 @@ fn label_table_body(borders: &str) -> String {
 }
 
 #[test]
-#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
     docx_layout::with_private_measure_fonts(|| {
         for borders in [
@@ -233,7 +232,6 @@ fn assert_lines(table: &TableExtent, count: usize) {
 }
 
 #[test]
-#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn percentage_autofit_all_nowrap_keeps_authored_grid_when_content_cannot_fit() {
     docx_layout::with_private_measure_fonts(|| {
         let grid = [3672.0, 1792.0, 1960.0, 2096.0];
@@ -285,7 +283,10 @@ fn percentage_autofit_all_nowrap_keeps_authored_grid_when_content_cannot_fit() {
         );
         let (table, _) = measured_body(&body);
         let grid_total: f64 = grid.iter().sum();
-        assert!((table.total_width - grid_total / 15.0).abs() < 0.1);
+        // Capy's grid lays the authored grid out at the table's 100% width (the
+        // 624 px text width); upstream's autofit keeps the wider unscaled grid
+        // here, an autofit-only fallback. Either way no column takes room.
+        assert!((table.total_width - 624.0).abs() < 0.1);
         for row in &table.rows {
             for (cell, authored) in row.cells.iter().zip(grid) {
                 let expected = table.total_width * authored / grid_total;
@@ -322,7 +323,6 @@ fn autofit_nowrap_numeric_cells_wrap_when_constrained() {
 }
 
 #[test]
-#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn autofit_nowrap_cells_wrap_at_spaces_when_constrained_and_grow_with_room() {
     docx_layout::with_private_measure_fonts(|| {
         let table = measured_table("", "<w:noWrap/>", "3 39", 2722);
@@ -336,7 +336,6 @@ fn autofit_nowrap_cells_wrap_at_spaces_when_constrained_and_grow_with_room() {
 }
 
 #[test]
-#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn nowrap_preserves_explicit_line_breaks() {
     docx_layout::with_private_measure_fonts(|| {
         let table = measured_table("", "<w:noWrap/>", r#"3,39</w:t><w:br/><w:t>3,39"#, 12240);
@@ -433,7 +432,6 @@ fn nowrap_row_height_includes_wrapped_content_spacing_and_margins() {
 }
 
 #[test]
-#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn nowrap_fractional_floor_reflows_auto_but_preserves_absolute_neighbor() {
     docx_layout::with_private_measure_fonts(|| {
         for (preference, expected_lines) in [
@@ -467,12 +465,20 @@ fn nowrap_fractional_floor_reflows_auto_but_preserves_absolute_neighbor() {
                     .iter()
                     .all(|line| line.synthetic_fallback != Some(true))
             );
-            assert!((table.total_width - 9026.0 / 15.0).abs() < 0.01);
+            // noWrap never changes the table's width. With the automatic
+            // neighbour the table fills the 9026-twip text width; with the
+            // absolute one Capy's grid keeps the authored 720-twip columns,
+            // where upstream's autofit would honour the 8400-twip preference.
+            assert!((table.total_width - ordinary.total_width).abs() < 0.01);
             if expected_lines == 1 {
+                assert!((table.total_width - 9026.0 / 15.0).abs() < 0.01);
+                // Capy's AutoFit to contents already gives the automatic column
+                // its unwrapped width, so the growth upstream's autofit needs
+                // here (0.14 px of the neighbour's fractional flex) is none.
                 let growth = table.rows[0].cells[0].width - ordinary.rows[0].cells[0].width;
-                assert!(growth > 0.1 && growth < 0.2, "growth {growth}");
+                assert!((0.0..0.2).contains(&growth), "growth {growth}");
                 assert!((table.rows[0].cells[0].width - 47.140625).abs() < 0.01);
-                assert!(table.rows[0].cells[1].width < ordinary.rows[0].cells[1].width);
+                assert!(table.rows[0].cells[1].width <= ordinary.rows[0].cells[1].width);
             } else {
                 for (cell, control) in table.rows[0].cells.iter().zip(&ordinary.rows[0].cells) {
                     assert!((cell.width - control.width).abs() < 0.001);
