@@ -8,6 +8,7 @@
 
 import initWasmModule, { allocationFailure, XlsxDocument } from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
+import * as engineGlue from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
 import type { SelectionData } from '../selection/types';
@@ -512,6 +513,37 @@ export function engineOutOfMemory(error: unknown): Error | null {
 /**
  * Whether this environment exposes the WebAssembly runtime required by the core.
  */
+type EngineFontDecoder = (
+  bytes: Uint8Array,
+  codec: string,
+  dict: Uint8Array | undefined,
+  maxOutput: number | undefined
+) => { font: Uint8Array; payload?: Uint8Array };
+
+function ownFontBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer> {
+  return (bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)).slice();
+}
+
+/**
+ * Decodes one packed font face (`.ttf.zst`, `.otf.zst`) with this engine's
+ * linked decoder, for `@betteroffice/fonts` as its runtime decoder, so the
+ * page never fetches the standalone `fontpack.wasm`. Looked up by name until
+ * the generated glue declares it; a module built without it fails here.
+ */
+export async function decodeFontFace(
+  bytes: ArrayBuffer | Uint8Array,
+  { codec, dict, maxOutput }: { codec: string; dict?: ArrayBuffer | Uint8Array; maxOutput?: number }
+): Promise<{ font: ArrayBuffer; payload?: ArrayBuffer }> {
+  await initWasm();
+  const decode = (engineGlue as unknown as Record<string, unknown>).decodeFontFace as EngineFontDecoder | undefined;
+  if (typeof decode !== 'function') throw new Error('decodeFontFace is not available in the xlsx wasm');
+  const face = decode(ownFontBytes(bytes), codec, dict === undefined ? undefined : ownFontBytes(dict), maxOutput);
+  return {
+    font: ownFontBytes(face.font).buffer,
+    ...(face.payload === undefined ? {} : { payload: ownFontBytes(face.payload).buffer }),
+  };
+}
+
 export function isWasmAvailable(): boolean {
   return typeof WebAssembly === 'object';
 }

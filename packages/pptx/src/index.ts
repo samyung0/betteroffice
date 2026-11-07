@@ -33,6 +33,7 @@ export type {
 } from './collaboration';
 export { PRESENCE_LABEL_DURATION_MS, presenceColorForClientId } from './collaboration';
 export {
+  decodeFontFace,
   initWasm,
   inspectPresentation,
   isWasmAvailable,
@@ -80,6 +81,7 @@ export type {
   ProfiledLayout,
   PptxEmbeddedFontFace,
   PptxFontFace,
+  PptxRequestedFontFace,
   PptxTextMatch,
   PptxTextSearchOptions,
   PrimitiveTransform,

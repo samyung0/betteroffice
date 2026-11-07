@@ -10,6 +10,42 @@ use wasm_bindgen::prelude::*;
 
 pub use pptx_edit::wasm::PptxDocument;
 
+#[wasm_bindgen(typescript_custom_section)]
+const DECODED_FONT_FACE: &str =
+    r#"export interface DecodedFontFace { font: Uint8Array; payload?: Uint8Array; }"#;
+
+/// Decodes one font pack face (codec "zstd" or "woff2t+zstd") with this engine's linked decoder.
+/// Returns owned bytes and an optional transformed payload. Non-zstd input passes through.
+/// The default output limit is 64 MiB; woff2t decoding is always capped at 64 MiB.
+#[wasm_bindgen(js_name = decodeFontFace, unchecked_return_type = "DecodedFontFace")]
+pub fn decode_font_face(
+    bytes: &[u8],
+    codec: &str,
+    #[wasm_bindgen(unchecked_optional_param_type = "Uint8Array | null")] dict: Option<Vec<u8>>,
+    #[wasm_bindgen(js_name = maxOutput, unchecked_optional_param_type = "number | null")]
+    max_output: Option<f64>,
+) -> Result<JsValue, JsError> {
+    let decoded =
+        betteroffice_fonts::decode_font_face_js(bytes, codec, dict.as_deref(), max_output)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &"font".into(),
+        &js_sys::Uint8Array::from(decoded.font.as_slice()),
+    )
+    .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    if let Some(payload) = decoded.payload {
+        js_sys::Reflect::set(
+            &object,
+            &"payload".into(),
+            &js_sys::Uint8Array::from(payload.as_slice()),
+        )
+        .map_err(|_| JsError::new("cannot create decoded font face"))?;
+    }
+    Ok(object.into())
+}
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = performance, js_name = now)]
@@ -262,6 +298,22 @@ impl PptxRenderer {
             keys,
         })
         .map_err(js_error)
+    }
+
+    /// The faces layout can ask for, one slide's (by id) or the whole deck's,
+    /// each with the script buckets its text needs, as
+    /// `{"faces":[{"family","bold","italic","scripts"?}]}` in first-use order,
+    /// without laying anything out (upstream #1934, #2027). A superset of what
+    /// layout requests: a face a shape or chart budget skips may be listed, so
+    /// a host can load a deck's faces before its first paint.
+    #[wasm_bindgen(js_name = requestedFontFacesJson)]
+    pub fn requested_font_faces_json(
+        &self,
+        document: &PptxDocument,
+        slide_id: Option<String>,
+    ) -> Result<String, JsValue> {
+        self.requested_font_faces(document.session(), slide_id.as_deref())
+            .map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = slideLayoutKey)]
@@ -774,6 +826,45 @@ pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
     ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
 }
 
+impl PptxRenderer {
+    /// [`PptxRenderer::requested_font_faces_json`] with string errors, so
+    /// native tests reach every path.
+    fn requested_font_faces(
+        &self,
+        session: &pptx_edit::DeckSession,
+        slide_id: Option<&str>,
+    ) -> Result<String, String> {
+        let ids = session.slide_ids().map_err(|error| error.to_string())?;
+        let indices = match slide_id {
+            Some(id) => vec![
+                ids.iter()
+                    .position(|candidate| candidate == id)
+                    .ok_or_else(|| {
+                        pptx_edit::EditError::SlideNotFound(id.to_owned()).to_string()
+                    })?,
+            ],
+            None => (0..ids.len()).collect(),
+        };
+        let scopes = indices
+            .into_iter()
+            .map(|index| {
+                session
+                    .slide_scope(index)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let faces = self
+            .renderer
+            .requested_font_faces_with_scripts(session.package(), &scopes)
+            .map_err(|error| error.to_string())?;
+        #[derive(serde::Serialize)]
+        struct RequestedFaces {
+            faces: Vec<pptx_render::RequestedFontFace>,
+        }
+        serde_json::to_string(&RequestedFaces { faces }).map_err(|error| error.to_string())
+    }
+}
+
 fn slide_scope(
     session: &pptx_edit::DeckSession,
     slide_index: u32,
@@ -842,6 +933,64 @@ mod tests {
                     previous_oracle == oracle,
                     "{}",
                     scope.slide.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn requested_faces_cover_layout_without_laying_out() {
+        let document = PptxDocument::open_collaborative(DECK, 914.0).unwrap();
+        let session = document.session();
+        let renderer = PptxRenderer::new();
+        let ids = session.slide_ids().unwrap();
+        let faces = |json: String| -> Vec<serde_json::Value> {
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            value["faces"].as_array().unwrap().clone()
+        };
+        let deck = faces(renderer.requested_font_faces_json(&document, None).unwrap());
+        assert!(!deck.is_empty());
+        let mut union = Vec::new();
+        for id in &ids {
+            for face in faces(
+                renderer
+                    .requested_font_faces_json(&document, Some(id.clone()))
+                    .unwrap(),
+            ) {
+                if !union.contains(&face) {
+                    union.push(face);
+                }
+            }
+        }
+        let key = |face: &serde_json::Value| {
+            (
+                face["family"].clone(),
+                face["bold"].clone(),
+                face["italic"].clone(),
+            )
+        };
+        assert_eq!(
+            deck.iter().map(key).collect::<Vec<_>>(),
+            union.iter().map(key).collect::<Vec<_>>()
+        );
+        assert_eq!(renderer.layout_count, 0);
+        assert!(
+            renderer
+                .requested_font_faces(session, Some("missing"))
+                .is_err()
+        );
+        for index in 0..ids.len() {
+            let scope = session.slide_scope(index).unwrap();
+            let rendered = renderer
+                .renderer
+                .layout_scoped_slide_at_caret(session.package(), &scope, None)
+                .unwrap();
+            for substitution in &rendered.font_substitutions {
+                assert!(
+                    deck.iter()
+                        .any(|face| face["family"] == substitution.requested_family.as_str()),
+                    "{} is laid out but not requested",
+                    substitution.requested_family
                 );
             }
         }

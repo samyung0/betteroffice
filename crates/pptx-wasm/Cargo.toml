@@ -13,6 +13,8 @@ crate-type = ["cdylib", "rlib"]
 wasm-opt = ["-O3"]
 
 [dependencies]
+betteroffice-fonts.workspace = true
+js-sys = "0.3"
 ooxml-drawingml = { workspace = true, features = ["tiff"] }
 pptx-edit = { workspace = true, features = ["metafile-svg", "wasm"] }
 pptx-parse.workspace = true

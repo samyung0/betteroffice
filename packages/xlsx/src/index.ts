@@ -95,6 +95,7 @@ export { buildA11yGrid } from './a11y/index';
 
 export { cellFont, paintDisplayList } from './render/canvas2d';
 export {
+  decodeFontFace,
   initWasm,
   isWasmAvailable,
   isPngExportAvailable,

@@ -26,7 +26,7 @@ base-latin = ["docx-layout/base-latin"]
 # `--features wasm` (driven by scripts/build-docx-wasm.ts). On wasm32 it also
 # installs betteroffice-wasm-alloc as the global allocator, so a crate with its
 # own allocator cannot enable it.
-wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-alloc"]
+wasm = ["dep:wasm-bindgen", "dep:js-sys", "dep:wasm-alloc", "dep:betteroffice-fonts"]
 # The seeded yrs image src is what the renderer paints, so this crate needs the
 # same TIFF transcode the docx-parse wasm build enables.
 tiff = ["docx-parse/tiff"]
@@ -50,6 +50,7 @@ unicode-segmentation = "1.12"
 wasm-bindgen = { version = "0.2", optional = true }
 js-sys = { version = "0.3", optional = true }
 wasm-alloc = { workspace = true, optional = true }
+betteroffice-fonts = { workspace = true, optional = true }
 
 [dev-dependencies]
 ooxml-opc.workspace = true

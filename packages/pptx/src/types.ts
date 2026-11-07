@@ -420,6 +420,15 @@ export interface Profiled<T, P = EditProfile> {
   profile: P;
 }
 
+/** A face layout can ask for, with the script buckets (`cjk-jp`, `arabic`,
+ * ...) of the text set in it (`requestedFontFaces`). */
+export interface PptxRequestedFontFace {
+  family: string;
+  bold: boolean;
+  italic: boolean;
+  scripts?: string[];
+}
+
 export interface PptxFontFace {
   family: string;
   bold?: boolean;
