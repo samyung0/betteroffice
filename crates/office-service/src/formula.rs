@@ -12,6 +12,7 @@ use betteroffice_xlsx::DefinedName;
 use xlsx_calc::functions::Func;
 use xlsx_calc::{Expr, parse_formula};
 use xlsx_ops::{ParsedInput, parse_input};
+use xlsx_parse::{DefinedFunctionNames, FormulaNames, display_formula};
 
 use crate::error::{EditCode, Error, Result};
 
@@ -67,6 +68,10 @@ impl Formulas<'_> {
             Expr::FuncCall { name, func, args } => {
                 match func {
                     None => {
+                        // Named as people see it, without storage prefixes (Q707).
+                        let call = format!("{name}()");
+                        let shown = display_formula(&call, FormulaNames::default());
+                        let name = shown.strip_suffix("()").unwrap_or(&shown);
                         return Err(format!(
                             "the function {name} is not available; use a function the spreadsheet engine supports"
                         ));
@@ -149,13 +154,19 @@ impl Formulas<'_> {
         }
         for defined in defined {
             let formula = &defined.formula;
+            // Quoted as people see it, without the storage prefixes a saved name keeps (Q707).
+            let shown = || {
+                let names = DefinedFunctionNames::new(self.names);
+                display_formula(formula, names.visible_from(defined.local_sheet)).into_owned()
+            };
             let expr = parse_formula(formula).map_err(|_| {
                 format!(
-                    "the name {name} refers outside this workbook ({formula}), which is not allowed"
+                    "the name {name} refers outside this workbook ({}), which is not allowed",
+                    shown()
                 )
             })?;
             self.walk(&expr, seen)
-                .map_err(|rule| format!("the name {name} ({formula}) is not allowed: {rule}"))?;
+                .map_err(|rule| format!("the name {name} ({}) is not allowed: {rule}", shown()))?;
         }
         Ok(())
     }
