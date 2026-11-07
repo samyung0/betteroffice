@@ -102,9 +102,7 @@
     "subscriptShortcut": "Subscript (Ctrl+=)",
     "imageProperties": "Image properties",
     "imagePropertiesShortcut": "Image properties (alt text, border)...",
-    "clearFormatting": "Clear formatting",
-    "commentsAndChanges": "Comments & Changes",
-    "moreItems": "{count, plural, one {# more item} other {# more items}}"
+    "clearFormatting": "Clear formatting"
   },
   "alignment": {
     "left": "Left",
@@ -936,8 +934,7 @@
   "imageOverlay": {
     "rotate": "Rotate",
     "imageProperties": "Image properties",
-    "deleteImage": "Delete image",
-    "replaceImage": "Replace image…"
+    "deleteImage": "Delete image"
   },
   "ruler": {
     "tabStop": "{alignment} tab at {position}",
@@ -978,20 +975,6 @@
   },
   "loading": {
     "label": "Loading"
-  },
-  "agentPanel": {
-    "defaultTitle": "Assistant",
-    "toggle": "Open assistant",
-    "close": "Close panel",
-    "resizeHandle": "Resize agent panel",
-    "thinking": "Assistant is thinking",
-    "composerPlaceholder": "Ask the assistant…",
-    "send": "Send",
-    "timeline": {
-      "working": "Working… {count, plural, one {# step} other {# steps}}",
-      "summary": "{count, plural, one {# step} other {# steps}}",
-      "earlier": "+ {count, plural, one {# earlier step} other {# earlier steps}}"
-    }
   },
   "a11y": {
     "pageLabel": "Page {number}",
