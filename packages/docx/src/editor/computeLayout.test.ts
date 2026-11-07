@@ -130,6 +130,17 @@ test('buildResidentRegionLayoutRequest forwards the parsed theme without changin
   expect(document.package.theme).toBe(theme);
 });
 
+test('buildResidentRegionLayoutRequest forwards the first picture bullet size (#1936)', () => {
+  const document = stylesDoc([]);
+  document.package.numbering = {
+    abstractNums: [],
+    nums: [],
+    firstPictureBullet: { width: 12, height: 9 },
+  };
+  const request = buildResidentRegionLayoutRequest(document, 24, {});
+  expect(request.renderEnv.firstPictureBullet).toEqual({ width: 12, height: 9 });
+});
+
 describe('buildResidentRegionLayoutRequest compatibilityFlags', () => {
   test('forwards the document compatibility settings to lowering', () => {
     const document = stylesDoc([]);

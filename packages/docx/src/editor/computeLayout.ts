@@ -107,6 +107,7 @@ export function buildResidentRegionLayoutRequest(
     notes: { contents },
     renderEnv: {
       fontTheme: document?.package.theme,
+      firstPictureBullet: document?.package.numbering?.firstPictureBullet,
       compatibilityFlags: document?.package.settings?.compatibilityFlags,
       ...renderEnv,
       ...defaultParagraphStyleEnv(document, renderEnv),

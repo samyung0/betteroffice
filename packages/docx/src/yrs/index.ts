@@ -476,6 +476,8 @@ export interface YrsRenderEnv {
   themeColors?: Record<string, string>;
   /** The document's theme fonts, for theme-font resolution. */
   fontTheme?: Theme;
+  /** The first sized picture bullet in numbering, in points: a list paragraph's leading box (#1936). */
+  firstPictureBullet?: { width: number; height: number };
   /** The document default tab stop in twips. */
   defaultTabStopTwips?: number | null;
   /** Current page content height in CSS px, for proportional drawing constraints. */
