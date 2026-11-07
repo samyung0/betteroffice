@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
-use xlsx_model::{CellRef, Workbook};
 use xlsx_model::sort::sort_by_shared;
+use xlsx_model::{CellRef, Workbook};
 
 use crate::package::Relationship;
 use crate::tree::{Element, Part, Replacement, names_are_resolvable};
