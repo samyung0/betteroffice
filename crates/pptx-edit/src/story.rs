@@ -1610,7 +1610,8 @@ fn insert_option(attrs: &mut Attrs, key: &str, value: Option<Any>) {
     }
 }
 
-fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
+/// A source run's properties as a run style, as seeding reads them.
+pub fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) -> TextStyle {
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,

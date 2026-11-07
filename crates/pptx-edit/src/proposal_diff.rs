@@ -159,6 +159,7 @@ impl DeckSession {
             epoch,
             _epoch_observer,
             state_update: std::cell::RefCell::new(None),
+            metafile_svgs: Default::default(),
         };
         for edit in edits {
             apply_edit(&preview, edit)?;

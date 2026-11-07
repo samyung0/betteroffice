@@ -5,36 +5,6 @@ use std::collections::BTreeMap;
 
 pub const CONTRACT_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProposalDiffSlide {
-    pub proposal: pptx_edit::Proposal,
-    pub snapshot: pptx_edit::DeckSnapshot,
-    pub text_changes: Vec<pptx_edit::ProposalTextChange>,
-    #[serde(default)]
-    pub shape_changes: Vec<pptx_edit::ProposalShapeChange>,
-    pub frame: SurfaceDisplayList,
-}
-
-impl Serialize for ProposalDiffSlide {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        let mut value = serde_json::json!({
-            "proposal": self.proposal,
-            "snapshot": self.snapshot,
-            "textChanges": self.text_changes,
-            "frame": self.frame,
-        });
-        if !self.shape_changes.is_empty() {
-            value["shapeChanges"] =
-                serde_json::to_value(&self.shape_changes).map_err(serde::ser::Error::custom)?;
-        }
-        value.serialize(serializer)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SurfaceDisplayList {
@@ -567,10 +537,6 @@ fn is_false(value: &bool) -> bool {
 
 fn is_zero(value: &f32) -> bool {
     *value == 0.0
-}
-
-fn is_unstruck(value: &Option<String>) -> bool {
-    !matches!(value.as_deref(), Some("sngStrike" | "dblStrike"))
 }
 
 #[cfg(test)]
