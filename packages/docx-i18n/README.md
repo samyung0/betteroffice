@@ -15,11 +15,11 @@ bun add @betteroffice/docx-i18n
 Pass a locale to the editor's `i18n` prop:
 
 ```tsx
-import { de } from '@betteroffice/docx-i18n';
+import { zhCN } from '@betteroffice/docx-i18n';
 import { DocxEditor } from '@betteroffice/docx-react';
 
 export function Editor({ file }: { file: File }) {
-  return <DocxEditor documentBuffer={file} i18n={de} />;
+  return <DocxEditor documentBuffer={file} i18n={zhCN} />;
 }
 ```
 
@@ -27,18 +27,14 @@ Override individual strings by spreading a locale. Keys that are missing or `nul
 back to English.
 
 ```ts
-const custom = { ...de, formattingBar: { ...de.formattingBar, bold: 'Fettdruck' } };
+const custom = { ...zhCN, formattingBar: { ...zhCN.formattingBar, bold: '加粗' } };
 ```
 
 ## Locales
 
-`en` (source), `ar`, `de`, `es`, `fr`, `he`, `hi`, `id`, `it`, `ja`, `ko`, `nl`, `pl`, `pt-BR`, `ru`,
-`tr`, `uk`, `vi`, `zh-CN` and `zh-TW`. The exports for `pt-BR`, `zh-CN` and `zh-TW` are `ptBR`,
-`zhCN` and `zhTW`. Every locale translates every string.
-
-Each locale is also its own subpath, for example `@betteroffice/docx-i18n/pl`, so an app that picks
-the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and
-bundles all of them.
+`en` (source) and `zh-CN`, exported as `zhCN`. Each locale is also its own subpath,
+`@betteroffice/docx-i18n/zh-CN`, so an app that picks the locale at runtime can load only the one it
+needs. `locales` maps both tags to their strings.
 
 ## Helpers
 
@@ -47,10 +43,10 @@ The package exports the types `LocaleStrings`, `PartialLocaleStrings`, `Translat
 Outside React, build a typed `t()` directly:
 
 ```ts
-import { createT, deepMerge, en, de, type LocaleStrings } from '@betteroffice/docx-i18n';
+import { createT, deepMerge, en, zhCN, type LocaleStrings } from '@betteroffice/docx-i18n';
 
-const t = createT(deepMerge(en, de) as LocaleStrings, 'de');
-t('formattingBar.bold'); // 'Fett'
+const t = createT(deepMerge(en, zhCN) as LocaleStrings, 'zh-CN');
+t('formattingBar.bold'); // '加粗'
 ```
 
 ## Documentation

@@ -7,13 +7,13 @@
  *
  * ```ts
  * import {
- *   en, de, pl, tr, he, ptBR, zhCN,    // typed locale data
+ *   en, zhCN,                          // typed locale data
  *   locales,                            // record keyed by BCP-47 tag
  *   deepMerge, createT,                 // build a t() for custom hosts
  *   type LocaleStrings,                 // shape of `en` (source of truth)
  *   type Translations,                  // shape of a community partial
  *   type TranslationKey,                // every valid `t()` key
- *   type LocaleCode,                    // 'en' | 'de' | 'pt-BR' | ...
+ *   type LocaleCode,                    // 'en' | ...
  * } from '@betteroffice/docx-i18n';
  * ```
  *
@@ -33,17 +33,7 @@
 // JSON files. Edit the JSON, not this block.
 
 import enJson from '../en.json';
-import arJson from '../ar.json';
-import esJson from '../es.json';
-import itJson from '../it.json';
-import jaJson from '../ja.json';
-import koJson from '../ko.json';
-import nlJson from '../nl.json';
-import ruJson from '../ru.json';
-import ukJson from '../uk.json';
-import viJson from '../vi.json';
 import zhCNJson from '../zh-CN.json';
-import zhTWJson from '../zh-TW.json';
 
 /**
  * Full locale string set, auto-derived from `en.json` (the source of truth).
@@ -62,55 +52,13 @@ export type LocaleStrings = typeof en;
  *
  * @public
  */
-export type LocaleCode =
-  | 'en'
-  | 'ar'
-  | 'es'
-  | 'it'
-  | 'ja'
-  | 'ko'
-  | 'nl'
-  | 'ru'
-  | 'uk'
-  | 'vi'
-  | 'zh-CN'
-  | 'zh-TW';
+export type LocaleCode = 'en' | 'zh-CN';
 
 /** English (`en`) — the source of truth, 100% covered. @public */
 export const en = enJson;
 
-/** Arabic (`ar`). Community-maintained; null leaves fall back to English. @public */
-export const ar: PartialLocaleStrings = arJson;
-
-/** Spanish (`es`). Community-maintained; null leaves fall back to English. @public */
-export const es: PartialLocaleStrings = esJson;
-
-/** Italian (`it`). Community-maintained; null leaves fall back to English. @public */
-export const it: PartialLocaleStrings = itJson;
-
-/** Japanese (`ja`). Community-maintained; null leaves fall back to English. @public */
-export const ja: PartialLocaleStrings = jaJson;
-
-/** Korean (`ko`). Community-maintained; null leaves fall back to English. @public */
-export const ko: PartialLocaleStrings = koJson;
-
-/** Dutch (`nl`). Community-maintained; null leaves fall back to English. @public */
-export const nl: PartialLocaleStrings = nlJson;
-
-/** Russian (`ru`). Community-maintained; null leaves fall back to English. @public */
-export const ru: PartialLocaleStrings = ruJson;
-
-/** Ukrainian (`uk`). Community-maintained; null leaves fall back to English. @public */
-export const uk: PartialLocaleStrings = ukJson;
-
-/** Vietnamese (`vi`). Community-maintained; null leaves fall back to English. @public */
-export const vi: PartialLocaleStrings = viJson;
-
 /** Simplified Chinese (`zh-CN`). Community-maintained; null leaves fall back to English. @public */
 export const zhCN: PartialLocaleStrings = zhCNJson;
-
-/** Traditional Chinese (`zh-TW`). Community-maintained; null leaves fall back to English. @public */
-export const zhTW: PartialLocaleStrings = zhTWJson;
 
 /**
  * Every shipped locale, keyed by BCP-47 tag. Use for runtime locale
@@ -122,23 +70,13 @@ export const zhTW: PartialLocaleStrings = zhTWJson;
  *
  * Importing `locales` defeats the per-locale tree-shake — the bundler
  * sees a static reference to every locale. If you only need one or two,
- * import them by name (`import { en, de } from '...'`) instead.
+ * import them by name (`import { en, zhCN } from '...'`) instead.
  *
  * @public
  */
 export const locales: Record<LocaleCode, PartialLocaleStrings> = {
   en,
-  ar,
-  es,
-  it,
-  ja,
-  ko,
-  nl,
-  ru,
-  uk,
-  vi,
   'zh-CN': zhCN,
-  'zh-TW': zhTW,
 };
 // ─── GENERATED END ───
 
@@ -307,9 +245,9 @@ export type TFunction = (key: TranslationKey, vars?: Record<string, string | num
  *
  * @example
  * ```ts
- * import { deepMerge, createT, en, de } from '@betteroffice/docx-i18n';
- * const merged = deepMerge(en, de) as LocaleStrings;
- * const t = createT(merged, 'de');
+ * import { deepMerge, createT, en, zhCN } from '@betteroffice/docx-i18n';
+ * const merged = deepMerge(en, zhCN) as LocaleStrings;
+ * const t = createT(merged, 'zh-CN');
  * t('toolbar.bold');                          // → 'Fett'
  * t('dialogs.findReplace.matchCount', { current: 3, total: 15 });
  * ```

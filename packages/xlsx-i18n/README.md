@@ -15,11 +15,11 @@ bun add @betteroffice/xlsx-i18n
 Pass a locale to the editor's `i18n` prop:
 
 ```tsx
-import { de } from '@betteroffice/xlsx-i18n';
+import { zhCN } from '@betteroffice/xlsx-i18n';
 import { XlsxEditor } from '@betteroffice/xlsx-react';
 
 export function Editor({ file }: { file: Uint8Array }) {
-  return <XlsxEditor file={file} i18n={de} />;
+  return <XlsxEditor file={file} i18n={zhCN} />;
 }
 ```
 
@@ -27,18 +27,14 @@ Override individual strings by spreading a locale. Keys that are missing or `nul
 back to English.
 
 ```ts
-const custom = { ...de, toolbar: { ...de.toolbar, save: 'Sichern' } };
+const custom = { ...zhCN, toolbar: { ...zhCN.toolbar, save: '保存' } };
 ```
 
 ## Locales
 
-`en` (source), `ar`, `de`, `es`, `fr`, `he`, `hi`, `id`, `it`, `ja`, `ko`, `nl`, `pl`, `pt-BR`, `ru`,
-`tr`, `uk`, `vi`, `zh-CN` and `zh-TW`. The exports for `pt-BR`, `zh-CN` and `zh-TW` are `ptBR`,
-`zhCN` and `zhTW`. Every locale translates every string.
-
-Each locale is also its own subpath, for example `@betteroffice/xlsx-i18n/pl`, so an app that picks
-the locale at runtime can load only the one it needs. `locales` maps every tag to its strings and
-bundles all of them.
+`en` (source) and `zh-CN`, exported as `zhCN`. Each locale is also its own subpath,
+`@betteroffice/xlsx-i18n/zh-CN`, so an app that picks the locale at runtime can load only the one it
+needs. `locales` maps both tags to their strings.
 
 ## Helpers
 
@@ -47,10 +43,10 @@ The package exports the types `LocaleStrings`, `PartialLocaleStrings`, `Translat
 Outside React, build a typed `t()` directly:
 
 ```ts
-import { createT, deepMerge, en, de, type LocaleStrings } from '@betteroffice/xlsx-i18n';
+import { createT, deepMerge, en, zhCN, type LocaleStrings } from '@betteroffice/xlsx-i18n';
 
-const t = createT(deepMerge(en, de) as LocaleStrings, 'de');
-t('toolbar.save'); // 'Save'
+const t = createT(deepMerge(en, zhCN) as LocaleStrings, 'zh-CN');
+t('toolbar.save'); // '保存'
 ```
 
 ## Documentation
