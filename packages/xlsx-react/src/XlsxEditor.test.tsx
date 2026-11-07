@@ -4215,3 +4215,37 @@ describe('XlsxEditor cell text', () => {
     await view.idle();
   });
 });
+
+describe('XlsxEditor input before the first frame', () => {
+  it('keeps the last press and the keys typed on the grid before its first frame, then applies them (Q689)', async () => {
+    let handle: WorkbookProxy | null = null;
+    let painted = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onFirstPaint={() => {
+          painted += 1;
+        }}
+        onReady={(api) => {
+          handle = api.handle;
+        }}
+      />
+    );
+    const surface = view.getByTestId('xlsx-scroll');
+    expect(painted).toBe(0);
+    // an earlier press is replaced by the last one.
+    fireEvent.mouseDown(surface, pointAt(plain, { row: 0, col: 3 }));
+    fireEvent.mouseDown(surface, pointAt(plain, { row: 2, col: 1 }));
+    for (const key of ['q', 'z', 'Enter']) fireEvent.keyDown(surface, { key });
+    expect(painted).toBe(0);
+    await waitFor(() => expect(painted).toBe(1));
+    await idleWith(() => handle);
+    expect((await handle!.cell(0, 2, 1)).input).toBe('qz');
+    expect((view.getByTestId('xlsx-name-box') as HTMLInputElement).value).toBe('B4');
+  });
+});
+
+it('pins the editor root to ltr on a right-to-left page (upstream #1884)', async () => {
+  const view = await mountEditor();
+  expect(view.surface.closest('[role="application"]')?.getAttribute('dir')).toBe('ltr');
+});

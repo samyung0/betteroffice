@@ -917,6 +917,10 @@ function XlsxEditorContent({
   const jumpRef = useRef<Promise<void> | null>(null);
   const queuedKeysRef = useRef<KeyInput[]>([]);
   const [jumped, setJumped] = useState(0);
+  // the last press on the grid before its workbook's first frame, relative to
+  // the scroll container: it selects its cell once that frame is painted, and
+  // the keys held meanwhile act there (Q689).
+  const heldPressRef = useRef<{ x: number; y: number } | null>(null);
   const flushEditorRef = useRef<() => Promise<void>>(async () => {});
   const [editing, setEditing] = useState<EditState | null>(null);
   const [formulaDraft, setFormulaDraft] = useState<string | null>(null);
@@ -1570,6 +1574,23 @@ function XlsxEditorContent({
     );
     if (firstPaintPendingRef.current) {
       firstPaintPendingRef.current = false;
+      const press = heldPressRef.current;
+      heldPressRef.current = null;
+      const grid = shown.displayList.grid;
+      if (press && grid) {
+        const area = scroll.getBoundingClientRect();
+        const rect = canvas.getBoundingClientRect();
+        const addr = cellAtPoint(
+          grid,
+          (area.left + press.x - rect.left) / view.zoom,
+          (area.top + press.y - rect.top) / view.zoom
+        );
+        if (addr) {
+          selectionRef.current = selectionAt(addr);
+          setSelection(selectionRef.current);
+        }
+      }
+      if (queuedKeysRef.current.length > 0) setJumped((n) => n + 1);
       onFirstPaintRef.current?.();
     }
   }, [shown]);
@@ -2681,6 +2702,26 @@ function XlsxEditorContent({
   // grid-level keyboard: chrome shortcuts first, then the pure selection reducer.
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      // before the workbook's first frame the grid keys wait in the jump queue
+      // and act once it is painted, as DOCX holds typing before its geometry
+      // (Q689); the chrome shortcuts have nothing to act on yet.
+      if (file && !sheetInfo) {
+        const held: KeyInput = {
+          key: e.key,
+          shiftKey: e.shiftKey,
+          metaKey: e.metaKey,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+        };
+        if (
+          e.key === 'Escape' ||
+          selectionKeyReducer(selectionAt({ row: 0, col: 0 }), held, limits()).type !== 'none'
+        ) {
+          queuedKeysRef.current.push(held);
+          e.preventDefault();
+        }
+        return;
+      }
       const handle = handleRef.current;
       if (!handle || !selection || !sheetInfo || editing) return;
       // an open formula-bar draft (a refused one stays open after its blur)
@@ -2779,6 +2820,7 @@ function XlsxEditorContent({
       if (gridKey(key)) e.preventDefault();
     },
     [
+      file,
       selection,
       sheetInfo,
       editing,
@@ -2821,6 +2863,15 @@ function XlsxEditorContent({
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent) => {
+      // before the workbook's first frame there is no cell under the press:
+      // the last one is kept and selects its cell on that frame (Q689).
+      if (file && !sheetInfo) {
+        const area = scrollRef.current?.getBoundingClientRect();
+        if (e.button === 0 && area) {
+          heldPressRef.current = { x: e.clientX - area.left, y: e.clientY - area.top };
+        }
+        return;
+      }
       // the editor input is a dom overlay above the canvas, so a press inside
       // it is the editor's own — it places a caret, and must not commit, reach
       // a chart painted under it, or move the grid.
@@ -2920,6 +2971,8 @@ function XlsxEditorContent({
       focusContainer();
     },
     [
+      file,
+      sheetInfo,
       editing,
       formulaDraft,
       selection,
@@ -3479,6 +3532,7 @@ function XlsxEditorContent({
 
   return (
     <div
+      dir="ltr"
       className={className}
       role="application"
       aria-label={t('editor.appLabel')}

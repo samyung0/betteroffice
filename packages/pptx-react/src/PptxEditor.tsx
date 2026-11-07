@@ -118,6 +118,7 @@ import { DEFAULT_FONT_SIZES, LINE_SPACINGS, nextFontSize } from './components/To
 import { shapeFormattingFromShape } from './shapeFormatting';
 import { joinedClipboard, shapeClipboard, storyClipboard, type ClipboardText } from './clipboard';
 import { imageCache } from './imageCache';
+import { caretColors } from './caretColors';
 import {
   caretGoalX,
   caretLineIndex,
@@ -3173,7 +3174,7 @@ function PptxEditorContent({
     : null;
 
   return (
-    <div ref={rootRef} className={className} style={styles.root}
+    <div dir="ltr" ref={rootRef} className={className} style={styles.root}
       onKeyDownCapture={(event) => {
         if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && isLetterKey(event, 's')) {
           event.preventDefault();
@@ -3474,6 +3475,7 @@ function PptxEditorContent({
                   selection={selection}
                   scale={scale}
                   focused={stageFocused}
+                  insertionColor={textStyle.color}
                 />
                 {remoteShapePresence.visible.map(
                   ({ peer, peerCount, shapeId, bounds }, index) => (
@@ -3888,11 +3890,14 @@ export function SelectionOverlay({
   selection,
   scale,
   focused,
+  insertionColor,
 }: {
   frame: SlideDisplayList;
   selection: PptxTextSelection | null;
   scale: number;
   focused: boolean;
+  /** The colour new text takes at the caret, for an empty line. */
+  insertionColor?: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [pageVisible, setPageVisible] = useState(
@@ -3926,8 +3931,8 @@ export function SelectionOverlay({
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
     sizeCanvasForSlide(canvas, frame, dpr, scale);
-    paintSelection(ctx, frame, selection, dpr, scale, caretVisible);
-  }, [caretVisible, frame, scale, selection]);
+    paintSelection(ctx, frame, selection, dpr, scale, caretVisible, insertionColor);
+  }, [caretVisible, frame, insertionColor, scale, selection]);
 
   return <canvas ref={canvasRef} style={styles.canvasOverlay} aria-hidden="true" />;
 }
@@ -4101,7 +4106,8 @@ export function paintSelection(
   selection: PptxTextSelection | null,
   dpr: number,
   scale: number,
-  caretVisible = true
+  caretVisible = true,
+  insertionColor?: string
 ): void {
   if (!selection) return;
   const textBox = frame.primitives.find(
@@ -4134,7 +4140,16 @@ export function paintSelection(
     ];
     if (line) {
       const x = caretX(line, start);
-      ctx.fillStyle = '#1d4ed8';
+      // The caret takes the colour of the text under it (upstream #2202); over
+      // a fill it cannot read exactly it gets a 1px contrasting outline.
+      const { color, halo } = caretColors(frame, line, start,
+        { x, y: line.y, width: 1.5, height: line.height }, insertionColor);
+      if (halo) {
+        const pad = 1 / scale;
+        ctx.fillStyle = halo;
+        ctx.fillRect(x - pad, line.y - pad, 1.5 + 2 * pad, line.height + 2 * pad);
+      }
+      ctx.fillStyle = color;
       ctx.fillRect(x, line.y, 1.5, line.height);
     }
   }
