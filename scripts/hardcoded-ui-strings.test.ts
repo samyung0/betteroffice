@@ -10,8 +10,6 @@ const EDITOR_SOURCES = [
   'packages/pptx-react/src',
   'packages/vsdx-react/src',
   'apps/desktop/src',
-  'shared/react-toolbar',
-  'shared/format-glyph.tsx',
 ];
 
 const allowlist = allowedStrings(root);
