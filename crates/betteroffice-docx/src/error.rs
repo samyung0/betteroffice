@@ -3,6 +3,8 @@ use std::fmt;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
+    #[cfg(feature = "fonts")]
+    FontSource(betteroffice_fonts::FontError),
     Parse(docx_parse::ParseError),
     Edit(docx_edit::EditError),
     Operation(docx_edit::OpError),
@@ -29,6 +31,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => error.fmt(formatter),
             Self::Parse(error) => error.fmt(formatter),
             Self::Edit(error) => error.fmt(formatter),
             Self::Operation(error) => error.fmt(formatter),
@@ -64,6 +68,8 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            #[cfg(feature = "fonts")]
+            Self::FontSource(error) => Some(error),
             Self::Parse(error) => Some(error),
             Self::Edit(error) => Some(error),
             Self::Operation(error) => Some(error),
@@ -102,5 +108,12 @@ impl From<docx_edit::OpError> for Error {
 impl From<docx_layout::LayoutError> for Error {
     fn from(error: docx_layout::LayoutError) -> Self {
         Self::Layout(error)
+    }
+}
+
+#[cfg(feature = "fonts")]
+impl From<betteroffice_fonts::FontError> for Error {
+    fn from(error: betteroffice_fonts::FontError) -> Self {
+        Self::FontSource(error)
     }
 }

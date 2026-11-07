@@ -20,7 +20,7 @@ pub use document::Document;
 pub use docx_raster::{ImageScope, NoteKind, RenderedPage};
 pub use error::Error;
 #[cfg(feature = "raster")]
-pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, PngTarget, RenderOptions};
+pub use render::{MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS};
 pub use types::{DocumentModel, DocumentStructure, LayoutResult, SaveOptions};
 
 pub use docx_edit::{
