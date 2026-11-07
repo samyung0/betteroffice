@@ -1684,13 +1684,12 @@ impl Workbook {
     pub fn capture_format(&self, sheet: SheetId, range: CellRange) -> Result<CapturedFormat> {
         let (rows, columns) = self.validate_bounded_range(sheet, range)?;
         let formats = self.range_formats(sheet, range)?;
+        // a missing cell in a styled row or column captures that style
+        let mut defaults =
+            xlsx_model::workbook::ColumnDefaults::new(&self.model.sheets[sheet.0 as usize]);
         let source_styles: Vec<_> = formats
             .iter()
-            .map(|(at, _)| {
-                self.model.sheets[sheet.0 as usize]
-                    .cell(*at)
-                    .and_then(|cell| cell.style)
-            })
+            .map(|(at, _)| defaults.effective_style(*at))
             .collect();
         Ok(CapturedFormat {
             rows: rows as u32,
