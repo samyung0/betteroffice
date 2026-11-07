@@ -12,10 +12,10 @@ use crate::floating_objects::{MIN_WRAP_SEGMENT_WIDTH, table_wrap_gaps};
 use crate::table_grid::{
     ResolvedGridCell, content_sized_columns, count_table_columns, fits_columns_to_words,
     grow_content_sized_columns, has_unknown_content_widths, legacy_preferred_width_px,
-    paragraphs_only, preferred_width_px, resolve_cell_grid,
+    preferred_width_px, resolve_cell_grid,
     resolve_content_fitted_column_widths_with_percentage_basis, resolve_table_column_widths,
-    sized_by_content, table_percentage_basis, table_width_budget, unbreakable_cell,
-    widen_columns_to_minimums, widen_unbreakable_columns,
+    sized_by_content, table_percentage_basis, table_width_budget, widen_columns_to_minimums,
+    widen_nowrap_columns,
 };
 use crate::types::{
     BlockExtent, BlockId, ChartExtent, ColumnLayout, FloatingTablePosition, ImageExtent,
@@ -3612,45 +3612,44 @@ fn content_fitted_column_widths(
     ))
 }
 
-/// Widens the columns of `w:noWrap` cells that must stay on one line
-/// ([`unbreakable_cell`]) with [`widen_unbreakable_columns`].
-fn widen_for_unbreakable_cells(
+/// #1819 on Capy's legacy grid (Q702): the columns of `w:noWrap` cells widen
+/// toward their unwrapped text as Word does ([`widen_nowrap_columns`]), over
+/// the widths Capy's grid rules resolved. A fixed layout keeps its grid.
+fn widen_nowrap_columns_on_grid(
     table: &TableBlock,
     content_width: f64,
+    percentage_basis: f64,
     config: &MeasurementConfig,
     widths: &mut [f64],
-) -> Result<(), String> {
-    let grid: Vec<_> = resolve_cell_grid(table)
-        .into_iter()
-        .filter(|entry| entry.col_span == 1 && entry.column_index < widths.len())
-        .collect();
-    let cell_at =
-        |row: usize, index: usize| table.rows.get(row).and_then(|row| row.cells.get(index));
-    if !grid.iter().any(|entry| {
-        cell_at(entry.row_index, entry.cell_index).is_some_and(|cell| unbreakable_cell(table, cell))
-    }) {
-        return Ok(());
+) {
+    // Capy's bridge carries `w:tblLayout` as the layout mode (2026-10-06).
+    let fixed = table.layout_mode.as_deref() == Some("fixed")
+        || table
+            .width_algorithm
+            .as_deref()
+            .or(table.table_layout.as_deref())
+            == Some("fixed");
+    if fixed
+        || !table
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .any(|cell| cell.no_wrap == Some(true))
+    {
+        return;
     }
-    let mut needs = vec![0.0_f64; widths.len()];
-    let mut maximums = vec![0.0_f64; widths.len()];
-    for entry in grid {
-        let Some(cell) = cell_at(entry.row_index, entry.cell_index) else {
-            continue;
-        };
-        if !paragraphs_only(cell) {
-            maximums[entry.column_index] = f64::INFINITY;
-            continue;
-        }
-        let width = cell_content_width(cell, content_width, config)?;
-        let slot = if unbreakable_cell(table, cell) {
-            &mut needs[entry.column_index]
-        } else {
-            &mut maximums[entry.column_index]
-        };
-        *slot = slot.max(width);
+    let content_widths = measured_cell_widths(table, content_width, config, true);
+    if has_unknown_content_widths(table, content_widths.as_deref()) {
+        return;
     }
-    widen_unbreakable_columns(table, content_width, &needs, &maximums, widths);
-    Ok(())
+    widen_nowrap_columns(
+        table,
+        content_width,
+        percentage_basis,
+        content_widths.as_deref(),
+        widths,
+        false,
+    );
 }
 
 fn cell_content_widths(
@@ -3771,6 +3770,19 @@ fn table_content_widths(
     ) {
         return None;
     }
+    measured_cell_widths(table, content_width, config, false)
+}
+
+/// Each cell's `(minimum, maximum)` content width, or `None` for the whole
+/// table when a cell sets its own grid start. A first-column cell whose drawn
+/// left border insets its content is unmeasured, unless `count_border_inset`
+/// adds that inset to both widths (Capy's grid, Q702).
+fn measured_cell_widths(
+    table: &TableBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    count_border_inset: bool,
+) -> Option<Vec<Vec<Option<(f64, f64)>>>> {
     if table
         .rows
         .iter()
@@ -3787,16 +3799,19 @@ fn table_content_widths(
                     .iter()
                     .enumerate()
                     .map(|(cell_index, cell)| {
-                        if (cell_index == 0 || table.bidi == Some(true))
-                            && left_border_inset(cell) > 0.0
-                        {
+                        let inset = if cell_index == 0 || table.bidi == Some(true) {
+                            left_border_inset(cell)
+                        } else {
+                            0.0
+                        };
+                        if inset > 0.0 && !count_border_inset {
                             return None;
                         }
                         cell_content_widths(cell, content_width, config).map(
                             |(minimum, maximum)| {
                                 (
-                                    cell.min_content_width.unwrap_or(minimum),
-                                    cell.max_content_width.unwrap_or(maximum),
+                                    cell.min_content_width.unwrap_or(minimum) + inset,
+                                    cell.max_content_width.unwrap_or(maximum) + inset,
                                 )
                             },
                         )
@@ -4223,7 +4238,7 @@ fn measure_table_with_compat_shift(
             content_widths.as_deref(),
         );
     // A table left on its grid takes AutoFit to contents when every cell's
-    // width is explicitly auto, and widens no-wrap cells into empty room.
+    // width is explicitly auto.
     if !content_fitted && sized_by_content(table, content_width) {
         column_widths = content_fitted_column_widths(table, content_width, config)?;
         content_fitted = true;
@@ -4237,8 +4252,14 @@ fn measure_table_with_compat_shift(
         let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
         grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
     }
-    if !content_fitted {
-        widen_for_unbreakable_cells(table, content_width, config, &mut column_widths)?;
+    if unknown {
+        widen_nowrap_columns_on_grid(
+            table,
+            content_width,
+            percentage_basis,
+            config,
+            &mut column_widths,
+        );
     }
     let resolved_total: f64 = column_widths.iter().sum();
     let target_width = if unknown {

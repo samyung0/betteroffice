@@ -2866,7 +2866,18 @@ mod tests {
         use docx_layout::types::{Input, LayoutOptions, MeasuredBlock, PageMargins, Size};
 
         let mut blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
-        let measures = measure_blocks(&mut blocks, 600.0, &MeasurementConfig::default()).unwrap();
+        // A registered face and defaults, as the editor's host sends them: the
+        // noWrap growth (#1819) reads cell content widths through the typed
+        // measure. Each test thread has its own font store.
+        const FONT: &[u8] =
+            include_bytes!("../../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        let font = docx_layout::register_measure_font(FONT).unwrap();
+        let config = MeasurementConfig {
+            font_chains: [("calibri|0|0".to_owned(), vec![font])].into(),
+            defaults: serde_json::json!({"fontFamily": "Calibri", "fontSize": 11}),
+            ..MeasurementConfig::default()
+        };
+        let measures = measure_blocks(&mut blocks, 600.0, &config).unwrap();
         let mut input = Input {
             measured: blocks
                 .into_iter()
@@ -3058,7 +3069,7 @@ mod tests {
     #[test]
     fn no_wrap_widens_its_column_into_the_other_columns_room() {
         let doc = inserted(&direct(), 1, 2);
-        let long = "An unbreakable heading that is wide";
+        let long = "An unbreakable heading that is wide enough to need more than half of the row";
         type_in(&doc, 0, 0, long);
         type_in(&doc, 0, 1, "B");
         assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
@@ -3253,7 +3264,12 @@ mod tests {
     #[test]
     fn a_fixed_layout_keeps_its_grid_under_auto_widths_and_no_wrap() {
         let doc = inserted(&direct(), 1, 2);
-        type_in(&doc, 0, 0, "An unbreakable heading that is wide");
+        type_in(
+            &doc,
+            0,
+            0,
+            "An unbreakable heading that is wide enough to need more than half of the row",
+        );
         type_in(&doc, 0, 1, "B");
         doc.autofit_table(&direct(), &table()).unwrap();
         doc.set_cell_text_format(
@@ -3267,7 +3283,12 @@ mod tests {
         assert_eq!(column_widths(&doc), vec![312.0, 312.0]);
 
         let wide = inserted(&direct(), 1, 2);
-        type_in(&wide, 0, 0, "An unbreakable heading that is wide");
+        type_in(
+            &wide,
+            0,
+            0,
+            "An unbreakable heading that is wide enough to need more than half of the row",
+        );
         type_in(&wide, 0, 1, "B");
         wide.set_cell_text_format(
             &direct(),

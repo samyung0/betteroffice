@@ -420,21 +420,23 @@ pub struct DocAttrs {
     /// Tabs between this run and the line's previous painted run, in document
     /// order (other positions there, such as hidden text or content-control
     /// edges, paint nothing). Set on the first run after them, for copying.
+    /// The four copy counts are two bytes each so the retained primitive keeps
+    /// upstream's size (Q703); a count past `u16::MAX` saturates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tabs_before: Option<u32>,
+    pub tabs_before: Option<std::num::NonZeroU16>,
     /// Line breaks between the line's previous painted run (or the line
     /// start) and this run, for copying. Measured lines start with the break
     /// that ended the line before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub breaks_before: Option<u32>,
+    pub breaks_before: Option<std::num::NonZeroU16>,
     /// Tabs after the line's last painted run (or on an empty line, for its
     /// marker), for copying: `Name<tab>` ending a line or paragraph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tabs_after: Option<u32>,
+    pub tabs_after: Option<std::num::NonZeroU16>,
     /// Line breaks after this run (or this empty line's marker) that no later
     /// run on the line takes, for copying.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub breaks_after: Option<u32>,
+    pub breaks_after: Option<std::num::NonZeroU16>,
     /// Optional decoration metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub highlight_slice: Option<Box<HighlightSliceMetadata>>,
@@ -8048,7 +8050,7 @@ fn stamp_copy_separators(
     prims: &mut [Primitive],
     segments: &[ResolvedSegment<'_>],
     emitted: &[std::ops::Range<usize>],
-) -> (Option<u32>, Option<u32>) {
+) -> (Option<std::num::NonZeroU16>, Option<std::num::NonZeroU16>) {
     // (doc start, doc end, first primitive, last primitive) per text item
     let mut runs: Vec<(i64, i64, usize, usize)> = emitted
         .iter()
@@ -8089,7 +8091,7 @@ fn stamp_copy_separators(
     let (tabs, breaks) = (positions(true), positions(false));
     let between = |at: &[i64], from: i64, to: i64| {
         let count = at.iter().filter(|&&pos| pos >= from && pos < to).count();
-        u32::try_from(count).ok().filter(|count| *count > 0)
+        std::num::NonZeroU16::new(u16::try_from(count).unwrap_or(u16::MAX))
     };
     let mut previous_end = i64::MIN;
     for &(start, end, first, _) in &runs {
@@ -15458,13 +15460,12 @@ mod tests {
 
     /// Every retained primitive carries its attributes inline, so rarely set
     /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
-    /// Capy's primitives are 32 bytes over upstream's 1152: the tab/break counts
-    /// its `DocAttrs` carry (and the glyph runs' `cluster_runs` flag), which
-    /// upstream's fields no longer leave padding for (S2 DOCX report).
+    /// Capy's glyph runs are 8 bytes over upstream's 1152: its `cluster_runs` flag and
+    /// the two-byte tab/break counts beside #1732's echo widths (Q703).
     #[test]
     fn retained_primitives_stay_compact() {
         assert!(std::mem::size_of::<DocAttrs>() <= 800);
-        assert!(std::mem::size_of::<Primitive>() <= 1184);
+        assert!(std::mem::size_of::<Primitive>() <= 1160);
     }
 
     /// The resident input as it was built before typed transcoding: every

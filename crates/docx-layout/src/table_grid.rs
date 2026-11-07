@@ -831,85 +831,6 @@ pub fn sized_by_content(table_block: &TableBlock, content_width: f64) -> bool {
             })
 }
 
-/// A `w:noWrap` cell whose text is one unbreakable line (ECMA-376 §17.4.30):
-/// outside a fixed layout and without a fixed (dxa) preferred width, holding
-/// only paragraphs.
-pub fn unbreakable_cell(table_block: &TableBlock, cell: &crate::types::TableCell) -> bool {
-    cell.no_wrap == Some(true)
-        && paragraphs_only(cell)
-        && !fixed_layout(table_block)
-        && !(matches!(cell.width_type.as_deref(), None | Some("dxa"))
-            && cell.width_value.is_some_and(|value| value > 0.0))
-}
-
-/// Widens each column to `needs[column]` (its unbreakable cells' one-line
-/// width) out of the room the table has: the page room a table without its
-/// own width leaves, then the empty room of the other columns (their width
-/// above `maximums`, their widest content; infinite for a cell holding other
-/// blocks). A column a merged cell covers gives nothing. Short of room, every column gets the same share of its need.
-pub fn widen_unbreakable_columns(
-    table_block: &TableBlock,
-    content_width: f64,
-    needs: &[f64],
-    maximums: &[f64],
-    widths: &mut [f64],
-) {
-    let deficits: Vec<f64> = widths
-        .iter()
-        .enumerate()
-        .map(|(column, width)| (needs.get(column).copied().unwrap_or(0.0) - width).max(0.0))
-        .collect();
-    let deficit: f64 = deficits.iter().sum();
-    if !(deficit > 0.0) {
-        return;
-    }
-    let mut merged = vec![false; widths.len()];
-    for cell in resolve_cell_grid(table_block) {
-        if cell.col_span > 1 {
-            for slot in merged
-                .iter_mut()
-                .skip(cell.column_index)
-                .take(cell.col_span)
-            {
-                *slot = true;
-            }
-        }
-    }
-    let rooms: Vec<f64> = widths
-        .iter()
-        .enumerate()
-        .map(|(column, width)| {
-            if merged[column] || deficits[column] > 0.0 || needs.get(column) > Some(&0.0) {
-                0.0
-            } else {
-                (width - maximums.get(column).copied().unwrap_or(*width)).max(0.0)
-            }
-        })
-        .collect();
-    let room: f64 = rooms.iter().sum();
-    let states_width = preferred_width_px(
-        table_block.preferred_width.as_ref(),
-        table_block.width,
-        table_block.width_type.as_deref(),
-        content_width,
-        None,
-    )
-    .is_some();
-    let slack = if states_width {
-        0.0
-    } else {
-        (table_width_budget(table_block, content_width) - widths.iter().sum::<f64>()).max(0.0)
-    };
-    let granted = deficit.min(slack + room);
-    let taken = (granted - slack).max(0.0);
-    for (column, width) in widths.iter_mut().enumerate() {
-        *width += deficits[column] * granted / deficit;
-        if room > 0.0 {
-            *width -= rooms[column] * taken / room;
-        }
-    }
-}
-
 /// Grid columns whose width no cell states, for a table that states no width
 /// of its own and whose resolved `widths` leave room in `content_width`.
 ///
@@ -1203,15 +1124,80 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
     {
         return (widths, fitted);
     }
+    let unfunded = widen_nowrap_columns(
+        table_block,
+        content_width,
+        percentage_basis,
+        content_widths,
+        &mut widths,
+        true,
+    );
+    if unfunded
+        && resolved_table_width_type(table_block, content_width) == Some("pct")
+        && table_block
+            .width_algorithm
+            .as_deref()
+            .or(table_block.layout_mode.as_deref())
+            .or(table_block.table_layout.as_deref())
+            == Some("autofit")
+        && table_block
+            .rows
+            .iter()
+            .flat_map(|row| &row.cells)
+            .all(|cell| {
+                cell.no_wrap == Some(true)
+                    && !matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
+            })
+    {
+        let source = table_block
+            .grid_widths
+            .as_deref()
+            .or(table_block.column_widths.as_deref())
+            .unwrap_or(&[]);
+        let budget = table_width_budget(table_block, content_width).max(widths.iter().sum::<f64>());
+        if source.len() == widths.len()
+            && source.iter().all(|width| width.is_finite() && *width > 0.0)
+            && source.iter().sum::<f64>() > budget
+        {
+            return (source.to_vec(), false);
+        }
+        return resolve_base_column_widths_with_nowrap_minimums(
+            table_block,
+            content_width,
+            percentage_basis,
+            content_widths,
+            true,
+        );
+    }
+    (widths, fitted)
+}
+
+/// #1819: widens the columns of `w:noWrap` cells toward their unwrapped text
+/// over `widths`, first into the spare table width, then out of the flexible
+/// part (width above their own content minimum) of automatic neighbours. A
+/// column with an absolute preferred width gives nothing and takes from its
+/// neighbours no more than that preference; floors that cannot be funded leave
+/// the widths alone, so the text wraps. A column no cell prices keeps its grid
+/// width when `grid_keeps_undeclared` (upstream's autofit already sized it);
+/// Capy's legacy grid passes `false`, so such a column is automatic (Q702).
+/// Returns whether floors beyond the budget needed a transfer that failed.
+pub(crate) fn widen_nowrap_columns(
+    table_block: &TableBlock,
+    content_width: f64,
+    percentage_basis: f64,
+    content_widths: Option<&[Vec<Option<(f64, f64)>>]>,
+    widths: &mut [f64],
+    grid_keeps_undeclared: bool,
+) -> bool {
     let source = table_block
         .grid_widths
         .as_deref()
         .or(table_block.column_widths.as_deref())
         .unwrap_or(&[]);
     let budget = table_width_budget(table_block, content_width).max(widths.iter().sum::<f64>());
-    let mut transfer_ceilings = widths.clone();
-    let mut minimums = widths.clone();
-    let mut maximums = widths.clone();
+    let mut transfer_ceilings = widths.to_vec();
+    let mut minimums = widths.to_vec();
+    let mut maximums = widths.to_vec();
     let mut donor_minimums = vec![0.0; widths.len()];
     let mut floors = vec![0.0; widths.len()];
     let mut declared = vec![false; widths.len()];
@@ -1282,7 +1268,7 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
             add_span_constraint(&mut maximums, entry.column_index, entry.col_span, maximum);
             add_span_floor(
                 &mut floors,
-                &widths,
+                widths,
                 entry.column_index,
                 entry.col_span,
                 maximum,
@@ -1293,7 +1279,7 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
         let total: f64 = widths.iter().sum();
         let demand: f64 = targets
             .iter()
-            .zip(&widths)
+            .zip(widths.iter())
             .map(|(target, width)| (target - width).max(0.0))
             .sum();
         if demand > 0.0 {
@@ -1304,11 +1290,12 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
         }
     }
     if !floors.iter().any(|floor| *floor > 0.0) {
-        return (widths, fitted);
+        return false;
     }
     for column in 0..widths.len() {
-        let grid_governs =
-            !declared[column] && source.get(column).is_some_and(|width| *width > 0.0);
+        let grid_governs = grid_keeps_undeclared
+            && !declared[column]
+            && source.get(column).is_some_and(|width| *width > 0.0);
         if grid_governs {
             transfer_ceilings[column] = transfer_ceilings[column].max(source[column]);
         }
@@ -1322,41 +1309,10 @@ pub(crate) fn resolve_content_fitted_column_widths_with_percentage_basis(
         .iter()
         .zip(&donor_minimums)
         .any(|(width, minimum)| minimum - width > WIDEN_TOLERANCE_PX);
-    if !widen_columns_to_minimums(&mut widths, &donor_minimums)
+    !widen_columns_to_minimums(widths, &donor_minimums)
         && needs_transfer
         && floors.iter().sum::<f64>() > budget
-        && resolved_table_width_type(table_block, content_width) == Some("pct")
-        && table_block
-            .width_algorithm
-            .as_deref()
-            .or(table_block.layout_mode.as_deref())
-            .or(table_block.table_layout.as_deref())
-            == Some("autofit")
         && absolute.iter().any(|absolute| !absolute)
-        && table_block
-            .rows
-            .iter()
-            .flat_map(|row| &row.cells)
-            .all(|cell| {
-                cell.no_wrap == Some(true)
-                    && !matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"))
-            })
-    {
-        if source.len() == widths.len()
-            && source.iter().all(|width| width.is_finite() && *width > 0.0)
-            && source.iter().sum::<f64>() > budget
-        {
-            return (source.to_vec(), false);
-        }
-        return resolve_base_column_widths_with_nowrap_minimums(
-            table_block,
-            content_width,
-            percentage_basis,
-            content_widths,
-            true,
-        );
-    }
-    (widths, fitted)
 }
 
 fn resolve_base_column_widths(
