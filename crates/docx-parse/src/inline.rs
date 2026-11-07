@@ -461,6 +461,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }),
             "cr" => output.push(RunContent::Break {
                 break_type: Some("textWrapping".to_owned()),
@@ -2343,7 +2344,13 @@ impl OpenComplexField {
     /// runs flatten into the run-level view consumers read for text. Pushing
     /// it to the paragraph instead would reorder it before the field on save.
     pub(crate) fn absorb(&mut self, node: InlineNode) {
-        let runs = field_runs(&node).into_iter().cloned();
+        let runs = field_runs(&node).into_iter().cloned().collect();
+        self.absorb_showing(node, runs);
+    }
+
+    /// [`Self::absorb`] for a node whose shown runs are not its own direct
+    /// runs: a content control, a tracked change or a nested field's result.
+    pub(crate) fn absorb_showing(&mut self, node: InlineNode, runs: Vec<Run>) {
         match self.mode {
             FieldMode::Code => {
                 self.code_runs.extend(runs);
@@ -2372,7 +2379,7 @@ impl OpenComplexField {
         } else {
             Vec::new()
         };
-        self.absorb(InlineNode::ComplexField(Box::new(field)), runs);
+        self.absorb_showing(InlineNode::ComplexField(Box::new(field)), runs);
         if let Some(tree) = tree {
             self.children.push(tree);
         }

@@ -937,7 +937,7 @@ fn patched_paragraphs(
     part: &S13SplicedPart,
     context: &mut SerializerContext,
 ) -> Result<BTreeMap<u32, String>, ParseError> {
-    use super::paragraph_patch::{PatchContext, patch_paragraph_v1};
+    use super::paragraph_patch::{NamespaceScopes, patch_paragraph_v1};
     use crate::paragraph_identity::paragraph_occurrences;
 
     let error = |ordinal, code, detail: &str| {
@@ -961,10 +961,13 @@ fn patched_paragraphs(
         count_replace(context, &part.part, legacy.ordinal, &legacy.detail)?;
     }
     let mut patched = BTreeMap::new();
-    let occurrences = if part.paragraph_patches.is_empty() {
-        None
+    let (occurrences, scopes) = if part.paragraph_patches.is_empty() {
+        (None, None)
     } else {
-        source.and_then(paragraph_occurrences)
+        (
+            source.and_then(paragraph_occurrences),
+            source.map(NamespaceScopes::new),
+        )
     };
     for patch in &part.paragraph_patches {
         if !seen.insert(patch.ordinal)
@@ -977,7 +980,7 @@ fn patched_paragraphs(
                 "invalid patch ordinal",
             ));
         }
-        let source = source.ok_or_else(|| {
+        let (source, scopes) = source.zip(scopes.as_ref()).ok_or_else(|| {
             error(
                 patch.ordinal,
                 PatchErrorCode::MissingSource,
@@ -995,7 +998,7 @@ fn patched_paragraphs(
                     "source paragraph is missing",
                 )
             })?;
-        let patch_context = PatchContext::at(&part.part, source, span.start);
+        let patch_context = scopes.context(&part.part, span.start);
         match patch_paragraph_v1(&source[span], patch, &patch_context) {
             Ok(xml) => {
                 patched.insert(patch.ordinal, xml);
@@ -1410,6 +1413,7 @@ fn add_list_button_numbering(
             serialize_numbering_xml(&NumberingDefinitions {
                 abstract_nums,
                 nums,
+                first_picture_bullet: None,
             })
         }
     };
@@ -3225,7 +3229,7 @@ impl<'a> SelectiveParagraphIndex<'a> {
                     }
                 }
                 RunContent::HorizontalRule { rule } => self.fragment(&rule.xml)?,
-                RunContent::Chart { chart } => {
+                RunContent::Chart { chart, .. } => {
                     self.raw_subtree_required(chart.drawing_xml.as_deref(), "drawing")?;
                 }
                 RunContent::OpaqueDrawing { xml, .. } => self.fragment(xml)?,

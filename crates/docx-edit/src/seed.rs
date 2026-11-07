@@ -2601,6 +2601,7 @@ fn paragraph_attrs(
         "listMarker": nullish(field(list, "marker")),
         "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
         "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
+        "listMarkerFonts": nullish(field(list, "markerFontSlots")),
         "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
         "listMarkerBold": nullish(field(list, "markerBold")),
         "listMarkerItalic": nullish(field(list, "markerItalic")),
@@ -3353,11 +3354,19 @@ fn resolve_color_to_hex(color: Option<&Value>, theme: Option<&Value>) -> Option<
         .map(|value| value.trim_start_matches('#').to_ascii_uppercase())
 }
 
+/// The grid columns `w:gridBefore` skips before a row's first cell.
+fn row_grid_before(row: &Value) -> usize {
+    number(field(field(Some(row), "formatting"), "gridBefore"))
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0)
+        .clamp(0.0, f64::from(u16::MAX)) as usize
+}
+
 fn calculate_row_spans(table: &Value) -> BTreeMap<(usize, usize), (usize, bool)> {
     let mut result = BTreeMap::new();
     let mut active = BTreeMap::<usize, usize>::new();
     for (row_index, row) in array(field(Some(table), "rows")).iter().enumerate() {
-        let mut column = 0usize;
+        let mut column = row_grid_before(row);
         let cells: Vec<_> = array(field(Some(row), "cells"))
             .iter()
             .map(|cell| {
@@ -3753,17 +3762,20 @@ fn project_row(
             .unwrap_or(0)
     };
     let cells_source = array(field(Some(row), "cells"));
+    // The grid columns a row skips come before its first cell (#1955).
+    let grid_before = row_grid_before(row);
     let mut column = 0usize;
     let mut cells = Vec::new();
     for cell in cells_source {
         let colspan =
             number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0) as usize;
         let start_column = column;
-        let span = row_spans.get(&(row_index, start_column));
+        let grid_column = start_column + grid_before;
+        let span = row_spans.get(&(row_index, grid_column));
         let grid_width = (!widths.is_empty() && total_width > 0.0).then(|| {
             let cell_width: f64 = widths
                 .iter()
-                .skip(start_column)
+                .skip(grid_column)
                 .take(colspan)
                 .filter_map(Value::as_f64)
                 .sum();

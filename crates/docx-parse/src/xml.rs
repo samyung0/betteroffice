@@ -204,6 +204,9 @@ impl<'a> ParseBudget<'a> {
 
     /// Records, for each `w:r` of the paragraph just parsed, the index of the run it became in
     /// the paragraph content, or `None` when a field absorbed it.
+    // Upstream's paragraph parse records them (#2152); Capy's does not, so text
+    // box enrichment keeps reading each `w:r` by its own index.
+    #[allow(dead_code)]
     pub(crate) fn record_paragraph_runs(&mut self, runs: Vec<Option<usize>>) {
         self.paragraph_runs = runs;
     }

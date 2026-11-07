@@ -58,8 +58,6 @@ use super::{COMMENTS, DEL, EditError, EditingDoc, INS, decode_anchor, is_pilcrow
 
 mod shapes;
 
-const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
-
 /// Document-level values lowering cannot read off a story. Every field
 /// defaults, so an empty env lowers a story with built-in fallbacks.
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -72,6 +70,13 @@ pub struct RenderEnv {
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
     /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
+    /// The document's theme, whose fonts win over a run's font names where a
+    /// slot names both (#1921). `None` keeps the names.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_font_theme"
+    )]
+    pub font_theme: Option<docx_parse::Theme>,
     /// Interval between implicit tab stops, passed through to each paragraph.
     /// `None` leaves the layout engine's own default in effect.
     pub default_tab_stop_twips: Option<f64>,
@@ -95,9 +100,53 @@ pub struct RenderEnv {
     pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
+    /// Resolved paragraph style chain font size in pt, keyed by style id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub paragraph_style_font_sizes: BTreeMap<String, f64>,
+    /// The docDefaults font size in pt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_default_font_size: Option<f64>,
+    /// The docDefaults run language, which runs that name none inherit.
+    pub doc_default_language: Option<RunLanguageSlots>,
+    /// The numbering part's first picture bullet in pt, whose box Word puts at
+    /// the start of the main document's first paragraph (#1936).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_picture_bullet: Option<docx_parse::numbering::PictureBulletSize>,
     /// Lowers for a reading layout; `None` lowers as authored.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reading: Option<ReadingEnv>,
+}
+
+/// A theme from the host's `fontTheme` JSON, with the font slots it does not
+/// name left empty (so they never override a run's font name).
+pub(crate) fn parse_font_theme(value: Value) -> Result<docx_parse::Theme, serde_json::Error> {
+    fn merge(target: &mut Value, source: Value) {
+        match (target, source) {
+            (Value::Object(target), Value::Object(source)) => {
+                for (key, value) in source {
+                    let entry = target.entry(key).or_insert(Value::Null);
+                    merge(entry, value);
+                }
+            }
+            (target, source) => *target = source,
+        }
+    }
+    let mut theme = docx_parse::Theme::default();
+    theme.font_scheme.major_font = docx_parse::ThemeFont::empty();
+    theme.font_scheme.minor_font = docx_parse::ThemeFont::empty();
+    let mut theme = serde_json::to_value(theme)?;
+    merge(&mut theme, value);
+    serde_json::from_value(theme)
+}
+
+fn deserialize_font_theme<'de, D>(deserializer: D) -> Result<Option<docx_parse::Theme>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<Value> as serde::Deserialize>::deserialize(deserializer)?
+        .map(parse_font_theme)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 /// A reading layout (text reflowed into one narrow column): sizes eased around
@@ -172,6 +221,18 @@ impl ReadingEnv {
 }
 
 impl RenderEnv {
+    /// The font size in pt Word gives an unsized run in a paragraph of `style_id`.
+    pub fn chain_font_size(&self, style_id: Option<&str>) -> Option<f64> {
+        style_id
+            .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            .or_else(|| {
+                self.default_paragraph_style_id
+                    .as_ref()
+                    .and_then(|id| self.paragraph_style_font_sizes.get(id).copied())
+            })
+            .or(self.doc_default_font_size)
+    }
+
     pub fn with_numeric_id(mut self, yrs_id: impl Into<String>, layout_id: f64) -> Self {
         self.numeric_ids.insert(yrs_id.into(), layout_id);
         self
@@ -279,7 +340,17 @@ fn lower_top_story(
     let txn = doc.yrs_doc().transact();
     let comments = CommentIndex::decode(&txn, env)?;
     let mut active_stories = BTreeSet::new();
-    let mut list_state = ListState::default();
+    let mut list_state = ListState {
+        leading_box: env
+            .first_picture_bullet
+            .as_ref()
+            .filter(|_| story_id == "body")
+            .map(|size| docx_layout::types::LeadingInlineBox {
+                width: size.width * 96.0 / 72.0,
+                height: size.height * 96.0 / 72.0,
+            }),
+        ..ListState::default()
+    };
     // State seeded with sequence metadata numbers its SEQ fields (#970);
     // older state keeps every cached result.
     let sequence_metadata = txn
@@ -544,6 +615,13 @@ fn shift_paragraph(paragraph: &mut ParagraphBlock, units: u32) {
                 if let Some(shape) = &mut image.inline_shape {
                     shift_shape(shape, units);
                 }
+                // An inline chart sharing its line (#1899) keeps its own span.
+                if let Some(chart) = &mut image.inline_chart {
+                    shift(&mut chart.pm_start);
+                    shift(&mut chart.pm_end);
+                    shift(&mut chart.doc_start);
+                    shift(&mut chart.doc_end);
+                }
             }
             Run::LineBreak(line_break) => {
                 shift(&mut line_break.pm_start);
@@ -710,7 +788,8 @@ fn lower_story<T: ReadTxn>(
                         slot.leading = true;
                         for &index in &slot.breaks {
                             if let Some(LayoutBlock::PageBreak(block)) = blocks.get_mut(index) {
-                                block.keeps_leading_spacing = keeps_leading_spacing(true, env);
+                                block.keeps_leading_spacing =
+                                    keeps_leading_spacing(true, can_start_page(story_id), env);
                             }
                         }
                     }
@@ -855,9 +934,12 @@ fn lower_story<T: ReadTxn>(
                         };
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset: paragraph_pm_units,
+                            story_index,
                             block,
                             hidden: mark_bool(attributes, "hidden") == Some(true),
                             anchored: false,
+                            formatting: RunFormatting::default(),
+                            inline_text_box: false,
                         });
                         paragraph_pm_units += 1;
                         story_index += 1;
@@ -902,7 +984,11 @@ fn lower_story<T: ReadTxn>(
                             id,
                             pm_start: Some(pm_cursor as f64),
                             pm_end: Some((pm_cursor + 1) as f64),
-                            keeps_leading_spacing: keeps_leading_spacing(leading, env),
+                            keeps_leading_spacing: keeps_leading_spacing(
+                                leading,
+                                can_start_page(story_id),
+                                env,
+                            ),
                         }));
                     }
                     story_index += 1;
@@ -1207,7 +1293,7 @@ fn lower_story<T: ReadTxn>(
                     if shared_map_string(&shape, txn, "_kind").as_deref() == Some("shape") =>
                 {
                     let pm_offset = paragraph_pm_units;
-                    let Some(block) = lower_shape_block(
+                    let Some((block, text_box)) = lower_shape_block(
                         &shape,
                         txn,
                         paragraph_pm_start + 1 + u64::from(pm_offset),
@@ -1278,9 +1364,12 @@ fn lower_story<T: ReadTxn>(
                     } else {
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset,
+                            story_index,
                             anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
+                            formatting,
+                            inline_text_box: text_box,
                         });
                     }
                     story_index += 1;
@@ -1302,9 +1391,12 @@ fn lower_story<T: ReadTxn>(
                     ) {
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset: paragraph_pm_units,
+                            story_index,
                             anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
+                            formatting: RunFormatting::default(),
+                            inline_text_box: false,
                         });
                     }
                     if let Some(text) = shared_map_string(&opaque, txn, "text") {
@@ -1347,9 +1439,12 @@ fn lower_story<T: ReadTxn>(
                     };
                     paragraph_drawings.push(DrawingMarker {
                         pm_offset,
+                        story_index,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
                         anchored: false,
+                        formatting: lower_run_formatting(attributes, env),
+                        inline_text_box: false,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -1379,10 +1474,22 @@ fn lower_story<T: ReadTxn>(
     result
 }
 
+/// Whether a page can start in the story: the body and its table cells.
+/// Headers, footers, notes and text boxes never start one.
+fn can_start_page(story_id: &str) -> bool {
+    story_id == "body" || story_id.starts_with("body:")
+}
+
 /// Whether a page break leading a paragraph's text keeps that paragraph's
-/// space-before: Word drops it under `w:suppressSpBfAfterPgBrk`.
-fn keeps_leading_spacing(leading: bool, env: &RenderEnv) -> Option<bool> {
-    (leading && !env.compatibility_flags.suppress_sp_bf_after_pg_brk).then_some(true)
+/// space-before: Word drops it under `w:suppressSpBfAfterPgBrk`, and in Word
+/// 2013 mode where a page can start (#1872, `can_start_page` as for
+/// [`lower_paragraph_spacing`]).
+fn keeps_leading_spacing(leading: bool, can_start_page: bool, env: &RenderEnv) -> Option<bool> {
+    let flags = &env.compatibility_flags;
+    (leading
+        && !flags.suppress_sp_bf_after_pg_brk
+        && !(can_start_page && flags.compatibility_mode >= 15))
+        .then_some(true)
 }
 
 /// The page breaks opening a paragraph slot, lowered as the save writes them:
@@ -1616,7 +1723,13 @@ fn lower_table<T: ReadTxn>(
                     None,
                 )?
             } else {
-                let attrs = lower_paragraph_attrs(&BTreeMap::new(), None, env, list_state);
+                let attrs = lower_paragraph_attrs(
+                    &BTreeMap::new(),
+                    None,
+                    env,
+                    list_state,
+                    can_start_page(&cell_story),
+                );
                 (vec![empty_cell_paragraph(&cell_story, attrs)], 0)
             };
 
@@ -1653,7 +1766,7 @@ fn lower_table<T: ReadTxn>(
                 text_direction: map_string(tc_pr, "textDirection"),
                 id: BlockId::Str(cell_story),
                 blocks,
-                col_span: map_number(tc_pr, "colspan"),
+                col_span: map_number(tc_pr, "colspan").map(|span| span.min(16_384.0)),
                 row_span: map_number(tc_pr, "rowspan"),
                 width,
                 width_value,
@@ -1674,6 +1787,24 @@ fn lower_table<T: ReadTxn>(
 
         let row_node_size = cell_pm_start + 1 - row_pm_start;
         let original = tr_pr.get("_originalFormatting").and_then(any_map);
+        // Grid columns a row skips before and after its cells (#1955).
+        let grid_count = |key| {
+            original
+                .and_then(|value| map_number(value, key))
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|value| value.min(16_384.0) as u64)
+        };
+        let grid_before = grid_count("gridBefore");
+        let grid_after = grid_count("gridAfter");
+        let row_width = |key| {
+            original
+                .and_then(|value| value.get(key))
+                .and_then(any_map)
+                .map(|value| docx_layout::types::PreferredWidth {
+                    value: map_number(value, "value"),
+                    r#type: map_string(value, "type"),
+                })
+        };
         rows.push(TableRow {
             id: BlockId::Str(format!("{table_id}:r{row_index}")),
             cells,
@@ -1685,10 +1816,14 @@ fn lower_table<T: ReadTxn>(
             cant_split: original
                 .and_then(|value| map_bool(value, "cantSplit"))
                 .filter(|value| *value),
-            grid_before: None,
-            grid_after: None,
-            width_before: None,
-            width_after: None,
+            grid_before,
+            grid_after,
+            width_before: grid_before
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthBefore")),
+            width_after: grid_after
+                .filter(|count| *count > 0)
+                .and_then(|_| row_width("widthAfter")),
             tracked_ins: tr_pr
                 .get("trIns")
                 .and_then(|value| paragraph_revision_value(value, env)),
@@ -1834,7 +1969,7 @@ fn automatic_text_needs_white(color: &str) -> bool {
         if channel <= 0.04045 {
             channel / 12.92
         } else {
-            ((channel + 0.055) / 1.055).powf(2.4)
+            crate::fmath::pow((channel + 0.055) / 1.055, 2.4)
         }
     };
     let red = linearize((value >> 16) & 255);
@@ -1905,8 +2040,10 @@ fn image_transform_metrics(
         .unwrap_or(0.0)
         .rem_euclid(360.0);
     let radians = rotation.to_radians();
-    let bounds_width = width * radians.cos().abs() + height * radians.sin().abs();
-    let bounds_height = width * radians.sin().abs() + height * radians.cos().abs();
+    let bounds_width =
+        width * crate::fmath::cos(radians).abs() + height * crate::fmath::sin(radians).abs();
+    let bounds_height =
+        width * crate::fmath::sin(radians).abs() + height * crate::fmath::cos(radians).abs();
     let bounds = (rotation != 0.0).then(|| {
         serde_json::json!({
             "width": bounds_width,
@@ -2198,16 +2335,19 @@ fn lower_shape_block<T: ReadTxn>(
     txn: &T,
     pm_start: u64,
     env: &RenderEnv,
-) -> Option<ShapeBlock> {
+) -> Option<(ShapeBlock, bool)> {
     let values = shared_values(shape, txn);
     let id = format!("shape:{}", embed_item_key(shape));
-    if let Some(block) = map_string(&values, "shapeJson")
+    if let Some(value) = map_string(&values, "shapeJson")
         .and_then(|value| serde_json::from_str::<Value>(&value).ok())
-        .and_then(|value| shapes::lower_shape_json(&value, id.clone(), pm_start, env))
+        && let Some(block) = shapes::lower_shape_json(&value, id.clone(), pm_start, env)
     {
-        return Some(block);
+        let text_box = value.get("textBox").and_then(Value::as_bool) == Some(true)
+            || value.get("shapeType").and_then(Value::as_str) == Some("textBox");
+        return Some((block, text_box));
     }
     let shape_type = map_string(&values, "shapeType").unwrap_or_else(|| "rect".to_owned());
+    let text_box = map_bool(&values, "textBox") == Some(true) || shape_type == "textBox";
     let geometry_path = values
         .get("geometryPath")
         .and_then(any_json)
@@ -2223,7 +2363,7 @@ fn lower_shape_block<T: ReadTxn>(
             .unwrap_or(80.0),
         env,
     );
-    Some(ShapeBlock {
+    let block = ShapeBlock {
         sdt_groups: None,
         id: BlockId::Str(id),
         shape_type,
@@ -2255,7 +2395,8 @@ fn lower_shape_block<T: ReadTxn>(
         doc_end: Some((pm_start + 1) as f64),
         pm_start: Some(pm_start as f64),
         pm_end: Some((pm_start + 1) as f64),
-    })
+    };
+    Some((block, text_box))
 }
 
 /// A chart embed's block, named `id`; one in a text box (`pm_start` none)
@@ -2829,9 +2970,14 @@ fn opaque_text_box<T: ReadTxn>(
 #[derive(Clone, Debug)]
 struct DrawingMarker {
     pm_offset: u32,
+    story_index: u32,
     block: LayoutBlock,
     hidden: bool,
     anchored: bool,
+    formatting: RunFormatting,
+    /// A `wp:inline` text box (`txBox`), which can share its line (#1899);
+    /// a plain shape with text and a legacy VML text box keep their block.
+    inline_text_box: bool,
 }
 
 /// Every comment anchor of the document decoded once per lowering and
@@ -3062,6 +3208,7 @@ fn flush_paragraph_parts(
     // A paragraph holding drawings, or units that show nothing, is never a
     // bare section mark.
     let has_source_content = !drawings.is_empty();
+    inline_shared_drawings(&mut raw_runs, &mut drawings, env.show_hidden_text);
     let mark_source_content = |paragraph: &mut ParagraphBlock| {
         if has_source_content || (paragraph.runs.is_empty() && paragraph_pm_units > 0) {
             paragraph
@@ -3086,8 +3233,13 @@ fn flush_paragraph_parts(
             list_state,
         );
         mark_source_content(&mut paragraph);
+        // A hidden empty paragraph still holds the first picture bullet's box.
         if !env.show_hidden_text
             && paragraph.runs.is_empty()
+            && paragraph
+                .attrs
+                .as_ref()
+                .is_none_or(|attrs| attrs.leading_inline_box.is_none())
             && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
                 values
                     .get("defaultTextFormatting")
@@ -3221,6 +3373,182 @@ fn flush_paragraph_parts(
     blocks
 }
 
+/// Whether `run` puts visible inline content on the paragraph's line.
+fn run_shares_line(run: &RawRun) -> bool {
+    match &run.kind {
+        RawRunKind::Image(image) => {
+            image.display_mode.as_deref() != Some("float")
+                && !matches!(
+                    image.wrap_type.as_deref(),
+                    Some("square" | "tight" | "through" | "topAndBottom" | "behind" | "inFront")
+                )
+        }
+        kind => run_shares_line_text(kind),
+    }
+}
+
+/// Whether a run is visible text (not a picture): what a following lone text
+/// box would have to wrap below.
+fn run_shares_line_text(kind: &RawRunKind) -> bool {
+    match kind {
+        RawRunKind::Text(text) => text.chars().any(|ch| !ch.is_whitespace()),
+        RawRunKind::Field { fallback, .. } => fallback
+            .as_deref()
+            .is_some_and(|text| text.chars().any(|ch| !ch.is_whitespace())),
+        _ => false,
+    }
+}
+
+/// A chart whose source drawing is a `wp:anchor` (floating) one.
+fn chart_drawing_anchored(chart: &Value) -> bool {
+    chart.get("position").is_some_and(Value::is_object)
+        || chart
+            .get("wrap")
+            .and_then(|wrap| wrap.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|wrap_type| wrap_type != "inline")
+}
+
+/// Flows a paragraph's in-flow charts and `txBox` text boxes as inline runs
+/// of its line when they share that line with another such drawing or with
+/// visible inline content, as Word draws inline pictures (#1899). A lone
+/// chart or text box keeps its block, as does a lone text box after text
+/// (Word puts it on a line of its own); anchored drawings never convert.
+fn inline_shared_drawings(
+    raw_runs: &mut Vec<RawRun>,
+    drawings: &mut Vec<DrawingMarker>,
+    show_hidden_text: bool,
+) {
+    let convertible = |drawing: &DrawingMarker| {
+        !drawing.anchored
+            && match &drawing.block {
+                LayoutBlock::Chart(chart) => !chart_drawing_anchored(&chart.chart),
+                LayoutBlock::Shape(_) => drawing.inline_text_box,
+                _ => false,
+            }
+    };
+    let count = drawings
+        .iter()
+        .filter(|drawing| convertible(drawing))
+        .count();
+    if count == 0 || (count == 1 && !raw_runs.iter().any(run_shares_line)) {
+        return;
+    }
+    if count == 1
+        && let Some(drawing) = drawings.iter().find(|drawing| convertible(drawing))
+        && matches!(drawing.block, LayoutBlock::Shape(_))
+        && raw_runs
+            .iter()
+            .any(|run| run.pm_end <= drawing.pm_offset && run_shares_line_text(&run.kind))
+    {
+        return;
+    }
+    let mut kept = Vec::new();
+    for drawing in drawings.drain(..) {
+        if convertible(&drawing) {
+            raw_runs.push(inline_drawing_run(drawing, show_hidden_text));
+        } else {
+            kept.push(drawing);
+        }
+    }
+    *drawings = kept;
+    raw_runs.sort_by_key(|run| run.pm_start);
+}
+
+/// The inline image carrier for a chart or text box block, as the shape
+/// branch builds one for a native inline shape. It keeps the block's id.
+fn inline_drawing_run(drawing: DrawingMarker, show_hidden_text: bool) -> RawRun {
+    let DrawingMarker {
+        pm_offset,
+        story_index,
+        block,
+        hidden,
+        mut formatting,
+        ..
+    } = drawing;
+    if show_hidden_text && formatting.hidden == Some(true) {
+        formatting.hidden = None;
+    } else if hidden && formatting.hidden.is_none() {
+        formatting.hidden = Some(true);
+    }
+    let (width, height, alt, shape_type, decorative, inline_shape, inline_chart) = match block {
+        LayoutBlock::Chart(chart) => (
+            chart.width,
+            chart.height,
+            None,
+            None,
+            None,
+            None,
+            Some(Box::new(chart)),
+        ),
+        LayoutBlock::Shape(shape) => (
+            shape.width,
+            shape.height,
+            shape.description.clone().or_else(|| shape.title.clone()),
+            Some(shape.shape_type.clone()),
+            shape.decorative,
+            Some(Box::new(shape)),
+            None,
+        ),
+        _ => unreachable!("only chart and shape drawings convert to inline runs"),
+    };
+    let image = ImageRun {
+        src: String::new(),
+        width,
+        height,
+        alt,
+        shape_type,
+        transform: None,
+        position: None,
+        wrap_type: Some("inline".to_owned()),
+        display_mode: Some("inline".to_owned()),
+        css_float: Some("none".to_owned()),
+        dist_top: None,
+        dist_bottom: None,
+        dist_left: None,
+        dist_right: None,
+        crop_top: None,
+        crop_right: None,
+        crop_bottom: None,
+        crop_left: None,
+        opacity: None,
+        rotation_deg: None,
+        flip_h: None,
+        flip_v: None,
+        rotation_bounds: None,
+        wrap_text: None,
+        wrap_polygon: None,
+        allow_overlap: None,
+        layout_in_cell: None,
+        horizontal_rule: None,
+        no_change_aspect: None,
+        effect_extent: None,
+        effects: None,
+        outline: None,
+        decorative,
+        hyperlink: formatting.hyperlink.clone(),
+        inline_shape,
+        inline_chart,
+        is_insertion: formatting.is_insertion,
+        is_deletion: formatting.is_deletion,
+        change_author: formatting.change_author.clone(),
+        change_date: formatting.change_date.clone(),
+        change_revision_id: formatting.change_revision_id,
+        pm_start: None,
+        pm_end: None,
+    };
+    RawRun {
+        kind: RawRunKind::Image(image),
+        formatting,
+        story_start: story_index,
+        story_end: story_index + 1,
+        pm_start: pm_offset,
+        pm_end: pm_offset + 1,
+        inherited_hyperlink: (false, false),
+        inline_sdt_widget: None,
+    }
+}
+
 /// The line a cell with no stored story shows, as the save's `<w:p/>` does.
 fn empty_cell_paragraph(story_id: &str, attrs: ParagraphAttrs) -> LayoutBlock {
     LayoutBlock::Paragraph(ParagraphBlock {
@@ -3251,22 +3579,41 @@ fn flush_paragraph(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(values);
-    let defaults = paragraph_run_defaults(values);
+    let defaults = paragraph_run_defaults(values, env);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));
+    let toc_field_result = raw_runs.iter().any(|run| {
+        matches!(&run.kind, RawRunKind::Field { instruction: Some(instruction), .. }
+            if instruction.split_whitespace().next()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("TOC")))
+    });
+    let toc_entry =
+        semantic_toc || style_id.as_deref().is_some_and(is_toc_style) || toc_field_result;
 
     for run in &mut raw_runs {
-        apply_run_defaults(&mut run.formatting, &defaults);
-        if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
+        if toc_entry {
             strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
-        if let Some(reading) = &env.reading {
+        apply_run_defaults(&mut run.formatting, &defaults);
+    }
+    if toc_entry {
+        clamp_toc_auxiliary_sizes(&mut raw_runs, defaults.font_size);
+    }
+    if let Some(reading) = &env.reading {
+        for run in &mut raw_runs {
             reading.run(&mut run.formatting);
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
-    let mut attrs = lower_paragraph_attrs(values, pilcrow_attributes, env, list_state);
+    let mut attrs = lower_paragraph_attrs(
+        values,
+        pilcrow_attributes,
+        env,
+        list_state,
+        can_start_page(story_id),
+    );
+    attrs.leading_inline_box = list_state.leading_box.take();
     if let Some(reading) = &env.reading {
         reading.paragraph(&mut attrs);
     }
@@ -3582,6 +3929,9 @@ struct ListState {
     /// The `{numId}:{level}` pairs already numbered, so a `listStartOverride`
     /// applies once rather than on every paragraph at that level.
     seen_num_ids: BTreeSet<String>,
+    /// The first picture bullet's box, until the body's first paragraph (or
+    /// first cell paragraph, when a table comes first) takes it (#1936).
+    leading_box: Option<docx_layout::types::LeadingInlineBox>,
 }
 
 fn format_roman(value: i64, uppercase: bool) -> String {
@@ -3812,7 +4162,7 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
         .and_then(|value| resolve_color(value, env));
     result.highlight = attribute(attributes, "highlight").and_then(resolve_highlight);
 
-    lower_font_family(attributes, &mut result);
+    lower_font_family(attributes, &mut result, env);
     lower_font_size(attributes, &mut result);
     lower_language(attributes, &mut result);
     lower_character_spacing(attributes, &mut result);
@@ -3885,7 +4235,28 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     result
 }
 
-fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
+/// Word's per-slot rule (ECMA-376 17.3.2.26): a slot's theme reference wins
+/// over the slot's font name when the document's theme names a font for it.
+/// Layout only: the stored names stay as authored.
+fn resolve_font_slots(slots: &mut RunFontSlots, env: &RenderEnv) {
+    let Some(theme) = env.font_theme.as_ref() else {
+        return;
+    };
+    for (explicit, reference) in [
+        (&mut slots.ascii, &slots.ascii_theme),
+        (&mut slots.h_ansi, &slots.h_ansi_theme),
+        (&mut slots.east_asia, &slots.east_asia_theme),
+        (&mut slots.cs, &slots.cs_theme),
+    ] {
+        if let Some(font) = reference.as_deref().and_then(|reference| {
+            docx_parse::theme::resolve_rfonts_theme_font(Some(theme), reference)
+        }) {
+            *explicit = Some(font.to_owned());
+        }
+    }
+}
+
+fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting, env: &RenderEnv) {
     let Some(value) =
         attribute(attributes, "fontFamily").or_else(|| attribute(attributes, "rFonts"))
     else {
@@ -3902,7 +4273,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
             });
         }
         Any::Map(map) => {
-            let slots = RunFontSlots {
+            let mut slots = RunFontSlots {
                 ascii: map_string(map, "ascii"),
                 h_ansi: map_string(map, "hAnsi"),
                 east_asia: map_string(map, "eastAsia"),
@@ -3913,6 +4284,7 @@ fn lower_font_family(attributes: Option<&Attrs>, result: &mut RunFormatting) {
                 cs_theme: map_string(map, "csTheme"),
                 hint: map_string(map, "hint"),
             };
+            resolve_font_slots(&mut slots, env);
             let rtl = mark_bool(attributes, "rtl") == Some(true);
             result.font_family = if rtl { slots.cs.clone() } else { None }
                 .or_else(|| slots.ascii.clone())
@@ -4052,6 +4424,7 @@ fn lower_paragraph_attrs(
     pilcrow_attributes: Option<&Attrs>,
     env: &RenderEnv,
     list_state: &mut ListState,
+    can_start_page: bool,
 ) -> ParagraphAttrs {
     let alignment =
         value_string(values.get("alignment")).and_then(|alignment| match alignment.as_str() {
@@ -4061,6 +4434,9 @@ fn lower_paragraph_attrs(
         });
     let mut result = ParagraphAttrs {
         alignment,
+        // Distributed lines keep squeezing spaces in every mode (#1816).
+        justification_mode: value_string(values.get("alignment"))
+            .filter(|mode| matches!(mode.as_str(), "distribute" | "thaiDistribute")),
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
@@ -4074,7 +4450,7 @@ fn lower_paragraph_attrs(
             .clone()
             .filter(|style| !style.is_empty());
     }
-    lower_paragraph_spacing(values, &mut result, env);
+    lower_paragraph_spacing(values, &mut result, env, can_start_page);
     // A framed paragraph is never a bare section mark.
     if values
         .get("frame")
@@ -4128,6 +4504,30 @@ fn lower_paragraph_attrs(
     result.list_is_bullet = values.get("listIsBullet").and_then(any_bool);
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
+    // The level's theme font wins over its authored name, as in Word (#1921),
+    // unless the paragraph's marker font was edited away from that name.
+    if let Some(Any::Map(fonts)) = values.get("listMarkerFonts") {
+        let name = |key| map_string(fonts, key).filter(|font| !font.is_empty());
+        let (ascii, h_ansi) = (name("ascii"), name("hAnsi"));
+        if result
+            .list_marker_font_family
+            .as_deref()
+            .is_none_or(|stored| ascii.as_deref().or(h_ansi.as_deref()) == Some(stored))
+        {
+            let mut slots = RunFontSlots {
+                ascii,
+                h_ansi,
+                ascii_theme: map_string(fonts, "asciiTheme"),
+                h_ansi_theme: map_string(fonts, "hAnsiTheme"),
+                ..RunFontSlots::default()
+            };
+            resolve_font_slots(&mut slots, env);
+            result.list_marker_font_family = slots
+                .ascii
+                .or(slots.h_ansi)
+                .or(result.list_marker_font_family);
+        }
+    }
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
     if result.list_marker.is_some() {
         let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
@@ -4151,7 +4551,7 @@ fn lower_paragraph_attrs(
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
-    lower_paragraph_defaults(values, &mut result);
+    lower_paragraph_defaults(values, &mut result, env);
 
     result.p_pr_ins = values
         .get("pPrIns")
@@ -4306,29 +4706,37 @@ fn suppress_cell_edge_spacing(
     }
 }
 
+/// `can_start_page`: the paragraph is in the body, a body table cell or a
+/// content control, where a page can start. A page break opening its text is
+/// a unit of its own in Capy (see [`keeps_leading_spacing`]).
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
     env: &RenderEnv,
+    can_start_page: bool,
 ) {
     let line_px = env
         .paragraph_spacing_line_px
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
-    // `w:doNotUseHTMLParagraphAutoSpacing`: automatic spacing is 5 pt before
-    // and 10 pt after.
+    // Word 2013 mode (#1872): Page break before spends the space before.
+    let suppress_before = can_start_page
+        && env.compatibility_flags.compatibility_mode >= 15
+        && true_property(values, "pageBreakBefore") == Some(true);
+    // Automatic spacing is Word's 14 pt (#1851); under
+    // `w:doNotUseHTMLParagraphAutoSpacing` it is 5 pt before and 10 pt after.
     let (auto_before_px, auto_after_px) = if env
         .compatibility_flags
         .do_not_use_html_paragraph_auto_spacing
     {
         (twips_to_pixels(100.0), twips_to_pixels(200.0))
     } else {
-        (AUTO_PARAGRAPH_SPACING_PX, AUTO_PARAGRAPH_SPACING_PX)
+        (twips_to_pixels(280.0), twips_to_pixels(280.0))
     };
     let spacing_map = values.get("spacing").and_then(any_map);
     let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
     let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
-    let before_lines = (!auto_before)
+    let before_lines = (!auto_before && !suppress_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
         .flatten()
         .filter(|value| value.is_finite() && *value > 0.0);
@@ -4354,9 +4762,13 @@ fn lower_paragraph_spacing(
         || after_lines.is_some()
     {
         let mut spacing = ParagraphSpacing {
+            before_auto: auto_before.then_some(true),
+            after_auto: auto_after.then_some(true),
             before_lines,
             after_lines,
-            before: if auto_before {
+            before: if suppress_before {
+                Some(0.0)
+            } else if auto_before {
                 Some(auto_before_px)
             } else {
                 before_lines
@@ -4478,27 +4890,46 @@ fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
         .map_or(10.0, font_size_pt)
 }
 
-fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn lower_paragraph_defaults(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    env: &RenderEnv,
+) {
     result.default_font_size = Some(paragraph_default_font_size(values));
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        result.default_font_family =
-            map_string(fonts, "ascii").or_else(|| map_string(fonts, "hAnsi"));
+        let mut slots = RunFontSlots {
+            ascii: map_string(fonts, "ascii"),
+            h_ansi: map_string(fonts, "hAnsi"),
+            ascii_theme: map_string(fonts, "asciiTheme"),
+            h_ansi_theme: map_string(fonts, "hAnsiTheme"),
+            ..RunFontSlots::default()
+        };
+        resolve_font_slots(&mut slots, env);
+        result.default_font_family = slots.ascii.or(slots.h_ansi);
     }
 }
 
-fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
+/// The size Word gives a run without its own `w:sz` (#1880): its paragraph
+/// style chain's, from the host's env, never the paragraph mark's. A host that
+/// passes no style sizes keeps the mark's.
+fn paragraph_chain_size(env: &RenderEnv, values: &BTreeMap<String, Any>) -> f64 {
+    env.chain_font_size(paragraph_style_id(values).as_deref())
+        .unwrap_or_else(|| paragraph_default_font_size(values))
+}
+
+fn paragraph_run_defaults(values: &BTreeMap<String, Any>, env: &RenderEnv) -> RunFormatting {
     let mut result = RunFormatting {
-        font_size: Some(paragraph_default_font_size(values)),
+        font_size: Some(paragraph_chain_size(env, values)),
         ..RunFormatting::default()
     };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return result;
     };
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
-        let slots = RunFontSlots {
+        let mut slots = RunFontSlots {
             ascii: map_string(fonts, "ascii"),
             h_ansi: map_string(fonts, "hAnsi"),
             east_asia: map_string(fonts, "eastAsia"),
@@ -4509,6 +4940,7 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             cs_theme: map_string(fonts, "csTheme"),
             hint: map_string(fonts, "hint"),
         };
+        resolve_font_slots(&mut slots, env);
         result.font_family = slots
             .ascii
             .clone()
@@ -4580,6 +5012,64 @@ fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, b
         }
         if inherited.1 {
             formatting.underline = None;
+        }
+    }
+}
+
+/// Whether a run carries a table of contents entry's own text, as opposed to
+/// its tabs, spaces and page number.
+fn carries_toc_entry_text(kind: &RawRunKind) -> bool {
+    let text = match kind {
+        RawRunKind::Text(text) => Some(text),
+        RawRunKind::Field {
+            field_type,
+            raw_type,
+            instruction,
+            fallback,
+            ..
+        } => {
+            let field_type = instruction
+                .as_deref()
+                .and_then(|value| value.split_whitespace().next())
+                .or(raw_type.as_deref())
+                .unwrap_or(field_type);
+            if matches!(
+                field_type.to_ascii_uppercase().as_str(),
+                "PAGEREF" | "PAGE" | "NUMPAGES" | "SECTIONPAGES"
+            ) {
+                return false;
+            }
+            fallback.as_ref()
+        }
+        _ => None,
+    };
+    text.is_some_and(|text| text.chars().any(|c| !c.is_whitespace()))
+}
+
+/// Caps a table of contents entry's tab, whitespace and page number runs at
+/// the entry text's size (#1880), as Word sizes them.
+fn clamp_toc_auxiliary_sizes(raw_runs: &mut [RawRun], fallback_size: Option<f64>) {
+    let entry_size = raw_runs
+        .iter()
+        .filter(|run| carries_toc_entry_text(&run.kind))
+        .filter_map(|run| run.formatting.font_size)
+        .fold(None::<f64>, |size, next| {
+            Some(size.map_or(next, |current| current.max(next)))
+        })
+        .or(fallback_size);
+    for run in raw_runs.iter_mut() {
+        let auxiliary = match &run.kind {
+            RawRunKind::Tab(_) | RawRunKind::Text(_) | RawRunKind::Field { .. } => {
+                !carries_toc_entry_text(&run.kind)
+            }
+            _ => false,
+        };
+        if auxiliary {
+            run.formatting.font_size = entry_size.map(|entry_size| {
+                run.formatting
+                    .font_size
+                    .map_or(entry_size, |size| size.min(entry_size))
+            });
         }
     }
 }
@@ -5246,7 +5736,7 @@ mod tests {
                 "shading".to_owned(),
                 Any::from_json(&shading.to_string()).unwrap(),
             )]);
-            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default());
+            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default(), true);
             assert_eq!(attrs.shading.as_deref(), expected, "{shading}");
         }
         assert_eq!(
@@ -5277,6 +5767,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
@@ -5308,6 +5799,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(false));
         assert_eq!(attrs.list_marker_italic, Some(false));
@@ -5338,6 +5830,7 @@ mod tests {
             None,
             &RenderEnv::default(),
             &mut ListState::default(),
+            true,
         );
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(true));
@@ -5597,6 +6090,154 @@ mod tests {
         );
     }
 
+    fn yrs_attrs(value: Value) -> Attrs {
+        let value = crate::seed::any_from_value(value).unwrap();
+        attrs_from_any(Some(&value))
+    }
+
+    #[test]
+    fn theme_font_precedence_is_applied_only_to_layout_fonts() {
+        let mut theme = docx_parse::Theme::default();
+        theme.font_scheme.major_font.latin = "Calibri".to_owned();
+        theme.font_scheme.major_font.ea = "Theme East Asia".to_owned();
+        theme.font_scheme.major_font.cs = "Theme Bidi".to_owned();
+        let env = RenderEnv {
+            font_theme: Some(theme),
+            ..RenderEnv::default()
+        };
+        let fonts = json!({
+            "ascii": "Cambria", "hAnsi": "Cambria", "eastAsia": "Explicit East Asia",
+            "cs": "Explicit Bidi", "asciiTheme": "majorHAnsi", "hAnsiTheme": "majorHAnsi",
+            "eastAsiaTheme": "majorEastAsia", "csTheme": "majorBidi"
+        });
+        let attrs = yrs_attrs(json!({"fontFamily": fonts}));
+        let original = attrs.clone();
+        let formatting = lower_run_formatting(Some(&attrs), &env);
+        assert_eq!(formatting.font_family.as_deref(), Some("Calibri"));
+        let slots = formatting.font_slots.unwrap();
+        assert_eq!(slots.ascii.as_deref(), Some("Calibri"));
+        assert_eq!(slots.h_ansi.as_deref(), Some("Calibri"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Theme East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Theme Bidi"));
+        assert_eq!(attrs, original);
+
+        let defaults = BTreeMap::from([(
+            "defaultTextFormatting".to_owned(),
+            crate::seed::any_from_value(json!({"fontFamily": fonts})).unwrap(),
+        )]);
+        let run = paragraph_run_defaults(&defaults, &env);
+        assert_eq!(run.font_family.as_deref(), Some("Calibri"));
+        let mut paragraph = ParagraphAttrs::default();
+        lower_paragraph_defaults(&defaults, &mut paragraph, &env);
+        assert_eq!(paragraph.default_font_family.as_deref(), Some("Calibri"));
+
+        let shape = json!({
+            "shapeType": "rect", "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{"type": "paragraph", "content": [{
+                "type": "run", "formatting": {"fontFamily": fonts},
+                "content": [{"type": "text", "text": "Box"}]
+            }]}]}
+        });
+        let block = shapes::lower_shape_json(&shape, "shape:1".to_owned(), 1, &env).unwrap();
+        let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+            panic!("missing text box run");
+        };
+        assert_eq!(run.fmt.font_family.as_deref(), Some("Calibri"));
+
+        // No theme, or a theme that names no font for a slot, keeps the names.
+        let formatting = lower_run_formatting(Some(&attrs), &RenderEnv::default());
+        assert_eq!(formatting.font_family.as_deref(), Some("Cambria"));
+        let env: RenderEnv = serde_json::from_value(json!({"fontTheme": {
+            "fontScheme": {"majorFont": {"latin": "Calibri"}}
+        }}))
+        .unwrap();
+        let slots = lower_run_formatting(Some(&attrs), &env).font_slots.unwrap();
+        assert_eq!(slots.ascii.as_deref(), Some("Calibri"));
+        assert_eq!(slots.east_asia.as_deref(), Some("Explicit East Asia"));
+        assert_eq!(slots.cs.as_deref(), Some("Explicit Bidi"));
+    }
+
+    #[test]
+    fn unsized_runs_take_their_style_chain_size_and_toc_tabs_the_entry_size() {
+        let env: RenderEnv = serde_json::from_value(json!({
+            "paragraphStyleFontSizes": {"TOC1": 10.0, "Normal": 11.0},
+            "docDefaultFontSize": 12.0
+        }))
+        .unwrap();
+        // The mark's 16pt is not the size of the paragraph's unsized text.
+        let mut values = BTreeMap::from([(
+            "defaultTextFormatting".to_owned(),
+            crate::seed::any_from_value(json!({"fontSize": 32})).unwrap(),
+        )]);
+        assert_eq!(
+            paragraph_run_defaults(&values, &RenderEnv::default()).font_size,
+            Some(16.0)
+        );
+        assert_eq!(paragraph_run_defaults(&values, &env).font_size, Some(12.0));
+        values.insert("styleId".to_owned(), Any::from("TOC1"));
+        assert_eq!(paragraph_run_defaults(&values, &env).font_size, Some(10.0));
+        values.insert("styleId".to_owned(), Any::from("Unknown"));
+        let env = RenderEnv {
+            default_paragraph_style_id: Some("Normal".to_owned()),
+            ..env
+        };
+        assert_eq!(paragraph_run_defaults(&values, &env).font_size, Some(11.0));
+
+        let run = |kind, size: Option<f64>| RawRun {
+            kind,
+            formatting: RunFormatting {
+                font_size: size,
+                ..RunFormatting::default()
+            },
+            inherited_hyperlink: (false, false),
+            story_start: 0,
+            story_end: 1,
+            pm_start: 0,
+            pm_end: 1,
+            inline_sdt_widget: None,
+        };
+        let page = RawRunKind::Field {
+            field_type: "PAGEREF".to_owned(),
+            raw_type: None,
+            instruction: Some("PAGEREF _Toc1".to_owned()),
+            fallback: Some("3".to_owned()),
+            locked: false,
+            nested_sequences: Vec::new(),
+        };
+        let mut runs = vec![
+            run(RawRunKind::Text("Entry".to_owned()), Some(10.0)),
+            run(RawRunKind::Tab(None), Some(12.0)),
+            run(page, Some(12.0)),
+            run(RawRunKind::Text(" ".to_owned()), None),
+        ];
+        clamp_toc_auxiliary_sizes(&mut runs, Some(11.0));
+        let sizes: Vec<_> = runs.iter().map(|run| run.formatting.font_size).collect();
+        assert_eq!(sizes, [Some(10.0), Some(10.0), Some(10.0), Some(10.0)]);
+    }
+
+    #[test]
+    fn word_2013_mode_spends_space_before_where_a_page_break_starts_a_page() {
+        let values = BTreeMap::from([
+            ("pageBreakBefore".to_owned(), Any::Bool(true)),
+            ("spaceBefore".to_owned(), Any::Number(480.0)),
+        ]);
+        for (mode, can_start_page, before) in [(15, true, 0.0), (15, false, 32.0), (14, true, 32.0)]
+        {
+            let mut env = RenderEnv::default();
+            env.compatibility_flags.compatibility_mode = mode;
+            let mut attrs = ParagraphAttrs::default();
+            lower_paragraph_spacing(&values, &mut attrs, &env, can_start_page);
+            assert_eq!(attrs.spacing.unwrap().before, Some(before), "{mode}");
+            assert_eq!(
+                keeps_leading_spacing(true, can_start_page, &env),
+                (mode < 15 || !can_start_page).then_some(true),
+                "{mode}"
+            );
+        }
+        assert!(can_start_page("body") && can_start_page("body:t0:r0c0"));
+        assert!(!can_start_page("hf:rHeader") && !can_start_page("fn:1"));
+    }
+
     #[test]
     fn font_sizes_clamp_to_words_range() {
         assert_eq!(font_size_pt(0.0), 1.0);
@@ -5612,18 +6253,15 @@ mod tests {
         ]);
         let mut env = RenderEnv::default();
         let mut attrs = ParagraphAttrs::default();
-        lower_paragraph_spacing(&auto, &mut attrs, &env);
+        lower_paragraph_spacing(&auto, &mut attrs, &env, true);
         let spacing = attrs.spacing.take().unwrap();
         assert_eq!(
             (spacing.before, spacing.after),
-            (
-                Some(AUTO_PARAGRAPH_SPACING_PX),
-                Some(AUTO_PARAGRAPH_SPACING_PX)
-            )
+            (Some(twips_to_pixels(280.0)), Some(twips_to_pixels(280.0)))
         );
         env.compatibility_flags
             .do_not_use_html_paragraph_auto_spacing = true;
-        lower_paragraph_spacing(&auto, &mut attrs, &env);
+        lower_paragraph_spacing(&auto, &mut attrs, &env, true);
         let spacing = attrs.spacing.unwrap();
         assert_eq!(
             (spacing.before, spacing.after),

@@ -7863,6 +7863,7 @@ fn glyph_run_continues(run: &GlyphRunPrimitive, next: &GlyphRunPrimitive, run_or
         size,
         color,
         text: _,
+        paint_text,
         glyphs: _,
         echo,
         paint_clip,
@@ -7940,12 +7941,18 @@ fn glyph_run_continues(run: &GlyphRunPrimitive, next: &GlyphRunPrimitive, run_or
         drawing_scene,
         text_body_properties,
         fallback_font,
+        canvas_clusters,
         modern_effects,
         table,
         inline_shape_atom,
     } = attrs;
     let previous = &run.attrs;
+    // A stand-in paint text or positioned canvas clusters cover their own run only.
     !cluster_runs
+        && run.paint_text.is_none()
+        && paint_text.is_none()
+        && previous.canvas_clusters.is_none()
+        && canvas_clusters.is_none()
         && run.paint_clip.is_none()
         && paint_clip.is_none()
         && run.rtl.is_none()
@@ -14826,11 +14833,13 @@ mod tests {
         use crate::hit::{VerticalDirection, caret_rect, hit_test, range_rects, vertical_move};
         const LIBERATION: &[u8] =
             include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        // The CJK assets ship packed since the fonts move (#2150).
         const NOTO_SC: &[u8] =
-            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansSC-Regular.otf");
+            include_bytes!("../../../packages/fonts-cjk/assets/NotoSansSC-Regular.otf.zst");
         crate::clear_measure_fonts();
         let latin = crate::register_measure_font(LIBERATION).unwrap();
-        let cjk = crate::register_measure_font(NOTO_SC).unwrap();
+        let noto_sc = betteroffice_fonts::decode(NOTO_SC, None, 64 << 20).expect("font decodes");
+        let cjk = crate::register_measure_font(&noto_sc).unwrap();
         let chains = serde_json::json!({ "liberation sans|0|0": [latin, cjk] });
         let lorem = "The committee reviews every application against the published \
                      criteria before the spring deadline. Late submissions wait. ";
@@ -15449,12 +15458,13 @@ mod tests {
 
     /// Every retained primitive carries its attributes inline, so rarely set
     /// metadata stays boxed: 270k primitives cost 1.9 KB each before it was.
-    /// Capy's glyph runs are 8 bytes over upstream's 1152: its `cluster_runs` flag and
-    /// tab/break counts beside #1732's echo widths (S3 DOCX report).
+    /// Capy's primitives are 32 bytes over upstream's 1152: the tab/break counts
+    /// its `DocAttrs` carry (and the glyph runs' `cluster_runs` flag), which
+    /// upstream's fields no longer leave padding for (S2 DOCX report).
     #[test]
     fn retained_primitives_stay_compact() {
         assert!(std::mem::size_of::<DocAttrs>() <= 800);
-        assert!(std::mem::size_of::<Primitive>() <= 1160);
+        assert!(std::mem::size_of::<Primitive>() <= 1184);
     }
 
     /// The resident input as it was built before typed transcoding: every

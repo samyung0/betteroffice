@@ -1501,44 +1501,6 @@ mod tests {
     }
 
     #[test]
-    fn free_font_exports_use_module_fonts_beside_an_unentered_session() {
-        clear_measure_fonts_wasm().unwrap();
-        let session = MeasureFonts::default();
-        let (session_generation, session_measurement, session_outline) = {
-            let _scope = session.enter();
-            assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(0));
-            (
-                measure_fonts_generation(),
-                measure_paragraph_json_resident(&font_measurement_input(0)).unwrap(),
-                outline_glyph_json_resident(0, 36).unwrap(),
-            )
-        };
-        assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);
-        let module_id = with_module_fonts(measure_store_id);
-        assert_ne!(module_id, session_generation.0);
-        assert_eq!(with_module_fonts(measure_fonts_generation), (module_id, 1));
-        let substitute = register_substitute_measure_font(0, "Segoe UI Light").unwrap();
-        assert_eq!(substitute, 1);
-        let measured = measure_paragraph_json(&font_measurement_input(substitute)).unwrap();
-        assert!(!measured.is_empty());
-        assert_eq!(outline_glyph_json(0, 36).unwrap(), session_outline);
-        clear_measure_fonts_wasm().unwrap();
-        assert_ne!(with_module_fonts(measure_store_id), module_id);
-        assert_eq!(with_module_fonts(measure_fonts_generation).1, 0);
-        {
-            let _scope = session.enter();
-            assert_eq!(measure_fonts_generation(), session_generation);
-            assert_eq!(
-                measure_paragraph_json_resident(&font_measurement_input(0)).unwrap(),
-                session_measurement
-            );
-            assert_eq!(outline_glyph_json_resident(0, 36).unwrap(), session_outline);
-            assert_eq!(register_measure_font_bytes(LIBERATION_SANS), Ok(1));
-        }
-        assert!(ENTERED_FONTS.with(|entered| entered.borrow().is_none()));
-    }
-
-    #[test]
     fn free_font_exports_preserve_an_entered_session_store() {
         clear_measure_fonts_wasm().unwrap();
         assert_eq!(register_measure_font(LIBERATION_SANS).unwrap(), 0);

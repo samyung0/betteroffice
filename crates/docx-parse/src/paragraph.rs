@@ -3,7 +3,7 @@
 use ooxml_drawingml::SymbolFont;
 use serde::{Deserialize, Serialize};
 
-use crate::block::transparent_children;
+use crate::block::{StoryContext, transparent_children};
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, ParagraphFrameFields, SpacingExplicit,
@@ -391,6 +391,40 @@ pub fn parse_paragraph(
     Ok(paragraph)
 }
 
+/// [`parse_paragraph`] as upstream's story parser calls it. Capy's paragraphs
+/// read only `in_header_footer` from the context; the watermark claim is
+/// upstream's footer-watermark save fix (#2196), which waits for save fidelity.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_paragraph_with_story_context(
+    element: &XmlElement,
+    relationships: Option<&RelationshipMap>,
+    theme: Option<&Theme>,
+    styles: Option<&StyleMap>,
+    doc_defaults: Option<&DocDefaults>,
+    numbering: Option<&NumberingMap>,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+    ids: &mut HexIdAllocator,
+    drawing: Option<&mut DrawingContext<'_>>,
+    context: StoryContext,
+    depth: usize,
+) -> Result<Paragraph, ParseError> {
+    parse_paragraph(
+        element,
+        relationships,
+        theme,
+        styles,
+        doc_defaults,
+        numbering,
+        part,
+        budget,
+        ids,
+        drawing,
+        context.in_header_footer,
+        depth,
+    )
+}
+
 pub fn parse_document_paragraph_properties(
     properties: &XmlElement,
     theme: Option<&Theme>,
@@ -430,6 +464,7 @@ pub fn parse_document_paragraph_properties(
             paragraph_ordinal: None,
             para_id_attribute: None,
             bookmark_xml: None,
+            bookmark_replay_xml: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None)
             .run
@@ -599,15 +634,7 @@ fn parse_paragraph_contents(
                 let (starts, ends) = nested_comment_ranges(child);
                 output.extend(starts);
                 if let Some(active) = fields.last_mut() {
-                    let runs: Vec<Run> = hyperlink
-                        .children
-                        .iter()
-                        .filter_map(|node| match node {
-                            InlineNode::Run(run) => Some(run.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::Hyperlink(Box::new(
                         hyperlink,
@@ -621,7 +648,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -631,7 +658,7 @@ fn parse_paragraph_contents(
                 }
                 let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
                 match fields.last_mut() {
-                    Some(active) => active.absorb(node, Vec::new()),
+                    Some(active) => active.absorb(node),
                     None => output.push(ParagraphContent::Inline(node)),
                 }
             }
@@ -650,8 +677,7 @@ fn parse_paragraph_contents(
                 let (starts, ends) = nested_comment_ranges(child);
                 output.extend(starts);
                 if let Some(active) = fields.last_mut() {
-                    let runs = field.content.clone();
-                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                    active.absorb(InlineNode::SimpleField(Box::new(field)));
                 } else {
                     output.push(ParagraphContent::Inline(InlineNode::SimpleField(Box::new(
                         field,
@@ -687,7 +713,7 @@ fn parse_paragraph_contents(
                     match fields.last_mut().filter(|field| field.in_result()) {
                         Some(active) => {
                             let runs = shown_runs(std::slice::from_ref(&sdt));
-                            active.absorb(sdt, runs);
+                            active.absorb_showing(sdt, runs);
                         }
                         None => output.push(ParagraphContent::Inline(sdt)),
                     }
@@ -732,7 +758,7 @@ fn parse_paragraph_contents(
                         if !active.in_result() {
                             active.append_instruction(&instruction_text(&shown));
                         }
-                        active.absorb(raw, shown);
+                        active.absorb_showing(raw, shown);
                     }
                     (None, Some(raw)) if element.local_name() == "fldSimple" => {
                         output.push(ParagraphContent::Inline(raw));
@@ -785,7 +811,7 @@ fn parse_paragraph_contents(
                 if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
                     let node = InlineNode::RawXml(Box::new(raw));
                     match fields.last_mut() {
-                        Some(active) => active.absorb(node, Vec::new()),
+                        Some(active) => active.absorb(node),
                         None => output.push(ParagraphContent::Inline(node)),
                     }
                 }
@@ -869,7 +895,7 @@ fn emit_field_run(run: Run, fields: &mut [OpenComplexField], output: &mut Vec<Pa
     if let Some(active) = fields.last_mut() {
         active.append_instruction(&instruction_text(std::slice::from_ref(&run)));
         active.adopt_formatting(&run);
-        active.absorb(InlineNode::Run(run.clone()), vec![run]);
+        active.absorb(InlineNode::Run(run));
     } else {
         output.push(ParagraphContent::Inline(InlineNode::Run(run)));
     }
@@ -1101,6 +1127,7 @@ fn raw_change(element: &XmlElement, shown: Vec<Run>) -> InlineNode {
             paragraph_ordinal: element.paragraph_ordinal,
             para_id_attribute: element.para_id_attribute.clone(),
             bookmark_xml: element.bookmark_xml.clone(),
+            bookmark_replay_xml: element.bookmark_replay_xml.clone(),
         }
     }
     InlineNode::RawXml(Box::new(RawInlineXml {
@@ -1179,6 +1206,7 @@ pub fn resolve_raw_inline(
                 paragraph_ordinal: element.paragraph_ordinal,
                 para_id_attribute: element.para_id_attribute.clone(),
                 bookmark_xml: element.bookmark_xml.clone(),
+                bookmark_replay_xml: element.bookmark_replay_xml.clone(),
             }],
         }
     }
@@ -1193,6 +1221,7 @@ pub fn resolve_raw_inline(
         paragraph_ordinal: None,
         para_id_attribute: None,
         bookmark_xml: None,
+        bookmark_replay_xml: None,
     };
     let limits = ParseLimits::default();
     let content = parse_paragraph_contents(
@@ -1230,6 +1259,7 @@ pub fn parse_raw_inline(xml: &str) -> Option<Vec<InlineNode>> {
         paragraph_ordinal: None,
         para_id_attribute: None,
         bookmark_xml: None,
+        bookmark_replay_xml: None,
     };
     let limits = ParseLimits::default();
     parse_paragraph_contents(
@@ -1279,6 +1309,7 @@ pub(crate) fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
         paragraph_ordinal: element.paragraph_ordinal,
         para_id_attribute: element.para_id_attribute.clone(),
         bookmark_xml: element.bookmark_xml.clone(),
+        bookmark_replay_xml: element.bookmark_replay_xml.clone(),
         children: element
             .children
             .iter()
@@ -1488,6 +1519,7 @@ fn parse_drawing_owned(
                 .map(|image| RunContent::Drawing {
                     image: Box::new(image),
                     source_xml: None,
+                    drawing_properties: None,
                 })
                 .into_iter()
                 .collect(),
@@ -1498,7 +1530,12 @@ fn parse_drawing_owned(
     }
     let charts = drawing.as_ref().map(|context| context.charts);
     match parse_chart_from_drawing(element, relationships, charts)? {
-        DrawingChart::Chart(chart) => return Ok(vec![RunContent::Chart { chart }]),
+        DrawingChart::Chart(chart) => {
+            return Ok(vec![RunContent::Chart {
+                chart,
+                drawing_properties: None,
+            }]);
+        }
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
@@ -1507,6 +1544,7 @@ fn parse_drawing_owned(
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             }]);
         }
         DrawingChart::None => {}
@@ -1529,6 +1567,7 @@ fn parse_drawing_owned(
                 RunContent::Shape {
                     shape: Box::new(shape),
                     source_xml: Some(xml),
+                    drawing_properties: None,
                 }
             }
             None => RunContent::OpaqueDrawing {
@@ -1538,6 +1577,7 @@ fn parse_drawing_owned(
                 preview: None,
                 previews: Vec::new(),
                 text_box: None,
+                drawing_properties: None,
             },
         }]);
     }
@@ -1555,6 +1595,7 @@ fn parse_drawing_owned(
             return Ok(vec![RunContent::Shape {
                 shape: Box::new(shape),
                 source_xml: None,
+                drawing_properties: None,
             }]);
         }
         return Ok(Vec::new());
@@ -1564,6 +1605,7 @@ fn parse_drawing_owned(
         .map(|image| RunContent::Drawing {
             image: Box::new(image),
             source_xml: None,
+            drawing_properties: None,
         })
         .into_iter()
         .collect())
@@ -1634,6 +1676,7 @@ fn parse_alternate_content_branch_with_context<'a>(
                     let picture = RunContent::Drawing {
                         image,
                         source_xml: None,
+                        drawing_properties: None,
                     };
                     return Ok(Some((branch, vec![picture])));
                 }
@@ -2558,7 +2601,15 @@ mod tests {
             panic!("expected the wrapper kept opaque, got {contents:?}");
         };
         assert_eq!(kind, "alternateContent");
-        assert_eq!(xml, wrapper);
+        // The SmartArt drawing carries the bindings it names, as upstream's
+        // parse keeps them for a replay outside this paragraph.
+        assert_eq!(
+            *xml,
+            wrapper.replace(
+                "<w:drawing>",
+                r#"<w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram">"#
+            )
+        );
     }
 
     #[test]
@@ -2575,7 +2626,10 @@ mod tests {
         ));
         let contents = run_contents(&paragraph);
         assert_eq!(contents.len(), 3);
-        let RunContent::Drawing { image, source_xml } = contents[0] else {
+        let RunContent::Drawing {
+            image, source_xml, ..
+        } = contents[0]
+        else {
             panic!("the OLE preview draws as a picture")
         };
         assert_eq!(source_xml.as_deref(), Some(object));
@@ -2616,7 +2670,10 @@ mod tests {
             ));
             let contents = run_contents(&paragraph);
             assert_eq!(contents.len(), 1);
-            let RunContent::Drawing { image, source_xml } = contents[0] else {
+            let RunContent::Drawing {
+                image, source_xml, ..
+            } = contents[0]
+            else {
                 panic!("expected the selected preview, got {contents:?}");
             };
             assert_eq!(source_xml.as_deref(), Some(wrapper.as_str()));
@@ -2680,7 +2737,12 @@ mod tests {
             panic!("expected the drawing paragraph");
         };
         let contents = run_contents(paragraph);
-        let [RunContent::Drawing { image, source_xml }] = contents.as_slice() else {
+        let [
+            RunContent::Drawing {
+                image, source_xml, ..
+            },
+        ] = contents.as_slice()
+        else {
             panic!("expected the fallback picture, got {contents:?}");
         };
         assert_eq!(image.relationship_id, "rIdFallback");

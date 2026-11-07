@@ -77,6 +77,7 @@ pub(super) fn insert_numbering_entries(
         return Some(serialize_numbering_xml(&NumberingDefinitions {
             abstract_nums,
             nums,
+            first_picture_bullet: None,
         }));
     }
     if !xml[at..].starts_with('<') {
@@ -605,6 +606,7 @@ mod tests {
         let fresh = serialize_numbering_xml(&NumberingDefinitions {
             abstract_nums,
             nums,
+            first_picture_bullet: None,
         });
         for empty in [
             "",

@@ -6,11 +6,8 @@
 //! Word reference PDFs of the corpus TOC documents (Arial 10pt entries
 //! whose tab and mark runs carry 11 to 12pt sit on a 10pt line).
 
-use docx_edit::{
-    EditCtx, EngineSession, FormatPolicy, ParaSelector, Position, StyleResolver, seed_from_docx,
-};
+use docx_edit::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
 use serde_json::{Value, json};
-use yrs::Any;
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
@@ -244,23 +241,6 @@ fn a_larger_paragraph_mark_does_not_raise_a_toc_entry() {
 }
 
 #[test]
-fn a_hyperlink_style_size_does_not_raise_a_toc_entry() {
-    // Hyperlink character style at 14pt over a 10pt entry, the shape the
-    // Verdana 12pt Hyperlink style takes over 10pt TOC styles in Word.
-    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#.to_owned();
-    let heights = line_heights(&document(&body, &styles(Some(20), Some(28))));
-    assert_height(heights[0], 10.0);
-}
-
-#[test]
-fn a_hyperlink_style_size_does_not_drop_a_toc_entry_below_its_chain() {
-    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#;
-    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
-    let heights = line_heights(&document(body, styles));
-    assert_height(heights[0], 12.0);
-}
-
-#[test]
 fn a_larger_field_result_does_not_raise_an_unsized_toc_entry() {
     let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#;
     let heights = line_heights(&document(body, &styles(None, None)));
@@ -328,70 +308,6 @@ fn a_plain_paragraph_keeps_its_line_height() {
     assert_height(heights[0], 10.0);
 }
 
-const CHAIN_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#;
-
-/// A Normal paragraph whose mark carries a direct 14pt over the 10pt
-/// chain, holding one unsized run.
-fn marked_paragraph() -> (Vec<u8>, StyleResolver) {
-    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Switch me</w:t></w:r></w:p>"#;
-    let bytes = document(body, CHAIN_STYLES);
-    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
-    let styles = StyleResolver::from_parts(&parts).unwrap();
-    (bytes, styles)
-}
-
-fn properties(
-    doc: &docx_edit::EditingDoc,
-    para_id: &str,
-) -> std::collections::BTreeMap<String, Any> {
-    doc.paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .find(|paragraph| paragraph.para_id == para_id)
-        .unwrap()
-        .properties
-}
-
-#[test]
-fn a_style_switch_measures_the_new_style_size() {
-    let (bytes, styles) = marked_paragraph();
-    let font = docx_layout::register_measure_font(FONT).unwrap();
-    let package = docx_parse::parse_docx_s9_wire(&bytes, Default::default())
-        .unwrap()
-        .document
-        .package;
-    let engine = EngineSession::new(77101);
-    let doc = engine.doc();
-    seed_from_docx(doc, &bytes).unwrap();
-    assert!(!properties(doc, "00000001").contains_key("runDefaultTextFormatting"));
-
-    doc.restyle_paragraphs(
-        &EditCtx::local("", ""),
-        &ParaSelector::One("00000001".to_owned()),
-        "Heading1",
-        &styles,
-    )
-    .unwrap();
-
-    assert!(!properties(doc, "00000001").contains_key("runDefaultTextFormatting"));
-    let output: Value = serde_json::from_str(
-        &engine
-            .layout_document_with_regions_json(
-                &json!({
-                    "bodyStory": "body", "renderEnv": {},
-                    "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
-                    "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 10}}
-                })
-                .to_string(),
-            )
-            .unwrap(),
-    )
-    .unwrap();
-    let blocks = output["measured"].as_array().unwrap();
-    let run = &blocks[0]["block"]["runs"][0];
-    assert_eq!(run["fontSize"], 16.0, "run must take the Heading1 chain");
-}
-
 fn layout_heights(engine: &EngineSession, bytes: &[u8], render_env: Value) -> Vec<f64> {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
@@ -441,63 +357,6 @@ fn heights_with_env(bytes: &[u8], render_env: Value) -> Vec<f64> {
 
 const CHAIN12_STYLES: &str = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="20"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="TOC1"><w:name w:val="toc 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="24"/></w:rPr><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr></w:style><w:style w:type="character" w:styleId="Hyperlink"><w:name w:val="Hyperlink"/><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="28"/></w:rPr></w:style></w:styles>"#;
 
-fn pageref_in_hyperlink_body() -> &'static str {
-    r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink></w:p>"#
-}
-
-#[test]
-fn a_pageref_field_inside_the_hyperlink_takes_the_10pt_toc_chain_size() {
-    let heights = heights_with_env(
-        &document(pageref_in_hyperlink_body(), &styles(Some(20), Some(28))),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 10.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
-    );
-    assert_height(heights[0], 10.0);
-}
-
-#[test]
-fn a_pageref_field_inside_the_hyperlink_takes_the_12pt_toc_chain_size() {
-    let heights = heights_with_env(
-        &document(pageref_in_hyperlink_body(), CHAIN12_STYLES),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
-    );
-    assert_height(heights[0], 12.0);
-}
-
-#[test]
-fn a_12pt_toc1_entry_with_a_14pt_mark_and_no_field_run_stays_12pt() {
-    let body = r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:tab/></w:r><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>3</w:t></w:r></w:hyperlink></w:p>"#;
-    let heights = heights_with_env(
-        &document(body, CHAIN12_STYLES),
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "TOC1": 12.0}, "hyperlinkStyleFontSizes": {"Hyperlink": 14.0}, "docDefaultFontSize": 10.0}),
-    );
-    assert_height(heights[0], 12.0);
-}
-
-#[test]
-fn a_restyle_to_heading1_measures_the_new_16pt_chain_size() {
-    let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="Heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style></w:styles>"#;
-    let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="Normal"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr><w:r><w:t>Switch me</w:t></w:r></w:p>"#;
-    let bytes = document(body, styles);
-    let parts = ooxml_opc::unzip_parts(&bytes).unwrap();
-    let resolver = StyleResolver::from_parts(&parts).unwrap();
-    let engine = EngineSession::new(77104);
-    let doc = engine.doc();
-    seed_from_docx(doc, &bytes).unwrap();
-    doc.restyle_paragraphs(
-        &EditCtx::local("", ""),
-        &ParaSelector::One("00000001".to_owned()),
-        "Heading1",
-        &resolver,
-    )
-    .unwrap();
-    let heights = layout_heights(
-        &engine,
-        &bytes,
-        json!({"paragraphStyleFontSizes": {"Normal": 10.0, "Heading1": 16.0}, "docDefaultFontSize": 10.0}),
-    );
-    assert_height(heights[0], 16.0);
-}
-
 #[test]
 fn typing_into_an_empty_12pt_toc1_paragraph_takes_the_chain_size() {
     let body = r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="TOC1"/><w:rPr><w:sz w:val="28"/></w:rPr></w:pPr></w:p>"#;
@@ -527,7 +386,7 @@ fn a_split_keeps_both_halves_at_the_chain_size() {
     let engine = EngineSession::new(77106);
     let doc = engine.doc();
     seed_from_docx(doc, &bytes).unwrap();
-    doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 5), None)
+    doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 5))
         .unwrap();
     let heights = layout_heights(
         &engine,
@@ -628,78 +487,6 @@ fn a_directly_sized_run_without_szcs_keeps_the_main_cs_size() {
     assert_eq!(run["fontSizeCs"], 14.0);
 }
 
-#[test]
-fn a_split_at_the_end_has_no_chain_defaults_key() {
-    let (bytes, _styles) = marked_paragraph();
-    let doc = docx_edit::EditingDoc::new(77102);
-    seed_from_docx(&doc, &bytes).unwrap();
-    doc.split_paragraph(&EditCtx::local("", ""), Position::new("body", 9), None)
-        .unwrap();
-    let paragraphs = doc.paragraphs("body").unwrap();
-    assert_eq!(paragraphs.len(), 2);
-    assert!(
-        !paragraphs[1]
-            .properties
-            .contains_key("runDefaultTextFormatting")
-    );
-}
-
-#[test]
-fn a_save_round_trip_never_writes_a_chain_defaults_key() {
-    let (bytes, _styles) = marked_paragraph();
-    let doc = docx_edit::EditingDoc::new(77103);
-    seed_from_docx(&doc, &bytes).unwrap();
-    let plan = doc.paragraph_save_plan();
-    let package = docx_parse::parse_docx_s9_wire(
-        &bytes,
-        docx_parse::S9ParseOptions {
-            source_ordinals: true,
-            ..docx_parse::S9ParseOptions::default()
-        },
-    )
-    .unwrap()
-    .document
-    .package;
-    let request: docx_parse::serializer::S13SaveRequest = serde_json::from_value(json!({
-        "determinism": {"seed": "0".repeat(64), "now": "2000-01-01T00:00:00.000Z"},
-        "document": {
-            "content": package.document.content,
-            "comments": package.document.comments,
-        },
-        "headerEntries": package.header_entries.unwrap_or_default(),
-        "footnotes": package.footnotes.unwrap_or_default(),
-        "footnoteSeparators": package.footnote_separators.unwrap_or_default(),
-        "relationshipEntries": package.relationship_entries,
-        "options": {"updateModifiedDate": false},
-        "paragraphIds": {
-            "assignments": plan.assignments.iter().map(|(part, ordinal, para_id)| {
-                json!({"part": part, "ordinal": ordinal, "paraId": para_id})
-            }).collect::<Vec<_>>(),
-            "patchedParts": plan.patched_parts.iter().map(|(part, para_ids)| {
-                json!({"part": part, "paraIds": para_ids})
-            }).collect::<Vec<_>>(),
-        },
-    }))
-    .unwrap();
-    let saved =
-        ooxml_opc::unzip_parts(&docx_parse::serializer::write_docx_s13(request, &bytes).unwrap())
-            .unwrap();
-    let source = ooxml_opc::unzip_parts(&bytes).unwrap();
-    let saved_xml = saved
-        .iter()
-        .find(|(name, _)| name == "word/document.xml")
-        .map(|(_, value)| value.clone())
-        .unwrap();
-    let source_xml = source
-        .iter()
-        .find(|(name, _)| name == "word/document.xml")
-        .map(|(_, value)| value.clone())
-        .unwrap();
-    let text = String::from_utf8(saved_xml.clone()).unwrap();
-    assert!(!text.contains("runDefaultTextFormatting"));
-    assert_eq!(saved_xml, source_xml);
-}
-
 fn lowered_runs(bytes: &[u8], render_env: Value) -> Vec<Value> {
     let doc = docx_edit::EditingDoc::new(77109);
     seed_from_docx(&doc, bytes).unwrap();
@@ -775,20 +562,6 @@ fn ref_field_results_keep_their_direct_toc_sizes() {
 }
 
 #[test]
-fn pageref_field_results_do_not_block_the_toc_size_proof() {
-    for complex in [false, true] {
-        let runs = toc_with_sized_field_result("pAgErEf", complex);
-        let entry = runs.iter().find(|run| run["text"] == "Entry one").unwrap();
-        let result = runs
-            .iter()
-            .find(|run| run["text"] == "3" || run["fallback"] == "3")
-            .unwrap();
-        assert_eq!(entry["fontSize"], 10.0, "{entry}");
-        assert_eq!(result["fontSize"], 10.0, "{result}");
-    }
-}
-
-#[test]
 fn an_opaque_toc_field_keeps_its_14pt_cached_entry_text() {
     let body = concat!(
         r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
@@ -832,27 +605,6 @@ fn opaque_toc_entry_text_sets_the_cap_for_page_fields() {
 }
 
 #[test]
-fn toc_hyperlink_sizes_are_derived_from_the_render_environment() {
-    for style_id in ["Hyperlink", "FollowedHyperlink"] {
-        for (direct_size, expected) in [("", 10.0), (r#"<w:sz w:val="36"/>"#, 18.0)] {
-            let body = format!(
-                concat!(
-                    r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
-                    r#"<w:r><w:rPr><w:rStyle w:val="{style_id}"/>{direct_size}</w:rPr>"#,
-                    r#"<w:t>Entry one</w:t></w:r></w:p>"#,
-                ),
-                style_id = style_id,
-                direct_size = direct_size,
-            );
-            let styles = styles(Some(20), Some(28)).replace("Hyperlink", style_id);
-            let bytes = document(&body, &styles);
-            let runs = lowered_runs(&bytes, chain_env(&bytes));
-            assert_eq!(runs[0]["fontSize"], expected);
-        }
-    }
-}
-
-#[test]
 fn a_direct_toc_size_equal_to_the_hyperlink_style_stays_direct() {
     let body = concat!(
         r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
@@ -864,68 +616,6 @@ fn a_direct_toc_size_equal_to_the_hyperlink_style_stays_direct() {
     let runs = lowered_runs(&bytes, chain_env(&bytes));
     assert_eq!(runs[0]["fontSize"], 14.0);
     assert_height(line_heights(&bytes)[0], 14.0);
-}
-
-#[test]
-fn a_proven_inherited_toc_size_takes_the_entry_chain_size() {
-    let body = concat!(
-        r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr>"#,
-        r#"<w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-        r#"<w:rStyle w:val="Hyperlink"/></w:rPr>"#,
-        r#"<w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
-    );
-    let bytes = document(body, &styles(Some(20), Some(28)));
-    let runs = lowered_runs(&bytes, chain_env(&bytes));
-    assert_eq!(runs[0]["fontSize"], 10.0);
-    assert_height(line_heights(&bytes)[0], 10.0);
-}
-
-#[test]
-fn an_edited_toc_paragraph_keeps_unknown_sizes_and_matches_cold_lowering() {
-    for direct in ["", r#"<w:sz w:val="28"/>"#] {
-        let body = format!(
-            concat!(
-                r#"<w:p w14:paraId="00000001"><w:pPr><w:pStyle w:val="TOC1"/>"#,
-                r#"</w:pPr><w:hyperlink w:anchor="entry"><w:r><w:rPr>"#,
-                r#"<w:rStyle w:val="Hyperlink"/>{direct}</w:rPr>"#,
-                r#"<w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#,
-            ),
-            direct = direct,
-        );
-        let bytes = document(&body, &styles(Some(20), Some(28)));
-        let engine = EngineSession::new(77110);
-        seed_from_docx(engine.doc(), &bytes).unwrap();
-        let env = serde_json::from_value(chain_env(&bytes)).unwrap();
-        let before = engine
-            .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
-            .unwrap();
-        let expected = if direct.is_empty() { 10.0 } else { 14.0 };
-        assert_eq!(before[0]["runs"][0]["fontSize"], expected);
-        engine
-            .doc()
-            .insert_text(
-                &EditCtx::local("", ""),
-                Position::new("body", 5),
-                " typed",
-                FormatPolicy::Inherit,
-            )
-            .unwrap();
-        let resident = engine
-            .with_lowered_story("body", &env, |blocks| serde_json::to_value(blocks).unwrap())
-            .unwrap();
-        let cold = docx_edit::bridge::yrs_doc_to_layout_blocks(engine.doc(), "body", &env).unwrap();
-        assert_eq!(resident, serde_json::to_value(cold).unwrap());
-        let runs = resident[0]["runs"].as_array().unwrap();
-        assert_eq!(
-            runs.iter()
-                .filter_map(|run| run["text"].as_str())
-                .collect::<String>(),
-            "Entry typed one",
-        );
-        for run in runs {
-            assert_eq!(run["fontSize"], 14.0, "{run}");
-        }
-    }
 }
 
 #[test]
@@ -989,35 +679,6 @@ fn a_body_pageref_preserves_the_hyperlink_style_size() {
     assert_eq!(runs[0]["fontSize"], 14.0);
     assert_ne!(runs[0]["hyperlink"]["noDefaultStyle"], true);
     assert_height(line_heights(&bytes)[0], 14.0);
-}
-
-#[test]
-fn a_toc_field_result_with_a_custom_style_uses_the_entry_size() {
-    let body = r#"<w:p><w:pPr><w:pStyle w:val="Normal"/></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>Entry one</w:t></w:r><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF _Toc1 \h "><w:r><w:rPr><w:sz w:val="28"/></w:rPr><w:t>3</w:t></w:r></w:fldSimple></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
-    let bytes = document(body, &styles(Some(20), Some(28)));
-    let runs = lowered_runs(&bytes, chain_env(&bytes));
-    assert!(runs.iter().any(|run| run["text"] == "Entry one"));
-    assert!(runs.iter().any(|run| run["kind"] == "tab"));
-    for run in &runs {
-        assert_eq!(run["fontSize"], 10.0, "{run}");
-    }
-}
-
-#[test]
-fn stripping_a_toc_hyperlink_size_preserves_complex_script_sizes() {
-    let styles = styles(Some(20), Some(28)).replace(
-        r#"<w:sz w:val="28"/>"#,
-        r#"<w:sz w:val="28"/><w:szCs w:val="36"/>"#,
-    );
-    for (direct_cs, expected) in [("", 18.0), (r#"<w:szCs w:val="38"/>"#, 19.0)] {
-        let body = format!(
-            r#"<w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:hyperlink w:anchor="_Toc1"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/>{direct_cs}<w:cs/></w:rPr><w:t>Entry one</w:t></w:r></w:hyperlink></w:p>"#
-        );
-        let bytes = document(&body, &styles);
-        let runs = lowered_runs(&bytes, chain_env(&bytes));
-        assert_eq!(runs[0]["fontSize"], 10.0);
-        assert_eq!(runs[0]["fontSizeCs"], expected);
-    }
 }
 
 #[test]

@@ -1428,7 +1428,8 @@ impl EditSession {
     /// and returns the font id that measurement and display inputs reference.
     /// Errors on bytes the font parser rejects.
     pub fn register_measure_font(&self, bytes: &[u8]) -> Result<u32, JsValue> {
-        docx_layout::register_measure_font(bytes)
+        // What the layout crate's wasm32 export does, also in host builds.
+        docx_layout::register_measure_font_module(bytes).map_err(|e| JsValue::from_str(&e))
     }
 
     /// A copy of the bytes measurement font `id` was registered with: what a
@@ -1447,7 +1448,8 @@ impl EditSession {
         base: u32,
         requested_family: &str,
     ) -> Result<u32, JsValue> {
-        docx_layout::register_substitute_measure_font(base, requested_family)
+        docx_layout::register_substitute_measure_font_module(base, requested_family)
+            .map_err(|e| JsValue::from_str(&e))
     }
 
     /// Drops every registered measurement font (ids restart at zero) and
@@ -1916,7 +1918,7 @@ impl EditSession {
     /// [`EditSession::register_measure_font`] and `glyph_id` from shaping.
     /// Errors when the glyph cannot be extracted.
     pub fn outline_glyph_json(&self, font_id: u32, glyph_id: u32) -> Result<String, JsValue> {
-        docx_layout::outline_glyph_json(font_id, glyph_id)
+        docx_layout::outline_glyph_json_str(font_id, glyph_id).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Hydrates this replica from a stored state, typically another replica's

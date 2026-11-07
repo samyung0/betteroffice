@@ -191,6 +191,63 @@ fn layout_request(package: &S9PackageWire) -> Value {
     if let Some(id) = default_paragraph_style_id {
         render_env["defaultParagraphStyleId"] = json!(id);
     }
+    // What the editor's host sends too: the theme whose fonts win over run font
+    // names (#1921), the document's default language (#2246), each paragraph
+    // style chain's size for unsized runs (#1880) and the first picture
+    // bullet's box (#1936).
+    render_env["fontTheme"] = json!(package.theme);
+    let doc_defaults = package
+        .styles
+        .as_ref()
+        .and_then(|styles| styles.doc_defaults.as_ref())
+        .and_then(|defaults| defaults.r_pr.as_ref());
+    if let Some(language) = doc_defaults.and_then(|r_pr| r_pr.language.as_ref()) {
+        let slots: serde_json::Map<String, Value> = [
+            ("latin", &language.latin),
+            ("eastAsia", &language.east_asia),
+            ("bidi", &language.bidi),
+        ]
+        .into_iter()
+        .filter_map(|(slot, tag)| {
+            tag.as_deref()
+                .filter(|tag| !tag.is_empty())
+                .map(|tag| (slot.to_owned(), json!(tag)))
+        })
+        .collect();
+        if !slots.is_empty() {
+            render_env["docDefaultLanguage"] = Value::Object(slots);
+        }
+    }
+    let doc_default_size = doc_defaults.and_then(|r_pr| r_pr.font_size).unwrap_or(20.0);
+    let chain_sizes: serde_json::Map<String, Value> = paragraph_styles()
+        .map(|style| {
+            let mut seen = Vec::new();
+            let mut current = Some(style);
+            let mut size = None;
+            while let Some(entry) = current.filter(|entry| !seen.contains(&&entry.style_id)) {
+                seen.push(&entry.style_id);
+                if let Some(found) = entry.r_pr.as_ref().and_then(|r_pr| r_pr.font_size) {
+                    size = Some(found);
+                    break;
+                }
+                current = entry
+                    .based_on
+                    .as_deref()
+                    .and_then(|id| styles.iter().find(|style| style.style_id == id));
+            }
+            (
+                style.style_id.clone(),
+                json!(size.unwrap_or(doc_default_size) / 2.0),
+            )
+        })
+        .collect();
+    if !chain_sizes.is_empty() {
+        render_env["paragraphStyleFontSizes"] = Value::Object(chain_sizes);
+    }
+    render_env["docDefaultFontSize"] = json!(doc_default_size / 2.0);
+    if let Some(bullet) = &package.numbering.first_picture_bullet {
+        render_env["firstPictureBullet"] = json!(bullet);
+    }
     // The default paragraph style's size, else the document default, else
     // Word's own 10pt: what a reading layout eases sizes around.
     let body_half_points = default_paragraph_style_id

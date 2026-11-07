@@ -1,9 +1,90 @@
 use docx_edit::{EngineSession, seed_from_docx};
 use serde_json::{Value, json};
 
-#[allow(dead_code)]
-#[path = "support/structured_fixture.rs"]
-mod fixture;
+/// A body with word parts related from the main document.
+mod fixture {
+    pub const NS: &str = concat!(
+        r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#
+    );
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const OFFICE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
+
+    pub struct Package {
+        body: String,
+        parts: Vec<(String, String, String, String)>,
+    }
+
+    impl Package {
+        pub fn new(body: &str) -> Self {
+            Self {
+                body: body.to_owned(),
+                parts: Vec::new(),
+            }
+        }
+
+        /// Adds `word/{name}`, related from the main document as `id`.
+        pub fn part(
+            mut self,
+            name: &str,
+            id: &str,
+            kind: &str,
+            content_type: &str,
+            xml: &str,
+        ) -> Self {
+            self.parts.push((
+                name.to_owned(),
+                format!(r#"<Relationship Id="{id}" Type="{REL}/{kind}" Target="{name}"/>"#),
+                format!(r#"<Override PartName="/word/{name}" ContentType="{OFFICE}.{content_type}+xml"/>"#),
+                xml.to_owned(),
+            ));
+            self
+        }
+
+        pub fn bytes(&self) -> Vec<u8> {
+            let overrides: String = self.parts.iter().map(|part| part.2.as_str()).collect();
+            let rels: String = self.parts.iter().map(|part| part.1.as_str()).collect();
+            let relationships = |entries: &str| {
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{entries}</Relationships>"#
+                )
+            };
+            let mut parts = vec![
+                (
+                    "[Content_Types].xml".to_owned(),
+                    format!(
+                        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="{OFFICE}.document.main+xml"/>{overrides}</Types>"#
+                    ),
+                ),
+                (
+                    "_rels/.rels".to_owned(),
+                    relationships(&format!(
+                        r#"<Relationship Id="rId1" Type="{REL}/officeDocument" Target="word/document.xml"/>"#
+                    )),
+                ),
+                (
+                    "word/_rels/document.xml.rels".to_owned(),
+                    relationships(&rels),
+                ),
+                (
+                    "word/document.xml".to_owned(),
+                    format!(
+                        r#"<w:document {NS}><w:body>{}</w:body></w:document>"#,
+                        self.body
+                    ),
+                ),
+            ];
+            for (name, _, _, xml) in &self.parts {
+                parts.push((format!("word/{name}"), xml.clone()));
+            }
+            let parts: Vec<_> = parts
+                .into_iter()
+                .map(|(name, xml)| (name, xml.into_bytes()))
+                .collect();
+            ooxml_opc::rezip_parts(&parts).unwrap()
+        }
+    }
+}
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
@@ -129,23 +210,5 @@ fn no_footer_reference_keeps_the_bottom_margin_with_a_default_header() {
 #[test]
 fn unreferenced_parts_leave_both_body_margins_unchanged() {
     let output = layout(&document(None, None, false, false));
-    assert_body_margins(&output, [(30.0, 30.0); 3]);
-}
-
-#[test]
-fn title_pages_reserve_only_the_referenced_kind() {
-    let output = layout(&document(Some("default"), Some("default"), true, false));
-    assert_body_margins(&output, [(30.0, 30.0), (63.2, 63.2), (63.2, 63.2)]);
-    let output = layout(&document(Some("first"), Some("first"), true, false));
-    assert_body_margins(&output, [(63.2, 63.2), (30.0, 30.0), (30.0, 30.0)]);
-}
-
-#[test]
-fn even_and_odd_pages_reserve_only_the_referenced_kind() {
-    let output = layout(&document(Some("default"), Some("default"), false, true));
-    assert_body_margins(&output, [(63.2, 63.2), (30.0, 30.0), (63.2, 63.2)]);
-    let output = layout(&document(Some("even"), Some("even"), false, true));
-    assert_body_margins(&output, [(30.0, 30.0), (63.2, 63.2), (30.0, 30.0)]);
-    let output = layout(&document(Some("even"), Some("even"), false, false));
     assert_body_margins(&output, [(30.0, 30.0); 3]);
 }

@@ -78,34 +78,38 @@ fn page_lines_with_height(body: &str, content_height: u32) -> Vec<Vec<String>> {
             "defaults": {"fontFamily": "Arial", "fontSize": 12}
         }
     });
-    let output: Value = serde_json::from_str(
-        &engine
-            .layout_document_with_regions_json(&request.to_string())
-            .unwrap(),
-    )
-    .unwrap();
-    output["layout"]["pages"]
+    let layout = engine
+        .layout_document_with_regions_json(&request.to_string())
+        .unwrap();
+    let display: Value =
+        serde_json::from_str(&engine.build_display_list_json(&layout).unwrap()).unwrap();
+    display["pages"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|page| {
-            page["fragments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .flat_map(|fragment| fragment["resolvedLines"].as_array().into_iter().flatten())
-                .map(|line| {
-                    line["segments"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|segment| segment["text"].as_str())
-                        .collect::<String>()
-                })
-                .filter(|line| !line.is_empty())
-                .collect()
-        })
+        .map(painted_lines)
         .collect()
+}
+
+/// The text of each painted line of a display page, in paint order.
+fn painted_lines(page: &Value) -> Vec<String> {
+    let mut lines: Vec<((String, u64), String)> = Vec::new();
+    for primitive in page["primitives"].as_array().unwrap() {
+        let Some(text) = primitive["text"].as_str().filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        let key = (
+            primitive["blockKey"]
+                .as_str()
+                .map_or_else(|| primitive["blockId"].to_string(), str::to_owned),
+            primitive["lineIndex"].as_u64().unwrap_or(0),
+        );
+        match lines.last_mut() {
+            Some((last, line)) if *last == key => line.push_str(text),
+            _ => lines.push((key, text.to_owned())),
+        }
+    }
+    lines.into_iter().map(|(_, line)| line).collect()
 }
 
 fn head_fixture(filler_height: u32, properties: &str) -> String {

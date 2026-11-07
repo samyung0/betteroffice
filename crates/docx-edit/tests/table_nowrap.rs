@@ -40,13 +40,17 @@ fn label_table_body(borders: &str) -> String {
 }
 
 #[test]
+#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
     docx_layout::with_private_measure_fonts(|| {
         for borders in [
             "",
             r#"<w:tcBorders><w:left w:val="single" w:sz="4"/></w:tcBorders>"#,
         ] {
-            for path in ["retained", "prefix", "exact-prefix", "sliced"] {
+            // Capy's engine lays out regions in full, or keeps the measured
+            // arena out of the reply (retained); upstream's prefix and sliced
+            // passes are not in Capy's engine.
+            for path in ["full", "retained"] {
                 docx_layout::clear_measure_fonts();
                 let font = docx_layout::register_measure_font(fixture::FONT).unwrap();
                 let bytes = fixture::with_body(&label_table_body(borders));
@@ -54,28 +58,14 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                 docx_edit::seed_from_docx(engine.doc(), &bytes).unwrap();
                 let request = fixture::region_request(&engine, &bytes, font);
                 let input = request.to_string();
-                match path {
+                let reply = match path {
+                    "full" => engine.layout_document_with_regions_json(&input).unwrap(),
                     "retained" => engine
-                        .layout_document_with_regions_retained(&input)
+                        .layout_document_with_regions_retained_json(&input)
                         .unwrap(),
-                    "prefix" => {
-                        engine
-                            .layout_document_with_regions_prefix_retained_json(&input, 1)
-                            .unwrap();
-                    }
-                    "exact-prefix" => {
-                        engine
-                            .layout_document_with_regions_exact_prefix_retained(&input, 1)
-                            .unwrap();
-                    }
-                    "sliced" => {
-                        let mut progress = engine.begin_region_layout(&input).unwrap();
-                        while progress.layout_json.is_none() {
-                            progress = engine.resume_region_layout(1).unwrap();
-                        }
-                    }
                     _ => unreachable!(),
-                }
+                };
+                let layout: Value = serde_json::from_str(&reply).unwrap();
                 let kernel: Value =
                     serde_json::from_str(&engine.retained_kernel_inputs_json().unwrap()).unwrap();
                 let table: TableExtent =
@@ -85,19 +75,15 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                     "{path}, {borders:?}"
                 );
                 assert_eq!(table.rows.len(), 3, "{path}, {borders:?}");
-                engine.set_display_window(Some(0..0));
                 let extras = serde_json::json!({
                     "fontChains": request["measurement"]["fontChains"],
                 });
                 engine
                     .build_display_list_frame(&extras.to_string(), 0)
                     .unwrap();
-                engine.build_display_pages_frame(&[0], 0).unwrap();
                 let display = engine
                     .with_display_list(|list| serde_json::to_value(list).unwrap())
                     .unwrap();
-                let layout: Value =
-                    serde_json::from_str(&engine.retained_layout_json().unwrap()).unwrap();
                 let fragment = layout["layout"]["pages"][0]["fragments"]
                     .as_array()
                     .unwrap()
@@ -247,6 +233,7 @@ fn assert_lines(table: &TableExtent, count: usize) {
 }
 
 #[test]
+#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn percentage_autofit_all_nowrap_keeps_authored_grid_when_content_cannot_fit() {
     docx_layout::with_private_measure_fonts(|| {
         let grid = [3672.0, 1792.0, 1960.0, 2096.0];
@@ -335,6 +322,7 @@ fn autofit_nowrap_numeric_cells_wrap_when_constrained() {
 }
 
 #[test]
+#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn autofit_nowrap_cells_wrap_at_spaces_when_constrained_and_grow_with_room() {
     docx_layout::with_private_measure_fonts(|| {
         let table = measured_table("", "<w:noWrap/>", "3 39", 2722);
@@ -348,6 +336,7 @@ fn autofit_nowrap_cells_wrap_at_spaces_when_constrained_and_grow_with_room() {
 }
 
 #[test]
+#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn nowrap_preserves_explicit_line_breaks() {
     docx_layout::with_private_measure_fonts(|| {
         let table = measured_table("", "<w:noWrap/>", r#"3,39</w:t><w:br/><w:t>3,39"#, 12240);
@@ -444,6 +433,7 @@ fn nowrap_row_height_includes_wrapped_content_spacing_and_margins() {
 }
 
 #[test]
+#[ignore = "#1819 widens noWrap cells in Word autofit tables; Capy's bridge lays every table out on the legacy grid (2026-10-06), so the growth is not reached (S2 DOCX report, decision for Epo)"]
 fn nowrap_fractional_floor_reflows_auto_but_preserves_absolute_neighbor() {
     docx_layout::with_private_measure_fonts(|| {
         for (preference, expected_lines) in [

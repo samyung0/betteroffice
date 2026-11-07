@@ -150,6 +150,28 @@ fn document(body: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// The display list of a fresh layout of `bytes`.
+fn display(bytes: &[u8]) -> Value {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
+        .unwrap()
+        .document
+        .package;
+    let engine = EngineSession::new(76400);
+    seed_from_docx(engine.doc(), bytes).unwrap();
+    let layout = engine
+        .layout_document_with_regions_json(
+            &json!({
+                "bodyStory": "body", "renderEnv": {},
+                "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
+                "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    serde_json::from_str(&engine.build_display_list_json(&layout).unwrap()).unwrap()
+}
+
 fn render(bytes: &[u8]) -> Value {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
@@ -191,20 +213,34 @@ fn toc_entries_with_a_right_leader_tab_stay_on_one_line() {
         entry("2. Overall Objective and Goals of the Monitoring Plan", "2"),
         entry("3. Air Quality Monitoring Plan Development Process", "3"),
     );
-    let output = render(&document(&body));
+    let bytes = document(&body);
+    let output = render(&bytes);
     let pages = output["layout"]["pages"].as_array().expect("pages");
     assert_eq!(pages.len(), 1, "the whole TOC fits the first page");
+    // Each entry's painted text and the lines it paints on.
+    let display = display(&bytes);
+    let mut blocks: Vec<(String, String, std::collections::BTreeSet<u64>)> = Vec::new();
+    for primitive in display["pages"][0]["primitives"]
+        .as_array()
+        .expect("primitives")
+    {
+        let Some(text) = primitive["text"].as_str() else {
+            continue;
+        };
+        let key = primitive["blockKey"]
+            .as_str()
+            .map_or_else(|| primitive["blockId"].to_string(), str::to_owned);
+        let line = primitive["lineIndex"].as_u64().unwrap_or(0);
+        match blocks.iter_mut().find(|(block, _, _)| *block == key) {
+            Some((_, joined, lines)) => {
+                joined.push_str(text);
+                lines.insert(line);
+            }
+            None => blocks.push((key, text.to_owned(), [line].into())),
+        }
+    }
     let mut entries = 0;
-    for fragment in pages[0]["fragments"].as_array().expect("fragments") {
-        let lines = fragment["resolvedLines"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
-        let text: String = lines
-            .iter()
-            .flat_map(|line| line["segments"].as_array().cloned().unwrap_or_default())
-            .filter_map(|segment| segment["text"].as_str().map(str::to_owned))
-            .collect();
+    for (_, text, lines) in &blocks {
         if text.contains("Introduction")
             || text.contains("Overall Objective")
             || text.contains("Development Process")

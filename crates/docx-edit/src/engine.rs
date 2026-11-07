@@ -21,8 +21,8 @@ use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
-    DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
-    apply_section_geometry_to_blocks, effective_header_footer_refs,
+    DocumentRegions, RegionLayoutInput, advances_region_section, apply_document_regions,
+    apply_section_geometry, apply_section_geometry_to_blocks, effective_header_footer_refs,
 };
 use docx_layout::types::{
     BlockExtent, BlockId, ColumnLayout, Input as LayoutInput, Layout, LayoutBlock, MeasuredBlock,
@@ -397,25 +397,46 @@ fn region_measurement_widths<'a>(
         });
     let fallback_margins =
         docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    let blocks: Vec<_> = blocks.into_iter().collect();
+    // A section break inside a block content control has no caller entry: the
+    // blocks it closes measure at its own geometry (#1906).
+    let section_breaks: Vec<_> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            LayoutBlock::SectionBreak(section_break) => Some(section_break),
+            _ => None,
+        })
+        .collect();
+    let mut physical_index = 0;
     let mut section_index = 0;
     blocks
         .into_iter()
         .map(|block| {
+            let own = section_breaks
+                .get(physical_index)
+                .filter(|section_break| section_break.is_self_describing());
             let section = regions
                 .sections
                 .get(section_index)
                 .or_else(|| regions.sections.last());
-            let size = section
-                .and_then(|section| section.page_size.as_ref())
+            let size = own
+                .and_then(|own| own.page_size.as_ref())
+                .or_else(|| section.and_then(|section| section.page_size.as_ref()))
                 .unwrap_or(&fallback_size);
-            let margins = section
-                .and_then(|section| section.margins.as_ref())
+            let margins = own
+                .and_then(|own| own.margins.as_ref())
+                .or_else(|| section.and_then(|section| section.margins.as_ref()))
                 .unwrap_or(&fallback_margins);
-            let columns = section
-                .and_then(|section| section.columns.as_ref())
-                .or(input.options.columns.as_ref());
+            let columns = match own {
+                Some(own) => own.columns.as_ref(),
+                None => section.and_then(|section| section.columns.as_ref()),
+            }
+            .or(input.options.columns.as_ref());
             let width = column_measurement_width(size.w, margins, columns);
-            if matches!(block, LayoutBlock::SectionBreak(_)) {
+            if let LayoutBlock::SectionBreak(_) = block {
+                physical_index += 1;
+            }
+            if advances_region_section(block) {
                 section_index += 1;
             }
             width
@@ -549,6 +570,27 @@ fn extend_input_for_header_footer(
         });
     let fallback_margins =
         docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+    // A kind the section references reserves at least its distance; a kind it
+    // never references leaves the body at its margin (#1915).
+    let height = |section_index: usize, kind: HeaderFooterKind| {
+        let refs = effective_header_footer_refs(regions, section_index).unwrap_or_default();
+        let referenced = match kind {
+            HeaderFooterKind::Header => {
+                [&refs.header_default, &refs.header_first, &refs.header_even]
+            }
+            HeaderFooterKind::Footer => {
+                [&refs.footer_default, &refs.footer_first, &refs.footer_even]
+            }
+        }
+        .into_iter()
+        .any(Option::is_some);
+        variants
+            .iter()
+            .filter(|variant| variant.section_index == section_index && variant.kind == kind)
+            .map(|variant| variant.flow_height)
+            .reduce(f64::max)
+            .or(referenced.then_some(0.0))
+    };
     let extended: Vec<_> = regions
         .sections
         .iter()
@@ -572,32 +614,62 @@ fn extend_input_for_header_footer(
                 }
                 None => fallback_margins.clone(),
             };
-            let header_height = variants
-                .iter()
-                .filter(|variant| {
-                    variant.section_index == section_index
-                        && variant.kind == HeaderFooterKind::Header
-                })
-                .map(|variant| variant.flow_height)
-                .fold(0.0_f64, f64::max);
-            let footer_height = variants
-                .iter()
-                .filter(|variant| {
-                    variant.section_index == section_index
-                        && variant.kind == HeaderFooterKind::Footer
-                })
-                .map(|variant| variant.flow_height)
-                .fold(0.0_f64, f64::max);
-            extend_body_margins(&page_size, &margins, header_height, footer_height)
+            extend_body_margins(
+                &page_size,
+                &margins,
+                height(section_index, HeaderFooterKind::Header),
+                height(section_index, HeaderFooterKind::Footer),
+            )
         })
         .collect();
     input.options.margins = extended.first().cloned();
     input.options.final_margins = extended.last().cloned();
     let mut section_index = 0;
+    let mut first_break = true;
+    let mut section_size = fallback_size;
+    let mut section_margins = fallback_margins;
     for measured in &mut input.measured {
         let LayoutBlock::SectionBreak(section_break) = &mut measured.block else {
             continue;
         };
+        let ends_first_section = std::mem::take(&mut first_break);
+        if let Some(size) = &section_break.page_size {
+            section_size.clone_from(size);
+        }
+        if let Some(margins) = &section_break.margins {
+            section_margins.clone_from(margins);
+        }
+        // A break inside a block content control has no caller entry: its
+        // section keeps its own geometry under the headers and footers of the
+        // caller section it falls in (#1906).
+        if section_break.is_self_describing() {
+            let section = regions
+                .sections
+                .get(section_index)
+                .or_else(|| regions.sections.last());
+            let mut margins = section_margins.clone();
+            margins.header = margins
+                .header
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.header))
+                .or_else(|| section.and_then(|section| section.header_distance))
+                .or(Some(margins.top.abs()));
+            margins.footer = margins
+                .footer
+                .or_else(|| section.and_then(|section| section.margins.as_ref()?.footer))
+                .or_else(|| section.and_then(|section| section.footer_distance))
+                .or(Some(margins.bottom.abs()));
+            let extended_margins = extend_body_margins(
+                &section_size,
+                &margins,
+                height(section_index, HeaderFooterKind::Header),
+                height(section_index, HeaderFooterKind::Footer),
+            );
+            if ends_first_section {
+                input.options.margins = Some(extended_margins.clone());
+            }
+            section_break.margins = Some(extended_margins);
+            continue;
+        }
         if let Some(margins) = extended.get(section_index) {
             section_break.margins = Some(margins.clone());
         }
@@ -918,6 +990,14 @@ fn empty_paragraph_runs(paragraph: &docx_layout::types::ParagraphBlock) -> bool 
         || matches!(paragraph.runs.as_slice(), [Run::Text(run)] if run.text.is_empty())
 }
 
+fn auto_spaced(block: &LayoutBlock) -> bool {
+    matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.spacing.as_ref())
+        .is_some_and(|spacing| spacing.before_auto == Some(true) || spacing.after_auto == Some(true)))
+}
+
 fn contextual_spacing_enabled(paragraph: &docx_layout::types::ParagraphBlock) -> bool {
     paragraph
         .attrs
@@ -954,6 +1034,20 @@ fn restore_moved_measures(measured: &mut [MeasuredBlock], entries: Vec<MeasuredB
 /// cell paragraph for the style check only — canonical writes `after` on the
 /// empty paragraph and never touches the table's `before`).
 fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut LayoutBlock) {
+    // Word's automatic spacing rules (#1851): none before the document's first
+    // paragraph or after an authored page break, none between items of one list.
+    if index == 0 {
+        docx_layout::paragraph_spacing::suppress_document_auto_before(owned);
+    }
+    docx_layout::paragraph_spacing::suppress_break_auto_before(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+    );
+    docx_layout::paragraph_spacing::suppress_list_auto_spacing(
+        owned,
+        index.checked_sub(1).and_then(|i| blocks.get(i)),
+        blocks.get(index + 1),
+    );
     if let Some(LayoutBlock::Paragraph(previous)) = index.checked_sub(1).and_then(|i| blocks.get(i))
     {
         let suppress_before = match &*owned {
@@ -1020,21 +1114,38 @@ fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
                 out.push(block_key(&paragraph.id).into_owned());
             }
         }
-        LayoutBlock::Shape(shape) => {
-            if let Some(inner_text) = &shape.inner_text {
-                for paragraph in inner_text {
-                    out.push(block_key(&paragraph.id).into_owned());
+        LayoutBlock::Shape(shape) => shape_text_keys(shape, out),
+        // A chart or text box sharing its line (#1899) paints under its own id.
+        LayoutBlock::Paragraph(paragraph) => {
+            for run in &paragraph.runs {
+                let Run::Image(image) = run else {
+                    continue;
+                };
+                if let Some(chart) = &image.inline_chart {
+                    out.push(block_key(&chart.id).into_owned());
                 }
-            }
-            for child in &shape.children {
-                if let Some(inner_text) = &child.inner_text {
-                    for paragraph in inner_text {
-                        out.push(block_key(&paragraph.id).into_owned());
-                    }
+                if let Some(shape) = &image.inline_shape {
+                    out.push(block_key(&shape.id).into_owned());
+                    shape_text_keys(shape, out);
                 }
             }
         }
         _ => {}
+    }
+}
+
+fn shape_text_keys(shape: &docx_layout::types::ShapeBlock, out: &mut Vec<String>) {
+    if let Some(inner_text) = &shape.inner_text {
+        for paragraph in inner_text {
+            out.push(block_key(&paragraph.id).into_owned());
+        }
+    }
+    for child in &shape.children {
+        if let Some(inner_text) = &child.inner_text {
+            for paragraph in inner_text {
+                out.push(block_key(&paragraph.id).into_owned());
+            }
+        }
     }
 }
 
@@ -1396,11 +1507,26 @@ impl EngineSession {
     /// id. A later resident edit replaces only `block` and reuses the rest of
     /// this envelope, so the host no longer orchestrates dirty measurement.
     pub fn measure_paragraph_json(&self, input_json: &str) -> Result<String, String> {
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_json::from_str(input_json).map_err(|error| format!("invalid: parse: {error}"))?;
         let key = value_block_key(&value)
             .ok_or_else(|| "invalid: measurement block requires a stable id".to_owned())?;
-        let output = docx_layout::measure_paragraph_json_resident(input_json)?;
+        // A document without `w:compatibilityMode` is Word 2007's mode 12, where
+        // justified Latin lines do not squeeze their spaces (#1816).
+        if value.get("compat").is_none() {
+            value["compat"] = serde_json::json!({});
+        }
+        if let Some(compat) = value
+            .get_mut("compat")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            compat
+                .entry("compatibilityMode")
+                .or_insert(serde_json::json!(12));
+        }
+        let input_json = serde_json::to_string(&value)
+            .map_err(|error| format!("invalid: serialize: {error}"))?;
+        let output = docx_layout::measure_paragraph_json_resident(&input_json)?;
         let resident_safe = measure_template_is_resident_safe(&value);
         let mut measurement = self.measurement.borrow_mut();
         measurement.templates.insert(
@@ -1467,6 +1593,10 @@ impl EngineSession {
             .into_iter()
             .map(|measured| measured.block)
             .collect::<Vec<_>>();
+        // Han text without a language of its own takes the document default
+        // East Asian language's faces (#2246).
+        let mut collector = docx_layout::measure_blocks::FontRequirementCollector::default();
+        collector.prefer_east_asian_language(render_env["docDefaultLanguage"]["eastAsia"].as_str());
         if let Some(body_story) = body_story {
             let render_env: RenderEnv = serde_json::from_value(render_env)
                 .map_err(|error| format!("parse render environment: {error}"))?;
@@ -1503,11 +1633,12 @@ impl EngineSession {
                 blocks.append(&mut story_blocks);
             }
         }
-        serde_json::to_string(&docx_layout::measure_blocks::collect_font_requirements(
+        collector.collect(
             &blocks,
             docx_layout::measure_blocks::default_font_family(&measurement.defaults),
-        ))
-        .map_err(|error| format!("serialize: {error}"))
+        );
+        let requirements: Vec<_> = collector.finish().into_values().collect();
+        serde_json::to_string(&requirements).map_err(|error| format!("serialize: {error}"))
     }
 
     /// Full-document pagination with section/page region orchestration owned
@@ -1682,7 +1813,7 @@ impl EngineSession {
                             block,
                             regions.doc_grid_snap_pitch_px(section_index),
                         );
-                        if matches!(block, LayoutBlock::SectionBreak(_)) {
+                        if advances_region_section(block) {
                             section_index += 1;
                         }
                     }
@@ -2451,7 +2582,9 @@ impl EngineSession {
                 && widths.get(index) == previous_widths.get(index)
                 && matches!(previous_entry.measure, BlockExtent::Unsupported)
                     == matches!(next_block, LayoutBlock::Unsupported);
-            if width_clean && *next_block == previous_entry.block {
+            // Automatic spacing follows the neighbours, so such a block is
+            // compared only after the rules ran with the current ones.
+            if width_clean && !auto_spaced(next_block) && *next_block == previous_entry.block {
                 measured.push(MeasuredBlock {
                     block: next_block.clone(),
                     measure: std::mem::replace(
@@ -2469,6 +2602,7 @@ impl EngineSession {
                 );
                 resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
                 if let LayoutBlock::SectionBreak(section_break) = &mut owned
+                    && !section_break.is_self_describing()
                     && let Some(section) = regions.sections.get(section_index)
                 {
                     if section.page_size.is_some() {
@@ -2532,7 +2666,7 @@ impl EngineSession {
                     measure_calls = measure_calls.wrapping_add(1);
                 }
             }
-            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+            if advances_region_section(next_block) {
                 section_index += 1;
             }
         }
