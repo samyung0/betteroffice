@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "alloc-no-stdlib"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc7bb162ec39d46ab1ca8c77bf72e890535becd1751bb45f64c597edb4c8c6b3"
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -76,6 +82,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
+name = "betteroffice-base-latin"
+version = "0.5.1"
+dependencies = [
+ "skrifa",
+]
+
+[[package]]
 name = "betteroffice-docx"
 version = "0.5.1"
 dependencies = [
@@ -101,6 +114,7 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-wasm-alloc",
  "js-sys",
+ "libm",
  "ryu-js",
  "serde",
  "serde_json",
@@ -115,9 +129,11 @@ name = "betteroffice-docx-layout"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-ooxml-text",
  "foldhash",
  "js-sys",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -130,10 +146,12 @@ name = "betteroffice-docx-parse"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
+ "betteroffice-docx-layout",
  "betteroffice-drawingml",
  "betteroffice-metafile",
  "betteroffice-opc",
  "indexmap",
+ "libm",
  "memchr",
  "quick-xml",
  "ryu-js",
@@ -150,6 +168,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-docx-layout",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "image",
  "png",
@@ -164,6 +183,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
+ "libm",
  "png",
  "proptest",
  "serde",
@@ -172,11 +192,93 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-fonts"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-fonts-cjk",
+ "betteroffice-fonts-intl",
+ "betteroffice-fonts-latin",
+ "cc",
+ "lol_alloc",
+ "quick-xml",
+ "ruzstd",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "wuff",
+ "zstd",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-fonts-cjk-jp",
+ "betteroffice-fonts-cjk-kr",
+ "betteroffice-fonts-cjk-sc",
+ "betteroffice-fonts-cjk-serif-sc",
+ "betteroffice-fonts-cjk-tc",
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-jp"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-kr"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-serif-sc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-cjk-tc"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-intl"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "betteroffice-fonts-latin"
+version = "0.5.1"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-metafile"
 version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "libm",
  "png",
  "resvg",
 ]
@@ -217,10 +319,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "betteroffice-ooxml-text"
+name = "betteroffice-ooxml-font-preflight"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-ooxml-text",
+ "miniz_oxide",
+ "quick-xml",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "betteroffice-ooxml-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "png",
+ "tiny-skia",
+]
+
+[[package]]
+name = "betteroffice-ooxml-text"
+version = "0.5.1"
+dependencies = [
+ "betteroffice-base-latin",
+ "betteroffice-drawingml",
+ "betteroffice-fonts",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -258,6 +383,7 @@ version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
+ "betteroffice-metafile",
  "betteroffice-opc",
  "betteroffice-pptx-parse",
  "js-sys",
@@ -276,6 +402,7 @@ dependencies = [
  "base64 0.22.1",
  "betteroffice-drawingml",
  "betteroffice-opc",
+ "libm",
  "proptest",
  "quick-xml",
  "serde",
@@ -288,7 +415,10 @@ name = "betteroffice-pptx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-metafile",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
+ "betteroffice-pptx-edit",
  "betteroffice-pptx-render",
  "image",
  "png",
@@ -303,14 +433,19 @@ name = "betteroffice-pptx-render"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-fonts",
  "betteroffice-metafile",
  "betteroffice-ooxml-text",
  "betteroffice-opc",
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "libc",
+ "libm",
  "serde",
  "serde_json",
  "thiserror",
+ "unicode-properties",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -346,6 +481,7 @@ dependencies = [
 name = "betteroffice-vsdx"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-opc",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
@@ -431,6 +567,7 @@ name = "betteroffice-vsdx-raster"
 version = "0.5.1"
 dependencies = [
  "betteroffice-drawingml",
+ "betteroffice-ooxml-raster",
  "betteroffice-ooxml-text",
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-render",
@@ -507,12 +644,14 @@ name = "betteroffice-xlsx-calc"
 version = "0.5.1"
 dependencies = [
  "betteroffice-xlsx-model",
+ "libm",
 ]
 
 [[package]]
 name = "betteroffice-xlsx-model"
 version = "0.5.1"
 dependencies = [
+ "libm",
  "serde",
  "serde_json",
 ]
@@ -541,9 +680,10 @@ dependencies = [
 name = "betteroffice-xlsx-raster"
 version = "0.5.1"
 dependencies = [
+ "betteroffice-ooxml-raster",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-render",
- "png",
+ "libm",
  "rustybuzz",
  "serde",
  "serde_json",
@@ -559,6 +699,7 @@ dependencies = [
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "hashbrown 0.17.1",
+ "libm",
  "serde",
  "serde_json",
  "unicode-segmentation",
@@ -592,6 +733,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "brotli-decompressor"
+version = "5.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a32acac15fe1967bc3986b2a6347dffc965602354ea6f450ad07e8bfd253583"
+dependencies = [
+ "alloc-no-stdlib",
 ]
 
 [[package]]
@@ -655,6 +805,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
 dependencies = [
  "find-msvc-tools",
+ "jobserver",
+ "libc",
  "shlex",
 ]
 
@@ -983,9 +1135,20 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 5.3.0",
  "wasip2",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 6.0.0",
 ]
 
 [[package]]
@@ -1296,6 +1459,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d3667095d64c3ecffc96463a21157b04bf3e252f6e8d5750b20c02e33c194e3"
 
 [[package]]
+name = "jobserver"
+version = "0.1.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
+dependencies = [
+ "getrandom 0.4.3",
+ "libc",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1326,9 +1499,9 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libm"
-version = "0.2.16"
+version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1356,6 +1529,15 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
+
+[[package]]
+name = "lol_alloc"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e5106554cabc97552dcadf54f57560ae6af3276652f82ca2be06120dc4c5dc"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "memchr"
@@ -1472,6 +1654,12 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pkg-config"
+version = "0.3.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "png"
@@ -1612,6 +1800,12 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
@@ -1812,6 +2006,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
 name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1831,6 +2034,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "semver"
+version = "1.0.28"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "serde"
@@ -1952,6 +2161,15 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
+dependencies = [
+ "lock_api",
+]
 
 [[package]]
 name = "stable_deref_trait"
@@ -2117,6 +2335,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "twox-hash"
+version = "2.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
+
+[[package]]
 name = "typed-path"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2265,11 +2489,12 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vsdx-wasm"
 version = "0.0.0"
 dependencies = [
+ "betteroffice-fonts",
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
- "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-validate",
+ "js-sys",
  "serde_json",
  "wasm-bindgen",
  "yrs",
@@ -2531,6 +2756,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wuff"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200a7b806377b65f1ff9a985874332f15357c87e5dd7855f35f06dade95b8b3d"
+dependencies = [
+ "brotli-decompressor",
+ "bytes",
+]
+
+[[package]]
 name = "xlsx-cli"
 version = "0.0.0"
 dependencies = [
@@ -2722,6 +2957,34 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zstd"
+version = "0.14.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
+dependencies = [
+ "zstd-safe",
+]
+
+[[package]]
+name = "zstd-safe"
+version = "8.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
+dependencies = [
+ "zstd-sys",
+]
+
+[[package]]
+name = "zstd-sys"
+version = "2.1.2+zstd.1.5.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
+dependencies = [
+ "cc",
+ "pkg-config",
+]
 
 [[package]]
 name = "zune-core"
