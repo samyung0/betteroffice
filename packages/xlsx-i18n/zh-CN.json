@@ -163,7 +163,8 @@
     "cellMenuLabel": "单元格菜单",
     "sheetTabMenuLabel": "工作表标签菜单",
     "renameSheetLabel": "重命名工作表",
-    "sheetNamePrefix": "工作表"
+    "sheetNamePrefix": "工作表",
+    "sheetProtected": "此单元格位于受保护的工作表上。"
   },
   "proposals": {
     "panelLabel": "智能体建议",

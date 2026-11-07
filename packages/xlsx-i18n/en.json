@@ -163,7 +163,8 @@
     "cellMenuLabel": "Cell menu",
     "sheetTabMenuLabel": "Sheet tab menu",
     "renameSheetLabel": "Rename sheet",
-    "sheetNamePrefix": "Sheet"
+    "sheetNamePrefix": "Sheet",
+    "sheetProtected": "This cell is on a protected sheet."
   },
   "proposals": {
     "panelLabel": "Agent proposals",

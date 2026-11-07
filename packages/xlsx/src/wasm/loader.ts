@@ -52,6 +52,8 @@ export interface SheetInfo {
   initialScrollY: number;
   /** The active sheet's used range (its cells and hyperlinks), `null` when it is empty. */
   usedRange: { start: CellPoint; end: CellPoint } | null;
+  /** Whether the active sheet is protected: its locked cells refuse the editor's edits (Q698). */
+  protected: boolean;
 }
 
 export interface CellPosition {
@@ -236,6 +238,8 @@ export interface CellEdit {
   a1: string;
   input: string;
   isFormula: boolean;
+  /** The cell's effective locked state (true unless its format unlocks it); it matters on a protected sheet. */
+  locked: boolean;
 }
 
 export interface XlsxTextSearchOptions {
