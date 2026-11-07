@@ -3,13 +3,8 @@ members = ["crates/*"]
 exclude = [
     "apps/native-viewer",
     "third_party/yrs",
-    # Upstream's target-neutral engine crates: Capy keeps its own engines (Q651, the
-    # native-engine commits are skips); kept out of the build until S2 decides.
-    "crates/docx-engine",
-    # The on-demand metafile SVG module (#2154) is a perf-track port.
+    # The on-demand metafile SVG module (#2154): the PPTX track decides it with #1820.
     "crates/metafile-svg-wasm",
-    "crates/pptx-engine",
-    "crates/xlsx-engine",
 ]
 resolver = "3"
 
@@ -52,11 +47,9 @@ docx-parse = { package = "betteroffice-docx-parse", path = "crates/docx-parse", 
 docx-layout = { package = "betteroffice-docx-layout", path = "crates/docx-layout", version = "0.5.1" }
 docx-raster = { package = "betteroffice-docx-raster", path = "crates/docx-raster", version = "0.5.1" }
 docx-edit = { package = "betteroffice-docx-edit", path = "crates/docx-edit", version = "0.5.1" }
-docx-engine = { package = "betteroffice-docx-engine", path = "crates/docx-engine" }
 betteroffice-docx = { path = "crates/betteroffice-docx", version = "0.5.1" }
 pptx-parse = { package = "betteroffice-pptx-parse", path = "crates/pptx-parse", version = "0.5.1" }
 pptx-edit = { package = "betteroffice-pptx-edit", path = "crates/pptx-edit", version = "0.5.1" }
-pptx-engine = { package = "betteroffice-pptx-engine", path = "crates/pptx-engine", default-features = false }
 pptx-render = { package = "betteroffice-pptx-render", path = "crates/pptx-render", version = "0.5.1" }
 pptx-raster = { package = "betteroffice-pptx-raster", path = "crates/pptx-raster", version = "0.5.1" }
 betteroffice-pptx = { path = "crates/betteroffice-pptx", version = "0.5.1" }
