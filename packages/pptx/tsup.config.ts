@@ -11,11 +11,11 @@ export default defineConfig({
   treeshake: true,
   minify: true,
   onSuccess: async () => {
-    await mkdir('dist/generated', { recursive: true });
+    await mkdir('dist/generated/viewer', { recursive: true });
     await copyFile('src/wasm/generated/pptx_wasm_bg.wasm', 'dist/generated/pptx_wasm_bg.wasm');
     await copyFile(
       'src/wasm/generated/viewer/pptx_view_wasm_bg.wasm',
-      'dist/generated/pptx_view_wasm_bg.wasm'
+      'dist/generated/viewer/pptx_view_wasm_bg.wasm'
     );
   },
 });

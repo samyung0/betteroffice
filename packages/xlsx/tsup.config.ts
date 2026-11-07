@@ -19,14 +19,14 @@ export default defineConfig({
   treeshake: true,
   minify: true,
   onSuccess: async () => {
-    await mkdir('dist/generated', { recursive: true });
+    await mkdir('dist/generated/viewer', { recursive: true });
     await copyFile(
       'src/wasm/generated/xlsx_wasm_bg.wasm',
       'dist/generated/xlsx_wasm_bg.wasm'
     );
     await copyFile(
       'src/wasm/generated/viewer/xlsx_view_wasm_bg.wasm',
-      'dist/generated/xlsx_view_wasm_bg.wasm'
+      'dist/generated/viewer/xlsx_view_wasm_bg.wasm'
     );
   },
 });
