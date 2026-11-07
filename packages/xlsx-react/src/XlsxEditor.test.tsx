@@ -43,6 +43,7 @@ import {
 import { useState } from 'react';
 import { zhCN } from '@betteroffice/xlsx-i18n';
 import { XlsxEditor, type XlsxEditorApi, type XlsxEditorProps } from './XlsxEditor';
+import { defaultFontPainterModule } from './useDefaultFonts';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -2811,6 +2812,67 @@ describe('XlsxEditor with a peer', () => {
 });
 
 describe('XlsxEditor host integration', () => {
+  // upstream #2064 on Capy's editor: each shown frame goes through the
+  // default-font painter, which the page loads after the first paint.
+  it('paints each shown frame through the default-font painter, decoding with the manager', async () => {
+    const painted: unknown[] = [];
+    const created: unknown[][] = [];
+    const painter = {
+      adopt: () => {},
+      paint: (list: unknown, paint: () => void) => {
+        painted.push(list);
+        paint();
+        return true;
+      },
+      dispose: () => {},
+    };
+    const load = spyOn(defaultFontPainterModule, 'load').mockImplementation(
+      async () =>
+        ({
+          createDefaultFontPainter: (...args: unknown[]) => {
+            created.push(args);
+            return painter;
+          },
+        }) as unknown as Awaited<ReturnType<typeof defaultFontPainterModule.load>>
+    );
+    try {
+      let firstPaint = false;
+      const view = render(
+        <XlsxEditor file={plain.bytes.slice()} onFirstPaint={() => (firstPaint = true)} />
+      );
+      await waitFor(() => expect(firstPaint).toBe(true));
+      await waitFor(() => expect(created).toHaveLength(1));
+      // the page holds no engine: the font manager decodes with its own decoder.
+      expect(created[0][0]).toBeNull();
+      await act(async () => {
+        fireEvent.scroll(view.getByTestId('xlsx-scroll'));
+      });
+      await waitFor(() => expect(painted.length).toBeGreaterThan(0));
+      expect(view.container.querySelector('canvas')?.dataset.defaultFonts).toBe('settled');
+    } finally {
+      load.mockRestore();
+    }
+  });
+
+  it('defaultFonts false paints with the browser fonts and loads no painter', async () => {
+    const load = spyOn(defaultFontPainterModule, 'load');
+    try {
+      let firstPaint = false;
+      const view = render(
+        <XlsxEditor
+          file={plain.bytes.slice()}
+          defaultFonts={false}
+          onFirstPaint={() => (firstPaint = true)}
+        />
+      );
+      await waitFor(() => expect(firstPaint).toBe(true));
+      expect(load).not.toHaveBeenCalled();
+      expect(view.container.querySelector('canvas')?.dataset.defaultFonts).toBe('settled');
+    } finally {
+      load.mockRestore();
+    }
+  });
+
   it('reports its command state a bounded number of times while the worker opens', async () => {
     // a host that keeps the command state, as Capy's does: a fresh value per
     // render would re-render the host, and so the editor, without end.

@@ -111,6 +111,7 @@ import {
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 import { livePointedRef, type PointedRef, referenceSlot, writeReference } from './pointMode';
+import { useDefaultFonts } from './useDefaultFonts';
 
 /**
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
@@ -296,6 +297,13 @@ export interface XlsxEditorProps {
   showZoomControl?: boolean;
   /** The zoom it opens at (1 = 100%); the toolbar and `run('zoom:…')` change it. */
   initialZoom?: number;
+  /**
+   * Paint workbook families with bundled metric-compatible faces (Calibri as
+   * Carlito, Cambria as Caladea, Arial and Times New Roman as Liberation),
+   * registered after the first frame, which then repaints once. Defaults to
+   * true; false keeps the browser's fonts and imports no font code.
+   */
+  defaultFonts?: boolean;
 }
 
 /**
@@ -833,6 +841,7 @@ function XlsxEditorContent({
   showFontSizePicker = true,
   showZoomControl = true,
   initialZoom = 1,
+  defaultFonts,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   // a cut reading its selection in pieces refuses edits, as a send does, so
@@ -862,6 +871,23 @@ function XlsxEditorContent({
   // testing reads this snapshot rather than the live scroll offset or the
   // current model — either would answer for pixels that are not on screen.
   const paintedRef = useRef<Painted | null>(null);
+  // Bundled faces for the families the shown frame paints (upstream #2064):
+  // the page holds no engine, so the font manager decodes with its own
+  // decoder. A face that lands repaints the frame as it was painted.
+  const paintWithDefaultFonts = useDefaultFonts(
+    file,
+    null,
+    defaultFonts,
+    () => {
+      const painted = paintedRef.current;
+      const ctx = painted?.canvas.getContext('2d');
+      if (!painted || !ctx || painted.canvas !== canvasRef.current) return;
+      paintDisplayList(ctx, painted.frame, (window.devicePixelRatio || 1) * painted.zoom);
+    },
+    () => {
+      if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled';
+    }
+  );
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const formulaInputRef = useRef<HTMLInputElement>(null);
@@ -1568,7 +1594,11 @@ function XlsxEditorContent({
     canvas.height = Math.round(h * dpr);
     canvas.style.width = `${w}px`;
     canvas.style.height = `${h}px`;
-    paintDisplayList(ctx, shown.displayList, dpr * view.zoom);
+    canvas.dataset.defaultFonts = paintWithDefaultFonts(shown.displayList, () =>
+      paintDisplayList(ctx, shown.displayList, dpr * view.zoom)
+    )
+      ? 'settled'
+      : 'pending';
     frameRef.current = shown.displayList;
     paintedRef.current = {
       frame: shown.displayList,
