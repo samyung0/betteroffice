@@ -14,10 +14,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Free GitHub-hosted runners first, then a fresh self-hosted runner per job; the router and the variables work as in ci.yml.
+  # Free GitHub-hosted runners first, then a fresh kyora VM per job; the router and the variables work as in ci.yml.
   route:
     name: Route runners
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || vars.BO_CI_RUNNER || 'kyora-4x8' }}
     timeout-minutes: 5
     permissions:
       actions: read
@@ -39,7 +39,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ROUTE_GROUPS: browser:4 corpus
-          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '6' }}
+          ROUTE_PEER_SLOTS: ${{ github.event_name == 'workflow_dispatch' && '0' || '5' }}
           BO_CI_GH_LIMIT: ${{ vars.BO_CI_GH_LIMIT }}
           BO_CI_GH_RESERVE: ${{ vars.BO_CI_GH_RESERVE }}
           BO_CI_SPILL: ${{ vars.BO_CI_SPILL }}
@@ -75,7 +75,6 @@ jobs:
           shared-key: e2e-corpus
           workspaces: |
             . -> target
-            bindings -> target
 
       - uses: ./.github/actions/wasm-toolchain
 
@@ -140,7 +139,6 @@ jobs:
           shared-key: e2e-browser
           workspaces: |
             . -> target
-            bindings -> target
 
       - uses: ./.github/actions/wasm-toolchain
 
