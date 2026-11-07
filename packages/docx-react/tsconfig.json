@@ -20,7 +20,6 @@
     "declarationMap": true,
     "types": ["bun", "node"],
     "paths": {
-      "#session-worker": ["../docx/src/yrs/sessionWorker.node.ts"],
       "@/*": ["./src/*"],
       "@betteroffice/docx": ["../docx/src/core.ts"],
       "@betteroffice/docx/headless": ["../docx/src/headless.ts"],

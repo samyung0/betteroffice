@@ -31,7 +31,6 @@ export interface SelectionFormatting {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
-  strikethrough?: boolean;
   textColor?: string;
   align?: ParagraphAlignment;
 }
@@ -40,7 +39,6 @@ export type FormattingAction =
   | 'bold'
   | 'italic'
   | 'underline'
-  | 'strikethrough'
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
   | { type: 'textColor'; value: string }
