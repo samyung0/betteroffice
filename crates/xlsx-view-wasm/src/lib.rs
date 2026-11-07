@@ -35,6 +35,8 @@ struct SheetInfo {
     initial_scroll_x: f32,
     initial_scroll_y: f32,
     used_range: Option<CellRange>,
+    /// The active sheet's source enables `sheetProtection` (Q698), as the editor reports.
+    protected: bool,
 }
 
 #[derive(Deserialize)]
@@ -236,6 +238,9 @@ impl XlsxViewDocument {
             initial_scroll_x,
             initial_scroll_y,
             used_range,
+            protected: self
+                .package
+                .source_sheet_is_protected(self.active_sheet.0 as usize),
         })
     }
 
