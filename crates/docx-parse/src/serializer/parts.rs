@@ -119,6 +119,15 @@ pub(crate) fn is_story_root_prefix(prefix: &str) -> bool {
     prefix == "xml" || STORY_ROOT_PREFIXES.contains(&prefix)
 }
 
+/// True when the footnote and endnote roots declare this binding (`name` as `xmlns:prefix`).
+pub(crate) fn note_root_declares(name: &str, namespace: &str) -> bool {
+    FULL_NAMESPACES.split_whitespace().any(|binding| {
+        binding
+            .split_once("=\"")
+            .is_some_and(|(key, value)| key == name && value.strip_suffix('"') == Some(namespace))
+    })
+}
+
 const MC_IGNORABLE: &str =
     "mc:Ignorable=\"w14 w15 w16se w16cid w16 w16cex w16sdtdh w16sdtfl w16du wp14\"";
 

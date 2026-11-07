@@ -105,6 +105,11 @@ pub struct ListRendering {
     pub marker_hidden: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_font_family: Option<String>,
+    /// The level's Latin font slots when one names a theme font: Capy's seed
+    /// keeps them so the renderer applies the theme over the authored name
+    /// (#1921).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marker_font_slots: Option<crate::FontFamily>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -690,6 +695,18 @@ pub fn compute_list_rendering(
                 .map(str::to_owned)
         })
     });
+    let marker_font_slots = level
+        .r_pr
+        .as_ref()
+        .and_then(|formatting| formatting.font_family.as_ref())
+        .filter(|family| family.ascii_theme.is_some() || family.h_ansi_theme.is_some())
+        .map(|family| crate::FontFamily {
+            ascii: family.ascii.clone(),
+            h_ansi: family.h_ansi.clone(),
+            ascii_theme: family.ascii_theme.clone(),
+            h_ansi_theme: family.h_ansi_theme.clone(),
+            ..crate::FontFamily::default()
+        });
     let marker_font_size = level
         .r_pr
         .as_ref()
@@ -707,6 +724,7 @@ pub fn compute_list_rendering(
             .as_ref()
             .and_then(|formatting| (formatting.hidden == Some(true)).then_some(true)),
         marker_font_family,
+        marker_font_slots,
         marker_font_size,
         marker_bold: level.r_pr.as_ref().and_then(|formatting| formatting.bold),
         marker_italic: level.r_pr.as_ref().and_then(|formatting| formatting.italic),

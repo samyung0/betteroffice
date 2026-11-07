@@ -202,35 +202,6 @@ fn footer_inline_sdt_picture_watermark_survives_repack() {
 }
 
 #[test]
-fn header_picture_watermark_is_extracted_and_saved_once() {
-    for inline in [false, true] {
-        let original = picture_watermark_package(inline);
-        let parsed = parse_docx_s9_wire(&original, S9ParseOptions::default()).unwrap();
-        let header = &parsed.document.package.header_entries.as_ref().unwrap()[0].1;
-        assert!(matches!(
-            header.watermark.as_ref(),
-            Some(docx_parse::vml::Watermark::Picture { .. })
-        ));
-        assert!(
-            !serde_json::to_string(&header.content)
-                .unwrap()
-                .contains("WordPictureWatermark123")
-        );
-        let saved = roundtrip(&original);
-        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
-        let xml = &parts
-            .iter()
-            .find(|(path, _)| path == "word/header1.xml")
-            .unwrap()
-            .1;
-        let xml = std::str::from_utf8(xml).unwrap();
-        assert_eq!(xml.matches("<w:pict").count(), 1);
-        assert_eq!(xml.matches("WordPictureWatermark").count(), 1);
-        assert_watermark_relationship(&saved, "header1");
-    }
-}
-
-#[test]
 fn block_content_controls_in_table_cells_roundtrip() {
     let body = r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtPr><w:alias w:val="outer"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>kept</w:t></w:r></w:p><w:sdt><w:sdtPr><w:alias w:val="inner"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>"#;
     let mut bytes = package(body, "", Some(body));

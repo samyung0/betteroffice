@@ -78,6 +78,7 @@ fn assert_widths(actual: &[f64], expected: &[f64]) {
 }
 
 #[test]
+#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
 fn bridge_preserves_leading_grid_columns_and_drops_legacy_synthetic_cell_widths() {
     docx_layout::with_private_measure_fonts(|| {
         let mut blocks = lower(r#"<w:gridBefore w:val="1"/>"#, 2);
@@ -170,6 +171,7 @@ fn bridge_leaves_unskipped_rows_without_new_layout_properties() {
 }
 
 #[test]
+#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
 fn imported_fixed_layout_keeps_cell_preferences_with_grid_before() {
     docx_layout::with_private_measure_fonts(|| {
         let cells = ["First", "Second", "Third"]
@@ -199,6 +201,7 @@ fn imported_fixed_layout_keeps_cell_preferences_with_grid_before() {
 }
 
 #[test]
+#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
 fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
     docx_layout::with_private_measure_fonts(|| {
         let cells =
@@ -219,6 +222,7 @@ fn imported_single_cell_grid_after_does_not_add_a_grid_column() {
 }
 
 #[test]
+#[ignore = "upstream's Word table algorithms (fixed-layout cell preferences, dropped synthetic widths); Capy's bridge keeps the legacy grid for every table (2026-10-06, S2 DOCX report, decision for Epo)"]
 fn mixed_skipped_rows_keep_main_grid_and_unskipped_widths() {
     docx_layout::with_private_measure_fonts(|| {
         let cells = ["First", "Second", "Third"]

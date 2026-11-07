@@ -360,7 +360,8 @@ fn the_text_before_a_break_keeps_no_space_after() {
     assert_eq!(line(&pages, "Bb").2, line(&pages, "Aa").2 + 16.0);
 }
 
-/// An in-flow chart splits its paragraph too; each part keeps its own text.
+/// An inline chart shares its line with the text around it (#1899): the
+/// paragraph stays whole and each text paints once.
 #[test]
 fn text_around_an_inline_chart_paints_once() {
     let body = format!(
@@ -386,13 +387,22 @@ fn text_around_an_inline_chart_paints_once() {
         .unwrap();
     };
     let laid = lay_out_edited(&document(&body, ONE_COLUMN), chart);
-    assert_eq!(texts(&lines(&laid)), [vec!["Lead", "Aa", "Bb", "Cc"]]);
-    let ids: Vec<_> =
+    assert_eq!(texts(&lines(&laid)), [vec!["Lead", "AaBb", "Cc"]]);
+    let blocks: Vec<_> =
         bridge::yrs_doc_to_layout_blocks(laid.engine.doc(), "body", &Default::default())
             .unwrap()
             .iter()
-            .map(|block| serde_json::to_value(block).unwrap()["id"].clone())
+            .map(|block| serde_json::to_value(block).unwrap())
             .collect();
-    assert!(ids[2].as_str().unwrap().starts_with("chart:"), "{ids:?}");
-    assert_ne!(ids[1], ids[3]);
+    assert_eq!(blocks.len(), 3, "{blocks:?}");
+    assert!(
+        blocks[1]["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|run| run["inlineChart"]["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("chart:"))),
+        "{blocks:?}"
+    );
 }

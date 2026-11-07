@@ -65,6 +65,7 @@ use yrs::{
 
 mod ctx;
 mod deterministic;
+mod fmath;
 mod format;
 mod op;
 mod ops;

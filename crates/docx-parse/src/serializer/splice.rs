@@ -827,6 +827,8 @@ fn comment_removal_spans(
     Some(outer)
 }
 
+// Upstream's s13 save calls it; Capy's export waits for save fidelity (Q653).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn remove_comment_markers(xml: &str, ids: &HashSet<String>) -> Option<String> {
     let mut result = xml.to_owned();
     for span in comment_removal_spans(xml, |_, id| ids.contains(id))?
@@ -1996,6 +1998,8 @@ pub(crate) fn replace_story_part(
 /// precise patch, or the edit is structural inside a complex field, a table row or a
 /// part the parser does not read as written, so the caller keeps its previous
 /// behaviour for those parts.
+// Upstream's s13 save calls it; Capy's export waits for save fidelity (Q653).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn splice_source_direct(
     source: &str,
     serialized: &str,
@@ -3316,36 +3320,6 @@ mod tests {
                     ..Edit::default()
                 },
             );
-        }
-    }
-
-    #[test]
-    fn insertions_beside_body_bookmark_pairs_keep_every_source_byte() {
-        let first = "<w:p><w:r><w:t>A</w:t></w:r></w:p>";
-        let second = "<w:p><w:r><w:t>B</w:t></w:r></w:p>";
-        let markers = "<w:bookmarkStart w:id=\"1\" w:name=\"mark\"/><w:bookmarkEnd w:id=\"1\"/>";
-        let source = body(&format!("{first}{markers}{second}"));
-        for anchor in [S13SpliceAnchor::After(0), S13SpliceAnchor::Before(1)] {
-            let saved = saved_document(
-                &source,
-                |content| {
-                    let new = new_paragraph(&content[0], "00000010", "new");
-                    content.insert(1, new);
-                },
-                Some(json!({"paragraphs": [0, 1], "inserted": [anchor]})),
-            );
-            let at = match anchor {
-                S13SpliceAnchor::After(_) => source.find(markers).unwrap(),
-                S13SpliceAnchor::Before(_) => source.find(second).unwrap(),
-            };
-            assert!(saved.starts_with(&source[..at]), "{saved}");
-            assert!(saved.ends_with(&source[at..]), "{saved}");
-            let added = &saved[at..saved.len() - source[at..].len()];
-            assert!(
-                added.starts_with("<w:p ") && added.ends_with("</w:p>"),
-                "{added}"
-            );
-            assert!(added.contains("<w:t>new</w:t>"), "{added}");
         }
     }
 

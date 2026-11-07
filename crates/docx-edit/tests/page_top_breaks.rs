@@ -91,19 +91,24 @@ fn lower(engine: &EngineSession, story: &str, mode: u8) -> Value {
 }
 
 fn target(output: &Value) -> (u64, f64) {
+    let id = output["measured"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| &entry["block"])
+        .find(|block| {
+            block["runs"].as_array().is_some_and(|runs| {
+                runs.iter()
+                    .filter_map(|run| run["text"].as_str())
+                    .collect::<String>()
+                    == "TARGET"
+            })
+        })
+        .expect("no TARGET paragraph")["id"]
+        .clone();
     for page in output["layout"]["pages"].as_array().unwrap() {
         for fragment in page["fragments"].as_array().unwrap() {
-            let text: String = fragment["resolvedLines"]
-                .as_array()
-                .map(|lines| {
-                    lines
-                        .iter()
-                        .flat_map(|line| line["segments"].as_array().cloned().unwrap_or_default())
-                        .filter_map(|segment| segment["text"].as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if text == "TARGET" {
+            if fragment["blockId"] == id {
                 return (
                     page["number"].as_u64().unwrap(),
                     fragment["y"].as_f64().unwrap(),

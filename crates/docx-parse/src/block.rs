@@ -122,6 +122,9 @@ pub struct StoryParser<'a, 'limits> {
 #[derive(Clone, Copy)]
 pub(crate) struct StoryContext {
     pub in_header_footer: bool,
+    // Read by upstream's paragraph parse for its footer watermark save fix
+    // (#2196), which waits for the save-fidelity item (Q653).
+    #[allow(dead_code)]
     pub watermark_claimed_separately: bool,
 }
 
@@ -892,6 +895,8 @@ pub(crate) fn has_direct_block_bookmark(parent: &XmlElement) -> bool {
         .any(|child| is_block_bookmark(parent, child))
 }
 
+// Upstream's bookmark saves (#2089) call it; they wait for save fidelity (Q653).
+#[allow(dead_code)]
 pub(crate) fn contains_bookmark_block(block: &BlockContent) -> bool {
     match block {
         BlockContent::BlockSdt(control) => control.content.iter().any(contains_bookmark_block),

@@ -207,6 +207,8 @@ pub(crate) fn capture_bookmark_source(shape: &mut Shape, source: &XmlElement) {
 
 /// The group model without its frame, text-box text and media sources, which a replay
 /// updates in place or which differ only by how the media was resolved.
+// Upstream's group save (#2160) reads it; it waits for save fidelity (Q653).
+#[allow(dead_code)]
 pub(crate) fn group_model_sha256(shape: &Shape) -> String {
     fn clear(value: &mut serde_json::Value) {
         match value {

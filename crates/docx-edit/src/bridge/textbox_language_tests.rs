@@ -85,9 +85,19 @@ fn scripts(bytes: &[u8], family: &str) -> Value {
         .unwrap()
         .document
         .package;
-    let mut request =
-        crate::layout_request::region_layout_request(&serde_json::to_value(package).unwrap(), 24.0);
-    request["measurement"] = json!({"defaults": {"fontFamily": "Calibri", "fontSize": 11}});
+    // The host's request: the body section and the document default
+    // languages, as `computeLayout.ts` sends them.
+    let package = serde_json::to_value(package).unwrap();
+    let language = &package["styles"]["docDefaults"]["rPr"]["language"];
+    let request = json!({
+        "bodyStory": "body",
+        "regions": {
+            "sections": [{"properties": package["document"]["finalSectionProperties"]}],
+            "settings": package["settings"],
+        },
+        "renderEnv": {"docDefaultLanguage": language},
+        "measurement": {"defaults": {"fontFamily": "Calibri", "fontSize": 11}},
+    });
     let engine = EngineSession::new(75303);
     crate::seed_from_docx(engine.doc(), bytes).unwrap();
     let requirements: Vec<Value> = serde_json::from_str(

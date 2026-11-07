@@ -22,7 +22,6 @@ fn eligible_painted_descent(block: &ParagraphBlock, line: &TypesetRow) -> Option
             keep_lines: _,
             widow_control: _,
             page_break_before: _,
-            page_break_before_run: _,
             style_id: _,
             effective_style_id: _,
             contextual_spacing: _,

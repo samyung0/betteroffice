@@ -82,7 +82,7 @@ const LIST_INDENT_ATTRS: [&str; 3] = ["indentLeft", "indentFirstLine", "hangingI
 /// A paragraph's numbering and the list rendering the seed derives from it.
 /// Applying a style replaces them where the numbering came from the old style
 /// (or there is none); numbering set on the paragraph itself stays.
-pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
+pub const STYLE_NUMBERING_ATTRS: [&str; 16] = [
     "numPr",
     "numPrFromStyle",
     "listNumFmt",
@@ -90,6 +90,7 @@ pub const STYLE_NUMBERING_ATTRS: [&str; 15] = [
     "listMarker",
     "listMarkerHidden",
     "listMarkerFontFamily",
+    "listMarkerFonts",
     "listMarkerFontSize",
     "listMarkerBold",
     "listMarkerItalic",

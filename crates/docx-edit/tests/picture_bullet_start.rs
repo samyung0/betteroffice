@@ -1,4 +1,4 @@
-use docx_edit::bridge::{RenderEnv, yrs_doc_to_mapped_layout_blocks};
+use docx_edit::bridge::{RenderEnv, yrs_doc_to_layout_blocks};
 use docx_edit::{EditCtx, EngineSession, FormatPolicy, Position, seed_from_docx};
 use docx_parse::serializer::{S13SaveRequest, write_docx_s13};
 use serde_json::{Value, json};
@@ -87,7 +87,9 @@ fn render(bytes: &[u8]) -> (EngineSession, Value, docx_layout::display_list::Dis
         .layout_document_with_regions_json(
             &json!({
                 "bodyStory": "body",
-                "renderEnv": {},
+                // Capy's engine keeps no source package: the host sends the
+                // numbering's first picture bullet, as it sends the theme.
+                "renderEnv": {"firstPictureBullet": package.numbering.first_picture_bullet},
                 "regions": {"sections": [{"properties": package.document.final_section_properties}]},
                 "measurement": {
                     "fontChains": {"arial|0|0": [font]},
@@ -359,11 +361,8 @@ fn picture_bullet_keeps_source_offsets_and_caret_positions() {
     let xml = numbering(&bullet("width:3in;height:3in"), false);
     let (base, _, base_display) = render(&document(&body, None));
     let (engine, _, display) = render(&document(&body, Some(&xml)));
-    let (base_blocks, base_map) =
-        yrs_doc_to_mapped_layout_blocks(base.doc(), "body", &RenderEnv::default()).unwrap();
-    let (blocks, map) =
-        yrs_doc_to_mapped_layout_blocks(engine.doc(), "body", &RenderEnv::default()).unwrap();
-    assert_eq!(map, base_map);
+    let base_blocks = yrs_doc_to_layout_blocks(base.doc(), "body", &RenderEnv::default()).unwrap();
+    let blocks = yrs_doc_to_layout_blocks(engine.doc(), "body", &RenderEnv::default()).unwrap();
     assert_eq!(
         engine.doc().paragraphs("body").unwrap(),
         base.doc().paragraphs("body").unwrap()
@@ -418,8 +417,11 @@ fn empty_first_paragraph_reserves_the_box_and_other_stories_do_not() {
             .doc()
             .create_story(story, "Other", "Normal", "left")
             .unwrap();
-        let (blocks, _) =
-            yrs_doc_to_mapped_layout_blocks(engine.doc(), story, &RenderEnv::default()).unwrap();
+        let env: RenderEnv = serde_json::from_value(
+            json!({"firstPictureBullet": {"width": 216.0, "height": 216.0}}),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(engine.doc(), story, &env).unwrap();
         let blocks = serde_json::to_value(blocks).unwrap();
         assert!(blocks[0]["attrs"]["leadingInlineBox"].is_null());
     }

@@ -204,9 +204,13 @@ pub fn suppress_break_auto_before(block: &mut LayoutBlock, previous: Option<&Lay
     let LayoutBlock::Paragraph(paragraph) = block else {
         return;
     };
-    let breaks_before = paragraph.attrs.as_ref().is_some_and(|attrs| {
-        attrs.page_break_before == Some(true) || attrs.page_break_before_run == Some(true)
-    }) || matches!(previous, Some(LayoutBlock::PageBreak(_)));
+    // Capy seeds a page break that opens a paragraph as a unit of its own (no
+    // `pageBreakBeforeRun`), so it arrives here as the previous block.
+    let breaks_before = paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.page_break_before == Some(true))
+        || matches!(previous, Some(LayoutBlock::PageBreak(_)));
     if !breaks_before {
         return;
     }
@@ -351,8 +355,11 @@ pub(crate) fn apply_contextual_spacing_measured(measured: &mut [MeasuredBlock]) 
         suppress_document_auto_before(&mut measured[first].block);
     }
     for k in 0..flow.len() {
+        // A page break block is not flow, so the break check reads the block
+        // right before this one rather than its flow neighbour.
+        let (head, tail) = measured.split_at_mut(flow[k]);
+        suppress_break_auto_before(&mut tail[0].block, head.last().map(|entry| &entry.block));
         let (previous, current, next) = flow_window(measured, &flow, k);
-        suppress_break_auto_before(&mut current.block, previous.map(|entry| &entry.block));
         suppress_list_auto_spacing(
             &mut current.block,
             previous.map(|entry| &entry.block),
