@@ -22,15 +22,15 @@ export function isAllowedFontRequest(request) {
   );
 }
 
-/** The checkout's copy of a pinned font binary, only when the URL pins the checkout's package version. */
+/** The checkout's copy of a pinned font binary (a pack face or the fonts decoder), only when the URL pins the checkout's package version. */
 export function checkoutFontAsset(url) {
   const match =
-    /^https:\/\/cdn\.jsdelivr\.net\/npm\/@betteroffice\/(fonts|fonts-cjk)@([^/]+)\/assets\/([A-Za-z0-9-]+\.(?:ttf|otf))$/.exec(
+    /^https:\/\/cdn\.jsdelivr\.net\/npm\/@betteroffice\/(fonts|fonts-cjk|fonts-latin|fonts-intl)@([^/]+)\/(assets\/[A-Za-z0-9-]+\.(?:ttf|otf)\.zst|dist\/decoder\/fontpack\.wasm)$/.exec(
       url,
     );
-  if (!match) return undefined;
+  if (!match || (match[1] === 'fonts') !== match[3].startsWith('dist/')) return undefined;
   const root = new URL(`${match[1]}/`, packages);
   if (JSON.parse(readFileSync(new URL('package.json', root), 'utf8')).version !== match[2])
     return undefined;
-  return fileURLToPath(new URL(`assets/${match[3]}`, root));
+  return fileURLToPath(new URL(match[3], root));
 }

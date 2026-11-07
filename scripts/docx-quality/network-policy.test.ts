@@ -41,9 +41,12 @@ describe('checkout font assets', () => {
     for (const face of BUNDLED_FONTS) {
       expect((await loadFace(face)).byteLength).toBe(face.byteLength);
     }
-    expect(requested).toHaveLength(BUNDLED_FONTS.length);
+    // One request per face, plus the decoder the packed faces load once.
+    const faces = requested.filter((url) => !url.endsWith('/fontpack.wasm'));
+    expect(faces).toHaveLength(BUNDLED_FONTS.length);
+    expect(requested.length - faces.length).toBe(1);
     for (const url of requested) {
-      const other = url.replace(/@[^/@]+\/assets\//, '@0.0.1/assets/');
+      const other = url.replace(/@[^/@]+\/(assets|dist)\//, '@0.0.1/$1/');
       expect(other).not.toBe(url);
       expect(checkoutFontAsset(other)).toBeUndefined();
     }
