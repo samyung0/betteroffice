@@ -341,24 +341,49 @@ describe('text layer over a laid-out document', () => {
   const floatingChart =
     '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" behindDoc="0" distT="0" distB="0" distL="0" distR="0" simplePos="0" locked="0" layoutInCell="1" allowOverlap="1" relativeHeight="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="3" name="Chart 2"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart1"/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 
-  function docx(body: string, footnotes = ''): Uint8Array {
+  /** Footnotes (`w:footnote` elements) and a default header's content beside the body. */
+  interface Parts {
+    footnotes?: string;
+    header?: string;
+  }
+
+  function docx(body: string, { footnotes = '', header = '' }: Parts = {}): Uint8Array {
     const parts: Record<string, string> = {
-      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/><Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>`,
+      '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${type}.styles+xml"/><Override PartName="/word/footnotes.xml" ContentType="${type}.footnotes+xml"/>${header ? `<Override PartName="/word/header1.xml" ContentType="${type}.header+xml"/>` : ''}<Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>`,
       '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
-      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdChart1" Type="${R}/chart" Target="charts/chart1.xml"/></Relationships>`,
+      'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdSt" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rIdFn" Type="${R}/footnotes" Target="footnotes.xml"/>${header ? `<Relationship Id="rIdH1" Type="${R}/header" Target="header1.xml"/>` : ''}<Relationship Id="rIdChart1" Type="${R}/chart" Target="charts/chart1.xml"/></Relationships>`,
       'word/charts/chart1.xml': CHART,
       'word/styles.xml': `<w:styles ${W}><w:style w:type="paragraph" w:default="1" w:styleId="Body"><w:name w:val="Body"/></w:style></w:styles>`,
       'word/footnotes.xml': `<w:footnotes ${W}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>${footnotes}</w:footnotes>`,
-      'word/document.xml': `<w:document ${W}><w:body>${body}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`,
+      ...(header ? { 'word/header1.xml': `<w:hdr ${W}>${header}</w:hdr>` } : {}),
+      'word/document.xml': `<w:document ${W}><w:body>${body}<w:sectPr>${header ? '<w:headerReference w:type="default" r:id="rIdH1"/>' : ''}<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>`,
     };
     return rezipContainer(
       Object.fromEntries(Object.entries(parts).map(([path, xml]) => [path, new TextEncoder().encode(xml)]))
     );
   }
 
+  /** View's copy of the part of the positioned pages `select` picks. */
+  async function viewCopied(
+    body: string,
+    parts: Parts,
+    select: (root: HTMLElement, range: Range) => void
+  ): Promise<string> {
+    const viewer = await openDocumentViewer(docx(body, parts));
+    try {
+      const { pages } = viewer.displayList();
+      const root = mount(...pages.map((page) => buildMirrorPage(page)));
+      const range = document.createRange();
+      select(root, range);
+      return textLayerText(range, root, pages);
+    } finally {
+      viewer.dispose();
+    }
+  }
+
   /** The whole document's copy, from positioned pages and from far (plain-text) pages alike. */
-  async function copied(body: string, footnotes = ''): Promise<string> {
-    const viewer = await openDocumentViewer(docx(body, footnotes));
+  async function copied(body: string, parts: Parts = {}): Promise<string> {
+    const viewer = await openDocumentViewer(docx(body, parts));
     try {
       const { pages } = viewer.displayList();
       const positioned = copyAll(mount(...pages.map((page) => buildMirrorPage(page))), pages);
@@ -427,17 +452,28 @@ describe('text layer over a laid-out document', () => {
     );
   });
 
-  /** The editor's copy of the whole body (`yrsSelectionText`). */
-  async function editCopied(body: string, { showHiddenText = false } = {}): Promise<string> {
+  /**
+   * The editor's copy (`yrsSelectionText`) of a story's first `count`
+   * paragraphs: the whole body by default.
+   */
+  async function editCopied(
+    body: string,
+    {
+      story = 'body',
+      count,
+      showHiddenText = false,
+      ...parts
+    }: Parts & { story?: string; count?: number; showHiddenText?: boolean } = {}
+  ): Promise<string> {
     const session = await createYrsSession({ clientId: 31 });
     try {
-      session.openDocx(docx(body), true);
-      const paragraphs = session.paragraphs('body');
-      const last = paragraphs.at(-1)!;
-      const end = session.paragraphSpans('body').find((span) => span.paraId === last.paraId)!.length;
+      session.openDocx(docx(body, parts), true);
+      const paragraphs = session.paragraphs(story);
+      const last = paragraphs[(count ?? paragraphs.length) - 1]!;
+      const end = session.paragraphSpans(story).find((span) => span.paraId === last.paraId)!.length;
       session.setSelection(
-        { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
-        { story: 'body', paraId: last.paraId, offset: end }
+        { story, paraId: paragraphs[0]!.paraId, offset: 0 },
+        { story, paraId: last.paraId, offset: end }
       );
       return yrsSelectionText(session, showHiddenText).text;
     } finally {
@@ -508,6 +544,51 @@ describe('text layer over a laid-out document', () => {
     }, 30_000);
   }
 
+  // A table cell's own lines: a cell holding only a drawing keeps its slot.
+  const firstCell = (root: HTMLElement, range: Range) =>
+    range.selectNodeContents(root.querySelector('[role="cell"]')!);
+  test.each([
+    ['a chart alone in a paragraph between text', p(t('A1')) + p(chart) + p(t('A3')), 'A1\n\nA3'],
+    ['a text box alone in a paragraph between text', p(t('A1')) + p(shape) + p(t('A3')), 'A1\n\nA3'],
+    ['only a chart', p(chart), ''],
+    ['a chart between text', p(`${t('Aa')}${chart}${t('Bb')}`), 'AaBb'],
+  ])(
+    'a table cell holding %s copies the same in view and edit mode',
+    async (_, content, text) => {
+      const body = `${p(t('Lead'))}<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${content}</w:tc>${tc(t('B1'))}</w:tr></w:tbl>${p(t('Cc'))}`;
+      expect(await copied(body)).toBe(`Lead\n${text}\tB1\nCc`);
+      expect(await viewCopied(body, {}, firstCell)).toBe(text);
+      expect(await editCopied(body, { story: 'body:t0:r0c0' })).toBe(text);
+    },
+    30_000
+  );
+
+  // Header and note positions count in stories of their own, so their text
+  // never stands for a body paragraph's.
+  const story = (text: string) =>
+    p(t(`${text} long enough to cover the first many positions of its own story`));
+  test('a lone chart copies as an empty line under a header', async () => {
+    const body = p(t('Lead')) + p(chart) + p(t('Cc'));
+    const header = story('A header');
+    expect(await copied(body, { header })).toBe('Lead\n\nCc');
+    expect(await editCopied(body, { header })).toBe('Lead\n\nCc');
+  }, 30_000);
+  test('a lone chart copies as an empty line on a page with a footnote', async () => {
+    // The reference mark comes after the copied paragraphs: View copies it as shown, Edit not.
+    const body = `${p(t('Lead'))}${p(chart)}${p(t('Cc'))}${p(`${t('Dd')}<w:r><w:footnoteReference w:id="1"/></w:r>`)}`;
+    const footnotes = `<w:footnote w:id="1">${story('A footnote')}</w:footnote>`;
+    const throughCc = (root: HTMLElement, range: Range) => {
+      range.setStart(root, 0);
+      range.setEndAfter(
+        [...root.querySelectorAll('.layout-page-content .layout-paragraph')].find(
+          (block) => block.textContent === 'Cc'
+        )!
+      );
+    };
+    expect(await viewCopied(body, { footnotes }, throughCc)).toBe('Lead\n\nCc');
+    expect(await editCopied(body, { footnotes, count: 3 })).toBe('Lead\n\nCc');
+  }, 30_000);
+
   // Hidden text is on the page only while it is shown, so a text box after it
   // shares its line otherwise, in both modes. Edit copies the hidden text itself
   // (2026-10-03); View copies the page.
@@ -534,7 +615,7 @@ describe('text layer over a laid-out document', () => {
   test('opens a document with a footnote and leaves the note out of a body copy', async () => {
     const text = await copied(
       p(`${t('Body with a note')}<w:r><w:footnoteReference w:id="1"/></w:r>`) + p(t('Next')),
-      `<w:footnote w:id="1">${p(t('The footnote text.'))}</w:footnote>`
+      { footnotes: `<w:footnote w:id="1">${p(t('The footnote text.'))}</w:footnote>` }
     );
     expect(text).toStartWith('Body with a note');
     expect(text).toEndWith('\nNext');

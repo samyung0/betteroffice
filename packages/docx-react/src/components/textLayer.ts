@@ -16,6 +16,7 @@ import {
 const PAGE = '.layout-page-mirror';
 const RUN = '.layout-run-text';
 const BLOCK = '[data-block-id]';
+const PARAGRAPH = '.layout-paragraph[data-block-id]';
 const CELL = '[role="cell"], [role="columnheader"]';
 /**
  * Footnotes and endnotes are stories of their own, as in Word: a selection
@@ -104,26 +105,44 @@ function drawingBlock(el: HTMLElement): boolean {
 }
 
 /**
- * Chart and text box blocks that stand for a whole paragraph: no other block
- * (a part of their paragraph holding its text) covers their position. One
- * copies as the empty line its paragraph is, as a lone picture or an empty
- * paragraph does, in View as in Edit (Epo, Q732).
+ * The story a block's doc positions count in: the body, or one note. Header
+ * and footer blocks (never copied) and note separators have none.
+ */
+function positionStory(el: Element): string | null {
+  const container = el.closest('.layout-note, .layout-page-notes, .layout-page-header, .layout-page-footer');
+  if (!container) return 'body';
+  return container.classList.contains('layout-note') ? container.id : null;
+}
+
+/**
+ * Chart and text box blocks that stand for a whole paragraph: no other
+ * paragraph block of their story (a part of their paragraph holding its text)
+ * covers their position. One copies as the empty line its paragraph is, as a
+ * lone picture or an empty paragraph does, in View as in Edit (Epo, Q732); in
+ * a table cell it keeps the cell's slot.
  */
 function loneDrawingBlocks(mirrors: readonly HTMLElement[]): Set<Element> {
-  const drawings: Array<[HTMLElement, number]> = [];
-  const others: Array<[number, number]> = [];
+  const drawings: Array<[HTMLElement, number, string]> = [];
+  const paragraphs: Array<[HTMLElement, number, number, string]> = [];
   for (const mirror of mirrors) {
-    for (const el of mirror.querySelectorAll<HTMLElement>(BLOCK)) {
+    for (const el of mirror.querySelectorAll<HTMLElement>(PARAGRAPH)) {
       const start = Number(el.dataset.docStart);
       const end = Number(el.dataset.docEnd);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
-      if (drawingBlock(el)) drawings.push([el, start]);
-      else others.push([start, end]);
+      const story = positionStory(el);
+      if (!story || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (drawingBlock(el)) drawings.push([el, start, story]);
+      else paragraphs.push([el, start, end, story]);
     }
   }
   return new Set(
     drawings
-      .filter(([, at]) => !others.some(([start, end]) => start <= at && at < end))
+      .filter(
+        ([drawing, at, story]) =>
+          !paragraphs.some(
+            ([el, start, end, of]) =>
+              of === story && start <= at && at < end && !el.contains(drawing)
+          )
+      )
       .map(([el]) => el)
   );
 }
