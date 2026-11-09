@@ -152,9 +152,12 @@ for (const path of ['native', 'typescript'] as const) {
     });
   }
 
+  // Capy keeps a theme-only font's theme marker in the shared document and
+  // resolves the face at layout (Q712, as Q705 for list markers); upstream's
+  // #1921 seeds the resolved name instead.
   for (const [authored, fonts, seeded] of [
-    ['theme-only', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>', 'Times New Roman'],
-    ['paired', FONTS, 'Cambria'],
+    ['theme-only', '<w:rFonts w:asciiTheme="majorHAnsi" w:hAnsiTheme="majorHAnsi"/>', { asciiTheme: 'majorHAnsi', hAnsiTheme: 'majorHAnsi' }],
+    ['paired', FONTS, { ascii: 'Cambria', hAnsi: 'Cambria' }],
   ] as const) {
     for (const context of ['unknown theme', 'document theme'] as const) {
       test(`${path} source-less ${authored} fonts resolve with ${context} without changing the model`, async () => {
@@ -177,12 +180,20 @@ for (const path of ['native', 'typescript'] as const) {
             expect(text).toHaveLength(3);
             expect(text.filter(run => run.kind === 'text' && run.text === 'Title')).toHaveLength(1);
             expect(text.filter(run => run.kind === 'text' && run.text === 'Box')).toHaveLength(2);
-            const effective = context === 'document theme' ? 'Times New Roman' : seeded;
-            for (const run of text) expect(run).toMatchObject({
-              fontFamily: effective, fontSlots: { ascii: effective, hAnsi: effective },
-            });
+            for (const run of text) {
+              if (context === 'document theme') {
+                expect(run).toMatchObject({
+                  fontFamily: 'Times New Roman', fontSlots: { ascii: 'Times New Roman', hAnsi: 'Times New Roman' },
+                });
+              } else {
+                // With no theme to read, a theme-only run keeps its marker and names no family.
+                expect(run).toMatchObject({ fontSlots: seeded });
+                if (authored === 'theme-only') expect((run as { fontFamily?: string }).fontFamily).toBeUndefined();
+                else expect(run).toMatchObject({ fontFamily: 'Cambria' });
+              }
+            }
             expect(candidate.storySegments('body').find(segment => segment.kind === 'text')?.attributes.fontFamily)
-              .toMatchObject({ ascii: seeded, hAnsi: seeded });
+              .toMatchObject(seeded);
             expect(candidate.encodeState()).toEqual(original);
           }
         } finally {
@@ -211,10 +222,12 @@ for (const path of ['native', 'typescript'] as const) {
         else documentToYrs(session, document);
         const original = session.encodeState();
         const segments = session.storySegments('body');
-        const authored = name === 'theme-only' ? 'Calibri' : 'Cambria';
-        expect(segments.find(segment => segment.kind === 'text')?.attributes.fontFamily).toMatchObject({
-          ascii: authored, hAnsi: authored,
-        });
+        // The shared document keeps a theme-only run's marker (Q712); the face resolves below, at layout.
+        expect(segments.find(segment => segment.kind === 'text')?.attributes.fontFamily).toMatchObject(
+          name === 'theme-only'
+            ? { asciiTheme: 'majorHAnsi', hAnsiTheme: 'majorHAnsi' }
+            : { ascii: 'Cambria', hAnsi: 'Cambria' }
+        );
         const request = buildResidentRegionLayoutRequest(document, 24, {});
         const blocks = session.yrsBlocksForStory('body', request.renderEnv) as LayoutBlock[];
         const runs = blocks.flatMap(block => block.kind === 'paragraph' ? block.runs : []);
