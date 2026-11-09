@@ -5,15 +5,19 @@ export const xlsxDefaultFontManager = {
   load: () => import('@betteroffice/fonts'),
 };
 
-const registeredFaces = new Map<string, Promise<boolean>>();
+// A face resolves true once registered, false when nothing was tried or its
+// painter left, and to the error when its download, decode or registration failed.
+const registeredFaces = new Map<string, Promise<boolean | Error>>();
 const pendingFaces = new Map<string, Set<symbol>>();
 const absentFaces = new Set<string>();
 let activeFontSet: FontFaceSet | undefined;
 
+const asError = (error: unknown) => (error instanceof Error ? error : new Error(String(error)));
+
 function registerFace(
   key: string, face: BundledFontFace, family: string, load: () => Promise<ArrayBuffer>,
   fontSet: FontFaceSet, owners: Set<symbol>,
-): Promise<boolean> {
+): Promise<boolean | Error> {
   const current = () => activeFontSet === fontSet && owners.size > 0;
   return (async () => {
     try {
@@ -21,7 +25,7 @@ function registerFace(
       const bytes = await load();
       if (bytes.byteLength !== face.byteLength) {
         absentFaces.add(key);
-        return false;
+        return new Error(`${family}: the bundled face has ${bytes.byteLength} bytes, not ${face.byteLength}`);
       }
       if (!current()) return false;
       const loaded = await new FontFace(family, bytes, {
@@ -30,18 +34,25 @@ function registerFace(
       if (!current()) return false;
       fontSet.add(loaded);
       return true;
-    } catch { return false; }
+    } catch (error) { return asError(error); }
   })();
 }
 
 export function createDefaultFontPainter(
   decoder: FontDecoder | null | undefined,
-  repaint: () => void, options: { defaultFonts?: boolean; onSettled?: () => void } = {},
+  repaint: () => void,
+  options: {
+    defaultFonts?: boolean;
+    onSettled?: () => void;
+    /** Once per face that fails to load; its text keeps the browser's font (Q710). */
+    onFontError?: (family: string, error: Error) => void;
+  } = {},
 ) {
   const owner = Symbol();
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
   const settled = new Set<string>();
+  const reported = new Set<string>();
   const pending = new Map<string, Promise<boolean>>();
   let disposed = false;
   let changed = false;
@@ -52,7 +63,9 @@ export function createDefaultFontPainter(
     source: ReturnType<Awaited<ReturnType<typeof xlsxDefaultFontManager.load>>['createFontProvider']>;
   }> | undefined;
 
-  async function loadFace(fontFamily: string, bold: boolean, italic: boolean, retryShared = true): Promise<boolean> {
+  async function loadFace(
+    fontFamily: string, bold: boolean, italic: boolean, retryShared = true,
+  ): Promise<boolean | Error> {
     let owners: Set<symbol> | undefined;
     try {
       if (!provider) {
@@ -88,8 +101,8 @@ export function createDefaultFontPainter(
         registeredFaces.set(key, registration);
         const task = registration;
         const group = owners;
-        void task.then((success) => {
-          if (!success && registeredFaces.get(key) === task) registeredFaces.delete(key);
+        void task.then((result) => {
+          if (result !== true && registeredFaces.get(key) === task) registeredFaces.delete(key);
           if (pendingFaces.get(key) === group) pendingFaces.delete(key);
         });
       }
@@ -97,10 +110,10 @@ export function createDefaultFontPainter(
         owners.add(owner);
         interests.add(owners);
       }
-      const success = await registration;
-      if (!success && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, false);
-      return success;
-    } catch { return false; }
+      const result = await registration;
+      if (result !== true && shared && retryShared && !disposed) return await loadFace(fontFamily, bold, italic, false);
+      return result;
+    } catch (error) { return asError(error); }
     finally {
       if (owners) {
         owners.delete(owner);
@@ -131,12 +144,16 @@ export function createDefaultFontPainter(
     const batch: Promise<boolean>[] = [];
     for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
       if (loaded.has(key) || pending.has(key)) continue;
-      const task = loadFace(fontFamily, bold, italic).then((success) => {
+      const task = loadFace(fontFamily, bold, italic).then((result) => {
+        const success = result === true;
         pending.delete(key);
         settled.add(key);
         if (success) {
           loaded.add(key);
           changed = true;
+        } else if (result instanceof Error && !disposed && !reported.has(key)) {
+          reported.add(key);
+          options.onFontError?.(fontFamily, result);
         }
         if (!disposed && !pending.size && changed) {
           changed = false;

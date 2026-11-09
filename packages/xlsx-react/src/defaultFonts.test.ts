@@ -205,6 +205,30 @@ test('a missing intl pack leaves browser text untouched', async () => {
   expect(repaint).not.toHaveBeenCalled();
 });
 
+test('reports each face that fails to load to the host once; its text keeps the browser font', async () => {
+  const { added } = browser();
+  provider(async (face) => {
+    if (face.weight === 700) throw new Error('Font unavailable');
+    // a CJK face whose bytes are not the face's
+    return new ArrayBuffer(face.family === 'Noto Sans JP' ? 4 : face.byteLength);
+  });
+  const onFontError = mock((_family: string, _error: Error) => {});
+  const repaint = mock(() => {});
+  const fonts = createDefaultFontPainter(decoder(), repaint, { onFontError });
+  const list = display({ family: 'Calibri' }, { family: 'Calibri', bold: true }, { family: 'MS Gothic' });
+  await fonts.load(list);
+  await fonts.load(list);
+  expect(onFontError.mock.calls.map(([family, error]) => [family, error.message]).sort()).toEqual([
+    ['Calibri', 'Font unavailable'],
+    ['MS Gothic', 'MS Gothic: the bundled face has 4 bytes, not 12'],
+  ]);
+  expect(added.map(({ family, descriptors }) => ({ family, ...descriptors }))).toEqual([
+    { family: 'Calibri', weight: '400', style: 'normal' },
+  ]);
+  expect(repaint).toHaveBeenCalledTimes(1);
+  fonts.dispose();
+});
+
 test('opt-out and non-DOM environments never import the font provider', async () => {
   browser();
   const source = provider();

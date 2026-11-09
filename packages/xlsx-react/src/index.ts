@@ -10,6 +10,11 @@ export type {
   XlsxEditorNotice,
   XlsxEditorCollaborationOptions,
 } from './XlsxEditor';
+/**
+ * Bundled workbook faces for a host that paints frames itself (a viewer), as
+ * the editor's `defaultFonts` and `onFontError` do.
+ */
+export { useDefaultFonts } from './useDefaultFonts';
 export { EditorToolbar } from './components/EditorToolbar';
 export {
   XLSX_COMMANDS,

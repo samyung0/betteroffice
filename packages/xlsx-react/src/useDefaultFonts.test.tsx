@@ -50,6 +50,19 @@ test('paints before the painter module loads, then hands it the latest frame', a
   expect(module.painter.dispose).toHaveBeenCalledTimes(1);
 });
 
+test('hands the host its font error callback through the painter', async () => {
+  const module = painterModule();
+  const fontError = mock((_family: string, _error: Error) => {});
+  renderHook(() => useDefaultFonts('owner', decoder, undefined, () => {}, undefined, fontError));
+  await act(async () => { module.release(); await Promise.resolve(); await Promise.resolve(); });
+  const options = (module.create.mock.calls[0] as unknown[])[2] as {
+    onFontError: (family: string, error: Error) => void;
+  };
+  const error = new Error('Font unavailable');
+  options.onFontError('Calibri', error);
+  expect(fontError).toHaveBeenCalledWith('Calibri', error);
+});
+
 test('opting out never loads the painter module', async () => {
   const module = painterModule();
   const { result } = renderHook(() => useDefaultFonts('owner', decoder, false, () => {}));

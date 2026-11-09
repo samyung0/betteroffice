@@ -304,6 +304,12 @@ export interface XlsxEditorProps {
    * true; false keeps the browser's fonts and imports no font code.
    */
   defaultFonts?: boolean;
+  /**
+   * Called once per bundled face that fails to download, decode or register,
+   * with the workbook family it stands in for. Its text keeps the browser's
+   * font and the editor shows no error; the host reports it.
+   */
+  onFontError?: (family: string, error: Error) => void;
 }
 
 /**
@@ -842,6 +848,7 @@ function XlsxEditorContent({
   showZoomControl = true,
   initialZoom = 1,
   defaultFonts,
+  onFontError,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   // a cut reading its selection in pieces refuses edits, as a send does, so
@@ -891,7 +898,8 @@ function XlsxEditorContent({
     },
     () => {
       if (canvasRef.current) canvasRef.current.dataset.defaultFonts = 'settled';
-    }
+    },
+    onFontError
   );
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
