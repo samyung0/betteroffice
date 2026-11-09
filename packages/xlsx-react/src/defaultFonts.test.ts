@@ -360,23 +360,45 @@ test('two painters share a face and one disposal does not cancel the other repai
   expect(added).toHaveLength(1);
 });
 
-test('a failed shared registration is evicted and can be retried', async () => {
+test('a failed shared registration is evicted, so a later painter can retry it', async () => {
   const { added } = browser();
   let attempts = 0;
   provider(async () => {
     if (++attempts === 1) throw new Error('Font unavailable');
     return new ArrayBuffer(4);
   });
+  const failedRepaint = mock(() => {});
+  const failed = createDefaultFontPainter(decoder(), failedRepaint);
+  const list = display({ family: 'Calibri' });
+  await failed.load(list);
+  expect(added).toHaveLength(0);
+  expect(failedRepaint).not.toHaveBeenCalled();
   const repaint = mock(() => {});
   const fonts = createDefaultFontPainter(decoder(), repaint);
-  const list = display({ family: 'Calibri' });
-  await fonts.load(list);
-  expect(added).toHaveLength(0);
-  expect(repaint).not.toHaveBeenCalled();
   await fonts.load(list);
   expect(attempts).toBe(2);
   expect(added).toHaveLength(1);
   expect(repaint).toHaveBeenCalledTimes(1);
+  failed.dispose();
+  fonts.dispose();
+});
+
+test('a face that failed is downloaded once however often its painter paints it', async () => {
+  browser();
+  let downloads = 0;
+  provider(async () => {
+    downloads += 1;
+    throw new Error('Font unavailable');
+  });
+  const onFontError = mock((_family: string, _error: Error) => {});
+  const fonts = createDefaultFontPainter(decoder(), () => {}, { onFontError });
+  const list = display({ family: 'Calibri' });
+  for (let frame = 0; frame < 5; frame++) {
+    fonts.paint(list, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  expect(downloads).toBe(1);
+  expect(onFontError).toHaveBeenCalledTimes(1);
   fonts.dispose();
 });
 

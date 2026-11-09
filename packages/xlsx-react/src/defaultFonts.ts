@@ -52,7 +52,8 @@ export function createDefaultFontPainter(
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();
   const settled = new Set<string>();
-  const reported = new Set<string>();
+  // Faces that failed: reported once and not downloaded again while this painter lives.
+  const failed = new Set<string>();
   const pending = new Map<string, Promise<boolean>>();
   let disposed = false;
   let changed = false;
@@ -143,7 +144,7 @@ export function createDefaultFontPainter(
     if (inactive()) return;
     const batch: Promise<boolean>[] = [];
     for (const { fontFamily, bold, italic, key } of faceKeys(displayList)) {
-      if (loaded.has(key) || pending.has(key)) continue;
+      if (loaded.has(key) || pending.has(key) || failed.has(key)) continue;
       const task = loadFace(fontFamily, bold, italic).then((result) => {
         const success = result === true;
         pending.delete(key);
@@ -151,8 +152,8 @@ export function createDefaultFontPainter(
         if (success) {
           loaded.add(key);
           changed = true;
-        } else if (result instanceof Error && !disposed && !reported.has(key)) {
-          reported.add(key);
+        } else if (result instanceof Error && !disposed) {
+          failed.add(key);
           options.onFontError?.(fontFamily, result);
         }
         if (!disposed && !pending.size && changed) {
