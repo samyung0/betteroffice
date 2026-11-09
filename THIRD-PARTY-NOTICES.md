@@ -292,10 +292,9 @@ Read-only accessors, for structure walks and guards that compute no index:
 
 Its `Cargo.toml` also has a `[lints]` block that allows its upstream warnings.
 
-The workspace, `apps/native-viewer`, `bindings` and `fuzz` substitute it for
-the registry crate via `[patch.crates-io]`, so it is compiled into the crates
-that use `yrs`, their WASM builds and the macOS app; crates published to
-crates.io depend on the registry crate.
+The workspace and `fuzz` substitute it for the registry crate via
+`[patch.crates-io]`, so it is compiled into the crates that use `yrs` and their
+WASM builds; crates published to crates.io depend on the registry crate.
 
 Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
 

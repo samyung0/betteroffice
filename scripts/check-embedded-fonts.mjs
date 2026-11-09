@@ -6,11 +6,6 @@ const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const ALLOWLIST = [
   { source: 'crates/xlsx-raster/src/font.rs', asset: '../assets/Carlito-Regular.ttf', reason: 'Migrates in PR B' },
   { source: 'crates/vsdx-raster/src/lib.rs', asset: '../../xlsx-raster/assets/Carlito-Regular.ttf', reason: 'Migrates in PR B' },
-  { source: 'apps/native-viewer/src/xlsx_scene.rs', asset: '../../../crates/xlsx-raster/assets/Carlito-Regular.ttf', reason: 'Uses the xlsx-raster asset until PR B' },
-  { source: 'apps/native-viewer/src/pptx_scene.rs', asset: '../../../packages/fonts/assets/LiberationSans-Regular.ttf', reason: 'Full Arial substitutes until the pptx wiring PR' },
-  { source: 'apps/native-viewer/src/pptx_scene.rs', asset: '../../../packages/fonts/assets/LiberationSans-Bold.ttf', reason: 'Full Arial substitutes until the pptx wiring PR' },
-  { source: 'apps/native-viewer/src/pptx_scene.rs', asset: '../../../packages/fonts/assets/LiberationSans-Italic.ttf', reason: 'Full Arial substitutes until the pptx wiring PR' },
-  { source: 'apps/native-viewer/src/pptx_scene.rs', asset: '../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf', reason: 'Full Arial substitutes until the pptx wiring PR' },
 ];
 
 export function embeddedFontViolations(file, source) {

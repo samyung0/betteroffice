@@ -1,8 +1,7 @@
 # betteroffice-pptx-raster
 
 The tiny-skia backend that paints a PPTX slide display list to PNG. Server-side
-twin of the browser's canvas replayer, and the CPU reference the native viewer
-diffs its GPU output against.
+twin of the browser's canvas replayer.
 
 ```rust
 use pptx_raster::{AssetMap, RenderOptions, RenderResources, render_slide};
