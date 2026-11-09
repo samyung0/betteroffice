@@ -36,7 +36,7 @@ row or cell addresses, and worksheets reconstructed from collaboration updates,
 are serialized from the model instead.
 
 `Workbook::read_cells`, `find_text`, `validate_edits` and `apply_edits` take the
-same serializable requests as JavaScript and Python. A batch commits every step
+same serializable requests as JavaScript. A batch commits every step
 as one recalculated change, or returns an `EditRefusal` with the workbook
 untouched:
 
@@ -165,8 +165,7 @@ controls with its version and fills plain- and rich-text ones through
 fill.
 
 Comparing two DOCX files into tracked changes is available from the
-JavaScript package's `compareDocx`. The native Rust and Python APIs do not
-offer it; it is planned for when edited sessions save natively.
+JavaScript package's `compareDocx`. The native Rust API does not offer it; it is planned for when edited sessions save natively.
 
 PPTX edits can also run as version-checked batches. `Presentation::read_content`
 and `find_text` return story text with the session version, and `apply_edits`
@@ -188,8 +187,7 @@ match presentation.apply_edits(&request)? {
 }
 ```
 
-The request types are the JSON contract the JavaScript core and Python binding
-use; `validate_edits` runs the same checks without changing anything.
+The request types are the JSON contract the JavaScript core uses; `validate_edits` runs the same checks without changing anything.
 
 `export_structured` and `export_markdown` read the committed deck as structured
 content or Markdown with the version it was read at, and

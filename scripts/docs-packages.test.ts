@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { RUST_CRATES } from './rust-crates.mjs';
 import {
   CONTAINER_IMAGES,
-  PYPI_DISTRIBUTIONS,
   publishedCommands,
   publishedCrates,
   publishedPackages,
@@ -33,14 +32,6 @@ describe('docs cover every published package', () => {
   test('names every published crate', () => {
     expect(publishedCrates().filter((name) => !DOCS.includes(name))).toEqual([]);
   });
-
-  test('links every published PyPI distribution', () => {
-    // A bare name would already match the same-named crate.
-    const missing = PYPI_DISTRIBUTIONS.filter(
-      (name) => !DOCS.includes(`https://pypi.org/project/${name}`)
-    );
-    expect(missing).toEqual([]);
-  });
 });
 
 describe('docs name nothing that does not exist', () => {
@@ -50,20 +41,13 @@ describe('docs name nothing that does not exist', () => {
     expect([...new Set(claimed)].filter((name) => !real.has(name))).toEqual([]);
   });
 
-  test('every crate-shaped name is a registered crate, PyPI distribution, executable or container image', () => {
+  test('every crate-shaped name is a registered crate, executable or container image', () => {
     const real = new Set([
       ...RUST_CRATES.map((crate) => crate.name),
-      ...PYPI_DISTRIBUTIONS,
       ...publishedCommands(),
       ...CONTAINER_IMAGES
     ]);
     const claimed = [...DOCS.matchAll(/\bbetteroffice(?:-[a-z0-9]+)+\b/g)].map((m) => m[0]);
     expect([...new Set(claimed)].filter((name) => !real.has(name))).toEqual([]);
-  });
-
-  test('tells no one to install a distribution that is not on PyPI', () => {
-    const real = new Set(PYPI_DISTRIBUTIONS);
-    const claimed = [...DOCS.matchAll(/pip install (betteroffice-[a-z0-9-]+)/g)].map((m) => m[1]);
-    expect(claimed.filter((name) => !real.has(name))).toEqual([]);
   });
 });

@@ -58,7 +58,6 @@ jobs:
       - name: Configure test paths
         run: |
           printf '%s\n' \
-            "BETTEROFFICE_E2E_VENV=$RUNNER_TEMP/e2e-venv" \
             "QUALITY_ASSET_CACHE=$RUNNER_TEMP/e2e-assets" \
             "BETTEROFFICE_E2E_OUTPUT=$RUNNER_TEMP/e2e-results" >> "$GITHUB_ENV"
 

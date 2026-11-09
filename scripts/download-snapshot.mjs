@@ -3,8 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const ENDPOINT = 'https://betteroffice.dev/api';
 const REGISTRIES = [
   { key: 'npm', label: 'npm downloads', path: 'npm-downloads' },
-  { key: 'crates', label: 'crates.io downloads', path: 'crates-downloads' },
-  { key: 'pypi', label: 'PyPI downloads', path: 'pypi-downloads' }
+  { key: 'crates', label: 'crates.io downloads', path: 'crates-downloads' }
 ];
 
 export function parseMonthly(message) {

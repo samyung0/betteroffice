@@ -1,8 +1,8 @@
 import type { CachedCount, Registry } from "./download-stats";
 import { readDownloads } from "./stats-cache";
 
-const NAMES: Record<Registry, string> = { npm: "npm", crates: "crates.io", pypi: "PyPI" };
-const ORDER: Registry[] = ["npm", "crates", "pypi"];
+const NAMES: Record<Registry, string> = { npm: "npm", crates: "crates.io" };
+const ORDER: Registry[] = ["npm", "crates"];
 
 export type DownloadCounts = Partial<Record<Registry, CachedCount | null>>;
 
@@ -25,6 +25,6 @@ export function withDownloads(body: string, line: string): string {
 }
 
 export async function liveDownloadsLine(read: (registry: Registry) => Promise<CachedCount | null> = readDownloads): Promise<string> {
-  const [npm, crates, pypi] = await Promise.all(ORDER.map((registry) => read(registry)));
-  return downloadsLine({ npm, crates, pypi });
+  const [npm, crates] = await Promise.all(ORDER.map((registry) => read(registry)));
+  return downloadsLine({ npm, crates });
 }

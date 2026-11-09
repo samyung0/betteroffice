@@ -11,7 +11,7 @@ process.env.BETTEROFFICE_AGENT_EVALS = README;
 const { Home } = await import("../app/home.tsx");
 
 const AT = Date.UTC(2026, 9, 27, 3, 0, 0);
-const COUNTS = { npm: { downloads: 484591, at: AT }, crates: { downloads: 203294, at: AT - 3_600_000 }, pypi: { downloads: 2063, at: AT } };
+const COUNTS = { npm: { downloads: 484591, at: AT }, crates: { downloads: 203294, at: AT - 3_600_000 } };
 
 const blockIn = (html) => {
   const blocks = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => JSON.parse(m[1].replaceAll("&quot;", '"')));
@@ -44,11 +44,10 @@ describe("homepage SoftwareApplication JSON-LD", () => {
       expect(counter.name).toBeTruthy();
       expect(counter.description).toBeTruthy();
     }
-    expect(total.userInteractionCount).toBe(484591 + 203294 + 2063);
+    expect(total.userInteractionCount).toBe(484591 + 203294);
     expect(each.map((counter) => [counter.interactionService.name, counter.userInteractionCount])).toEqual([
       ["npm", 484591],
       ["crates.io", 203294],
-      ["PyPI", 2063],
     ]);
   });
 
@@ -61,7 +60,7 @@ describe("homepage SoftwareApplication JSON-LD", () => {
   test("a registry without a count is left out, and an empty store drops only the counters", () => {
     const partial = downloadStatistics({ npm: { downloads: 7, at: AT }, crates: null });
     expect(partial.interactionStatistic.map((counter) => counter.userInteractionCount)).toEqual([7, 7]);
-    for (const empty of [{}, { npm: null, crates: null, pypi: null }]) {
+    for (const empty of [{}, { npm: null, crates: null }]) {
       const data = blockIn(renderToStaticMarkup(createElement(Home, { downloads: empty })));
       expect(data["@type"]).toBe("SoftwareApplication");
       expect(data.name).toBe("BetterOffice");
@@ -70,8 +69,8 @@ describe("homepage SoftwareApplication JSON-LD", () => {
     }
   });
 
-  test("reads the three cached registries", async () => {
+  test("reads the two cached registries", async () => {
     expect(await liveCounts(async (registry) => COUNTS[registry])).toEqual(COUNTS);
-    expect(await liveCounts(async () => null)).toEqual({ npm: null, crates: null, pypi: null });
+    expect(await liveCounts(async () => null)).toEqual({ npm: null, crates: null });
   });
 });

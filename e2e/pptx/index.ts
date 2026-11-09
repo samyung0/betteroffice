@@ -4,8 +4,6 @@ import { editingSession } from './editing-session';
 import { formattingSweep } from './formatting-sweep';
 import { layoutAllSlides } from './layout-all-slides';
 import { proposalsReview } from './proposals-review';
-import { pythonRoundtrip } from './python-roundtrip';
-import { pythonWebLiveCollab } from './python-web-live-collab';
 import { shapesAndPictures } from './shapes-and-pictures';
 import { slideReorderAndDelete } from './slide-reorder-and-delete';
 import { threeEditorsMesh } from './three-editors-mesh';
@@ -24,7 +22,5 @@ export const scenarios: PptxScenario[] = [
   twoEditorsConverge,
   threeEditorsMesh,
   proposalsReview,
-  pythonRoundtrip,
-  pythonWebLiveCollab,
   layoutAllSlides,
 ];

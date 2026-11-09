@@ -5,7 +5,7 @@ description: Work with Visio diagrams using the VSDX packages built from source
 
 VSDX support is available from source. [Try the diagram editor](https://demo.betteroffice.dev/vsdx)
 or build the packages from the repository. The packages are not published on
-npm, crates.io, or PyPI.
+npm or crates.io.
 
 ## Rust packages
 
@@ -48,14 +48,5 @@ else a registered Arial or `sans-serif` face, else Carlito Regular, without
 small caps, superscripts or subscripts,
 and draws images other than JPEG and PNG as dashed placeholders counted in
 `skipped_images`.
-
-## Python
-
-The Python binding reads pages, shapes, cells, and connections. Build it from a
-repository checkout:
-
-```bash
-python -m pip install ./bindings/python-vsdx
-```
 
 VSDX files are not supported by the redaction CLI.

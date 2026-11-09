@@ -13,7 +13,6 @@
   <a href="./LICENSE"><img src="https://betteroffice.dev/api/badge?label=license&amp;message=Apache-2.0&amp;color=4ade80" alt="license"></a>
   <a href="https://www.npmjs.com/org/betteroffice"><img src="https://betteroffice.dev/api/npm-downloads-badge" alt="npm downloads: 484,591/month (snapshot 2026-10-27)"></a>
   <a href="https://crates.io/search?q=betteroffice"><img src="https://betteroffice.dev/api/crates-downloads-badge" alt="crates.io downloads: 203,294/month (snapshot 2026-10-27)"></a>
-  <a href="https://pypi.org/project/betteroffice-xlsx/"><img src="https://betteroffice.dev/api/pypi-downloads-badge" alt="PyPI downloads: 2,063/month (snapshot 2026-10-27)"></a>
   <a href="https://betteroffice.dev"><img src="https://betteroffice.dev/api/badge?label=&amp;message=betteroffice.dev&amp;color=0a0a0a" alt="betteroffice.dev"></a>
   <a href="https://betteroffice.dev/blog"><img src="https://betteroffice.dev/api/badge?label=&amp;message=blog&amp;color=0a0a0a" alt="BetterOffice blog"></a>
 </p>
@@ -36,8 +35,8 @@
   proposals as a single step.
 
 - **Embed or automate.** Drop React editors into your app, build on the
-  framework-free JavaScript cores, or use Rust and Python APIs for headless
-  processing and agent workflows.
+  framework-free JavaScript cores, or use Rust APIs for headless processing
+  and agent workflows.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
@@ -47,13 +46,13 @@
 
 ## Packages
 
-| | Rust | Core | Core (native) | React | Python |
-|---|---|---|---|---|---|
-| DOCX | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | [`docx`](https://www.npmjs.com/package/@betteroffice/docx) | [`docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | [`docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) |
-| XLSX | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | [`xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | [`xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [`xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) | [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) |
-| PPTX | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | [`pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | [`pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | [`pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) |
+| | Rust | Core | Core (native) | React |
+|---|---|---|---|---|
+| DOCX | [`betteroffice-docx`](https://crates.io/crates/betteroffice-docx) | [`docx`](https://www.npmjs.com/package/@betteroffice/docx) | [`docx-native`](https://www.npmjs.com/package/@betteroffice/docx-native) | [`docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) |
+| XLSX | [`betteroffice-xlsx`](https://crates.io/crates/betteroffice-xlsx) | [`xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) | [`xlsx-native`](https://www.npmjs.com/package/@betteroffice/xlsx-native) | [`xlsx-react`](https://www.npmjs.com/package/@betteroffice/xlsx-react) |
+| PPTX | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | [`pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | [`pptx-native`](https://www.npmjs.com/package/@betteroffice/pptx-native) | [`pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) |
 
-**Rust:** typed engine API. **Core:** `@betteroffice/<format>`, the framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor. **Python:** read, edit, render, save.
+**Rust:** typed engine API. **Core:** `@betteroffice/<format>`, the framework-free core through WebAssembly. **Core (native):** the same engine as prebuilt native bindings for Node.js, Bun and Deno on macOS, Linux and Windows. **React:** drop-in editor.
 
 More packages:
 
@@ -63,8 +62,7 @@ More packages:
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
-[crates.io](https://docs.betteroffice.dev/docs/rust),
-[PyPI](https://docs.betteroffice.dev/docs/python).
+[crates.io](https://docs.betteroffice.dev/docs/rust).
 
 Upgrading from 0.4? See [Migrating to 0.5](https://docs.betteroffice.dev/docs/migrating-to-0-5).
 
@@ -89,12 +87,11 @@ manager [`@betteroffice/fonts`](https://www.npmjs.com/package/@betteroffice/font
 installed package files the first time a document needs it; nothing is downloaded. Reading package
 files needs Node.js 20.16 or 22.3 and later, Bun or Deno.
 
-**Native bindings, Rust and Python.** The Rust format crates bundle all three packs by default and
+**Native bindings and Rust.** The Rust format crates bundle all three packs by default and
 resolve faces in the same order, with nothing fetched; see the
 [Rust guide](https://docs.betteroffice.dev/docs/rust) to leave packs out or load them from your own
 location. `@betteroffice/pptx-native` and `@betteroffice/xlsx-native` install the npm packs and read
-each face from disk; `@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`. For Python, register
-the faces a document needs before rendering.
+each face from disk; `@betteroffice/docx-native` uses the same font manager as `@betteroffice/docx`.
 
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
@@ -193,7 +190,7 @@ Generic: shell and Python with python-docx, openpyxl and python-pptx, no network
 
 - `crates/`: the Rust engines
 - `packages/`: the TypeScript editor packages
-- `bindings/`: the Python bindings
+- `bindings/`: font decoder fixtures shared by the format packages' tests
 - `e2e/`: browser tests, corpus scenarios, and the shared test harness
 - `apps/web`: [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
 - `apps/demo`: editor playground

@@ -1,4 +1,4 @@
-import { CRATES, DOCS, NPM, OPENOOXML, PYPI, REPO, SITE, SITE_DESCRIPTION } from "../app/content";
+import { CRATES, DOCS, NPM, OPENOOXML, REPO, SITE, SITE_DESCRIPTION } from "../app/content";
 import { type CachedCount, type Registry } from "./download-stats";
 import { readDownloads } from "./stats-cache";
 
@@ -7,12 +7,11 @@ export type DownloadCounts = Partial<Record<Registry, CachedCount | null>>;
 const REGISTRIES: { key: Registry; name: string; url: string }[] = [
   { key: "npm", name: "npm", url: NPM },
   { key: "crates", name: "crates.io", url: CRATES },
-  { key: "pypi", name: "PyPI", url: PYPI },
 ];
 
 export async function liveCounts(read: (registry: Registry) => Promise<CachedCount | null> = readDownloads): Promise<DownloadCounts> {
-  const [npm, crates, pypi] = await Promise.all(REGISTRIES.map(({ key }) => read(key)));
-  return { npm, crates, pypi };
+  const [npm, crates] = await Promise.all(REGISTRIES.map(({ key }) => read(key)));
+  return { npm, crates };
 }
 
 const counter = (name: string, description: string, count: number, service?: { name: string; url: string }) => ({
@@ -62,7 +61,7 @@ export function softwareJsonLd(counts: DownloadCounts = {}) {
       name: "OpenOOXML",
       url: OPENOOXML,
     },
-    sameAs: [REPO, NPM, CRATES, PYPI, OPENOOXML],
+    sameAs: [REPO, NPM, CRATES, OPENOOXML],
     ...downloadStatistics(counts),
   };
 }

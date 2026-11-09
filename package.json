@@ -75,7 +75,7 @@
     "cf-typegen": "bun run --filter './apps/web' cf-typegen",
     "build:docx-wasm": "bun scripts/build-docx-wasm.ts",
     "build:docx": "bun run --filter '@betteroffice/docx-i18n' build && bun run --filter '@betteroffice/docx' build && bun run --filter '@betteroffice/docx-react' build",
-    "test:e2e:harness": "bun test e2e/harness.test.ts e2e/suite.test.ts e2e/report.test.ts e2e/assertions.test.ts",
+    "test:e2e:harness": "bun test e2e/harness.test.ts e2e/suite.test.ts e2e/report.test.ts",
     "pretest:e2e:browser": "bun run build:packages && bun run --filter @betteroffice/desktop build",
     "test:e2e:browser": "playwright test --config e2e/browser/playwright.config.ts",
     "typecheck:e2e": "tsc -p e2e/tsconfig.json"

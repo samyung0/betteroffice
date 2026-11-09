@@ -32,7 +32,6 @@ export function recorded(run = scenario()): RecordedRun {
       cpus: 4,
       bun: '1.4.2',
       rustc: 'fixture',
-      python: '3.13',
     },
     scenarios: [run],
   };

@@ -831,8 +831,8 @@ text, replace speaker notes, and set a top-level shape's rectangle, fill or
 outline. Fields and soft line breaks are never replaced or deleted. Ids and
 versions belong to one open session. `PptxEditor` exposes the same
 `readContent`, `findText`, `validateEdits` and `applyEdits` on its editor API,
-flushing pending input first. The Rust `Presentation` and the Python binding
-take the same requests. A batch refuses when saving could turn a field into
+flushing pending input first. The Rust `Presentation` takes the same
+requests. A batch refuses when saving could turn a field into
 plain text, which it rules out only while every field is non-empty and sits in
 its paragraph's unchanged leading or trailing text; a paragraph's alignment and
 text cannot change in one batch, and slides, shapes and paragraphs are neither
@@ -1027,7 +1027,7 @@ the returned version; a later edit may supersede it before it is painted.
 - The map carries its own `schemaVersion` (1): additive fields keep it, and a
   change existing readers would misread bumps it.
 
-Rust `EngineSession` also exports page maps; Python exports do not.
+Rust `EngineSession` also exports page maps.
 
 ## Export XLSX content with anchors
 
@@ -1146,8 +1146,8 @@ stopping at the first. `granularity` reports differences by Unicode word
 bounds. The result is reopened and checked against both inputs before it is
 returned: accepting every change gives the revised text and formatting,
 rejecting every change gives the original. Review in BetterOffice is tested;
-Word validation is reported separately. Native Rust and Python comparison is
-not available.
+Word validation is reported separately. Native Rust comparison is not
+available.
 
 ## Operation profiles
 

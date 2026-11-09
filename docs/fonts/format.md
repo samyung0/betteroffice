@@ -61,7 +61,7 @@ font bytes.
 
 The published `betteroffice-fonts` Rust crate owns decoding. Every engine links
 it and exposes `decodeFontFace(bytes, codec, dict?, maxOutput?)` in wasm and
-Node bindings. Python exposes `decode_font_face`; Rust facades re-export the
+Node bindings. Rust facades re-export the
 crate as `fonts`. Engine calls return owned font bytes and the optional woff2t
 payload. The standalone wasm decoder links the same crate. Its vendored C
 decoder lives at `crates/betteroffice-fonts/vendor/zstd`.

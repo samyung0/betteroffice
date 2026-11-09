@@ -9,9 +9,8 @@ describe("llms.txt download line", () => {
     const line = downloadsLine({
       npm: { downloads: 484591, at: AT },
       crates: { downloads: 203294, at: AT - 86_400_000 },
-      pypi: { downloads: 2063, at: AT },
     });
-    expect(line).toBe("Downloads in the last 30 days: npm 484,591, crates.io 203,294, PyPI 2,063 (as of 2026-10-27).");
+    expect(line).toBe("Downloads in the last 30 days: npm 484,591, crates.io 203,294 (as of 2026-10-27).");
   });
 
   test("names only the registries that have a count", () => {
@@ -20,7 +19,7 @@ describe("llms.txt download line", () => {
 
   test("is empty without any count, and then llms.txt is unchanged", () => {
     expect(downloadsLine({})).toBe("");
-    expect(downloadsLine({ npm: null, crates: null, pypi: null })).toBe("");
+    expect(downloadsLine({ npm: null, crates: null })).toBe("");
     expect(withDownloads(BASE, "")).toBe(BASE);
   });
 
@@ -37,8 +36,8 @@ describe("llms.txt download line", () => {
     expect(await liveDownloadsLine(async () => null)).toBe("");
   });
 
-  test("reads the three cached counts", async () => {
-    const stored = { npm: { downloads: 10, at: AT }, crates: { downloads: 20, at: AT }, pypi: { downloads: 30, at: AT } };
-    expect(await liveDownloadsLine(async (registry) => stored[registry])).toBe("Downloads in the last 30 days: npm 10, crates.io 20, PyPI 30 (as of 2026-10-27).");
+  test("reads the two cached counts", async () => {
+    const stored = { npm: { downloads: 10, at: AT }, crates: { downloads: 20, at: AT } };
+    expect(await liveDownloadsLine(async (registry) => stored[registry])).toBe("Downloads in the last 30 days: npm 10, crates.io 20 (as of 2026-10-27).");
   });
 });

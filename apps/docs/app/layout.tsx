@@ -11,7 +11,7 @@ export const metadata: Metadata = {
     template: `%s | ${appName}`,
   },
   description:
-    'Install and use BetterOffice editors and APIs for React, JavaScript, Rust, and Python.',
+    'Install and use BetterOffice editors and APIs for React, JavaScript, and Rust.',
   openGraph: {
     type: 'website',
     siteName: `${appName} documentation`,

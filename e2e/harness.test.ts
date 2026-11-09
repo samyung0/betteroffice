@@ -48,7 +48,7 @@ describe('comparison contracts', () => {
     expect(() =>
       regressions(
         before,
-        recorded({ ...scenario(), status: 'skipped', reason: 'Python missing' })
+        recorded({ ...scenario(), status: 'skipped', reason: 'requirement missing' })
       )
     ).toThrow('incomplete');
     expect(() =>

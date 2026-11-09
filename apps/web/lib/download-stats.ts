@@ -1,10 +1,8 @@
 import { officialCrateNames, rollingDownloads } from "./crates-downloads";
 import { officialPackageNames } from "./downloads";
-import { PYPI_PACKAGES } from "./pypi-downloads";
 
 export const KV_KEYS = {
   npm: "npm-downloads",
-  pypi: "pypi-downloads",
   crates: "crates-downloads",
 } as const;
 
@@ -123,21 +121,6 @@ async function npmDownloads(pacer: Pacer, now: number): Promise<number> {
   return total;
 }
 
-/** pypistats has no record of a package nobody has downloaded yet; that is zero. */
-async function pypiDownloads(pacer: Pacer): Promise<number> {
-  let total = 0;
-  for (const name of PYPI_PACKAGES) {
-    const response = await request(
-      pacer,
-      `https://pypistats.org/api/packages/${encodeURIComponent(name)}/recent`,
-    );
-    if (response.status === 404) continue;
-    const body = (await response.json()) as { data?: { last_month?: unknown } };
-    total += count(body.data?.last_month, name);
-  }
-  return total;
-}
-
 async function cratesDownloads(pacer: Pacer, now: number): Promise<number> {
   const search = await request(pacer, "https://crates.io/api/v1/crates?page=1&per_page=100&q=betteroffice");
   if (!search.ok) throw new Error(`crates.io search failed: ${search.status}`);
@@ -180,7 +163,6 @@ export async function refreshDownloadStats(
   };
   const collectors: Record<Registry, () => Promise<number>> = {
     npm: () => npmDownloads(pacer, now()),
-    pypi: () => pypiDownloads(pacer),
     crates: () => cratesDownloads(pacer, now()),
   };
 

@@ -51,7 +51,6 @@ defineSuite('xlsx', ['passing', 'failing'].map((name) => ({
             BETTEROFFICE_E2E_OUTPUT: dir,
             BETTEROFFICE_E2E_ALLOW_SKIP: '0',
             GIT_DIR: join(dir, 'no-repository'),
-            BETTEROFFICE_E2E_VENV: join(dir, 'no-venv'),
             GITHUB_STEP_SUMMARY: '',
           },
         }

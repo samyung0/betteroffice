@@ -251,10 +251,3 @@ export function shapeText(shape: ShapeSnapshot): string {
 export function firstParagraphText(story: StorySnapshot): string {
   return story.paragraphs[0].runs.map((run) => run.text).join('');
 }
-
-/** Paragraph texts joined the way the python binding reports a story. */
-export function storyLines(story: StorySnapshot): string {
-  return story.paragraphs
-    .map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
-    .join('\n');
-}

@@ -1,29 +1,28 @@
 ---
 title: Packages
-description: What to install from npm, crates.io, and PyPI, and what each package does
+description: What to install from npm and crates.io, and what each package does
 ---
 
-BetterOffice provides DOCX, XLSX, and PPTX packages for JavaScript, Rust, and
-Python. Choose a runtime below, then select the packages for your file format.
+BetterOffice provides DOCX, XLSX, and PPTX packages for JavaScript and Rust.
+Choose a runtime below, then select the packages for your file format.
 
 | Runtime | Install | Guide |
 | --- | --- | --- |
 | Browser, React, or Node | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
 | Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
-| Python | `pip install betteroffice-docx` | [Python](./python) |
 
 ## Packages by format
 
-| Format | npm | crates.io | PyPI |
-| --- | --- | --- | --- |
-| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | `betteroffice-docx` |
-| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
-| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
+| Format | npm | crates.io |
+| --- | --- | --- |
+| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` |
+| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` |
 
-All three registries carry DOCX, XLSX, and PPTX. On npm, the core, React, and
+Both registries carry DOCX, XLSX, and PPTX. On npm, the core, React, and
 locale packages of all three formats are released together under one version.
-The font packages, the agent tools, the Rust crates, and the Python packages
-have their own versions; use the registry links for current releases.
+The font packages, the agent tools, and the Rust crates have their own
+versions; use the registry links for current releases.
 
 [VSDX](./vsdx) is available from source with a browser demo. Its npm packages and
 Rust crates are not published.
@@ -73,7 +72,6 @@ See the language guides for font setup in other formats and runtimes.
   and hit-testing.
 - **Native Rust:** use a `betteroffice-docx`, `betteroffice-xlsx`, or
   `betteroffice-pptx` crate.
-- **Python scripts and services:** use the corresponding package on PyPI.
 - **Individual engine components:** use the parsing, editing, or rendering crates
   listed in the [Rust guide](./rust#the-layers).
 

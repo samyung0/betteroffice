@@ -336,14 +336,14 @@ License: MIT (`crates/office-service/starters/NOTICE.md`).
 `crates/betteroffice-fonts/vendor/zstd/zstddeclib.c` is the decompression-only amalgamation generated from
 `facebook/zstd` v1.5.7, https://github.com/facebook/zstd/releases/tag/v1.5.7.
 It is compiled into the `betteroffice-fonts` crate for native targets, so the
-native engines, the native npm bindings and the Python wheels link it; wasm
+native engines and the native npm bindings link it; wasm
 builds decode zstd with `ruzstd` instead.
 
 Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 
 License: BSD-3-Clause (`crates/betteroffice-fonts/vendor/zstd/LICENSE`). The same
 upstream notice is included under `packages/fonts/LICENSES/BSD-3-Clause-Zstandard.txt`,
-in each native platform package and in each Python wheel.
+and in each native platform package.
 
 ---
 
@@ -387,5 +387,5 @@ Copyright (c) 2025 by Nico Burns.
 
 License: MIT. The unmodified upstream licence is included under
 `packages/fonts/LICENSES/MIT-wuff.txt`, in the docx, pptx, xlsx and vsdx packages,
-in each native platform package and in each Python wheel, which link it through
+and in each native platform package, which link it through
 `betteroffice-fonts`.

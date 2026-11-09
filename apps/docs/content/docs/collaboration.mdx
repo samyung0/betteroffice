@@ -125,7 +125,7 @@ the workbook:
 In JavaScript, `applyOps` throws `structural operations are unavailable in
 collaborative mode`, or `collaborative sheets can only be added at the end of the
 workbook` for a sheet added elsewhere, and editor sessions report the command as
-refused with reason `unsupported`. Python raises `CollaborativeStructureError`.
+refused with reason `unsupported`.
 Rust returns `Error::CollaborativeStructureOperation` or
 `Error::CollaborativeSheetPosition`. A peer update that makes one of these
 changes, for example from a copy of the workbook edited outside the session, is

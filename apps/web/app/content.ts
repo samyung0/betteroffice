@@ -1,5 +1,5 @@
-import { CRATES, DOCS, NPM, PYPI, REPO } from "../../../shared/sites";
-export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, EVALS_SITE, NPM, OPENOOXML, PYPI, RELEASES, REPO, SITE } from "../../../shared/sites";
+import { CRATES, DOCS, NPM, REPO } from "../../../shared/sites";
+export { BENCHMARKS, BENCHMARKS_SITE, CRATES, DEMO, DOCS, EVALS_SITE, NPM, OPENOOXML, RELEASES, REPO, SITE } from "../../../shared/sites";
 
 export const SITE_TITLE = "BetterOffice — DOCX, XLSX and PPTX editors";
 export const SITE_DESCRIPTION =
@@ -32,14 +32,6 @@ export const ECOSYSTEMS = [
     url: CRATES,
     docs: `${DOCS}/docs/rust`,
     desc: "The same engines natively, for servers, CLIs and agent pipelines.",
-  },
-  {
-    name: "Python",
-    registry: "PyPI",
-    install: "pip install betteroffice-xlsx",
-    url: PYPI,
-    docs: `${DOCS}/docs/python`,
-    desc: "Published DOCX, XLSX and PPTX packages, with installation and examples in the Python guide.",
   },
 ];
 
@@ -161,7 +153,7 @@ export const CAPABILITIES = [
   },
   {
     name: "Embed or automate",
-    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust APIs for headless processing and agent workflows.",
   },
   {
     name: "Open source and self-hostable",

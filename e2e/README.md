@@ -1,8 +1,8 @@
 # Editor end-to-end tests and corpus integration scenarios
 
 This suite has two layers. Chromium drives the production DOCX, XLSX, and PPTX
-React editors through the browser-capable desktop app. Bun and Python run a
-larger set of engine integration scenarios against pinned corpus documents.
+React editors through the browser-capable desktop app. Bun runs a larger set
+of engine integration scenarios against pinned corpus documents.
 
 ## Browser tests
 
@@ -50,35 +50,26 @@ across the full corpus remain separate coverage areas. The existing
 ## Corpus scenarios
 
 ```bash
-uv tool install maturin==1.14.1
-bun e2e/python-env.ts
 bun run test:e2e
 bun run test:e2e:harness
 bun run typecheck:e2e
 ```
 
-The Python bootstrap uses Python 3.13 and locked release builds of all three
-bindings. The source fingerprint prevents a venv built from a different checkout
-from silently satisfying cross-SDK tests. `BETTEROFFICE_E2E_VENV` overrides the
-default `~/.cache/betteroffice/e2e-venv`.
-
-There are 37 scenario definitions, each run against three pinned documents of its
-format (111 cases, including 18 Python cases). `corpus.ts` records the document
+There are 31 scenario definitions, each run against three pinned documents of its
+format (93 cases). `corpus.ts` records the document
 identity, byte count, and SHA256; the asset cache verifies downloaded and cached
 bytes. Set `QUALITY_ASSET_CACHE` to override `~/.cache/betteroffice/e2e-assets`.
 The first run needs network access to fetch the samples.
 
 The corpus suite exercises editing, formulas, formatting, tables, pagination,
-slides, proposals, save/reopen, multi-replica updates, and cross-SDK behavior.
+slides, proposals, save/reopen, and multi-replica updates.
 Its `web` actor names mean the WASM SDK running in Bun. Updates are exchanged
 in-process; these scenarios do not exercise browser events or a relay. XLSX
 `incremental-commits` measures repeated engine commits of string prefixes; the
-browser test separately exercises draft typing and commit. DOCX native/WASM
-layout parity compares page dimensions and fragment placement from the same
-WASM-measured kernel; it does not claim independent native text measurement.
+browser test separately exercises draft typing and commit.
 
-Missing Python bindings fail the standard run and CI. For exploratory local
-runs only, `BETTEROFFICE_E2E_ALLOW_SKIP=1 bun run test:e2e` explicitly permits
+A scenario whose requirement is missing fails the standard run and CI. For
+exploratory local runs only, `BETTEROFFICE_E2E_ALLOW_SKIP=1 bun run test:e2e` explicitly permits
 reported skips. Such a run cannot record or compare baselines. Ordinary
 `bun run test` skips the expensive corpus cases and runs the harness tests.
 
@@ -124,8 +115,8 @@ A strict performance gate needs repeated base/PR runs on a controlled runner.
 
 `.github/workflows/e2e.yml` runs independent jobs on every PR:
 
-- **Corpus scenarios** checks the harness, builds Python and WASM, executes all
-  111 required cases, and uploads results, including partial failures.
+- **Corpus scenarios** checks the harness, builds WASM, executes all 93
+  required cases, and uploads results, including partial failures.
 - **Browser editors (1/2)** and **(2/2)** each install Chromium with its Linux
   dependencies, build the production app, start the local servers, run their
   Playwright shard of both browser suites, and upload the report and failure traces.

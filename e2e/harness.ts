@@ -2,7 +2,6 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Format } from './corpus';
-import { pythonWithBindings } from './python-env';
 
 export type StageProfile = Record<string, number>;
 export type Detail = Record<string, number | string | boolean>;
@@ -55,7 +54,6 @@ export interface Environment {
   cpus: number;
   bun: string;
   rustc: string;
-  python: string;
 }
 
 export interface RecordedRun {
@@ -342,7 +340,6 @@ export function assertComparable(
     'cpus',
     'bun',
     'rustc',
-    'python',
   ] as const) {
     if (previous.environment[field] !== current.environment[field])
       throw new Error('incomparable environment: ' + field);
@@ -472,7 +469,7 @@ export function parseRecordedRun(value: unknown): RecordedRun {
     fail('run metadata');
   if (
     !object(run.environment) ||
-    !['platform', 'arch', 'cpu', 'bun', 'rustc', 'python'].every(
+    !['platform', 'arch', 'cpu', 'bun', 'rustc'].every(
       (key) => typeof run.environment[key] === 'string'
     ) ||
     !Number.isInteger(run.environment.cpus) ||
@@ -586,18 +583,12 @@ export function environment(): Environment {
 
 function probeEnvironment(): Environment {
   const rustc = Bun.spawnSync(['rustc', '--version']);
-  const ready = pythonWithBindings();
-  const python =
-    'python' in ready
-      ? Bun.spawnSync([ready.python, '--version']).stdout.toString().trim()
-      : 'unavailable';
   return {
     platform: process.platform,
     arch: process.arch,
     cpu: os.cpus()[0]?.model ?? 'unknown',
     cpus: os.cpus().length,
     bun: Bun.version,
-    python,
     rustc: rustc.success ? rustc.stdout.toString().trim() : 'unavailable',
   };
 }
