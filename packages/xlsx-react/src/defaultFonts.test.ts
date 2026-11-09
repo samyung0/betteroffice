@@ -430,11 +430,11 @@ test('a live painter retries through its own decoder when the shared worker stop
   second.dispose();
 });
 
-test('the in-thread editor lets the font manager decode with its own decoder', async () => {
+test('the in-thread editor lets the font manager decode with its own decoder and keep no decoded face', async () => {
   browser();
   const { create } = provider();
   await createDefaultFontPainter(null, () => {}).load(display({ family: 'Calibri' }));
-  expect(create).toHaveBeenCalledWith(undefined, undefined);
+  expect(create).toHaveBeenCalledWith(undefined, { decoder: undefined, retain: false });
 });
 
 test('no painter work happens before a worker decoder exists', async () => {

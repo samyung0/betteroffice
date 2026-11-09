@@ -71,7 +71,7 @@ export function createDefaultFontPainter(
     try {
       if (!provider) {
         const loading = xlsxDefaultFontManager.load().then((fonts) => ({
-          fonts, source: fonts.createFontProvider(undefined, decoder ? { decoder, retain: false } : undefined),
+          fonts, source: fonts.createFontProvider(undefined, { decoder: decoder ?? undefined, retain: false }),
         }));
         provider = loading;
         void loading.catch(() => { if (provider === loading) provider = undefined; });
