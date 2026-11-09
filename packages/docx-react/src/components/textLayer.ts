@@ -56,6 +56,9 @@ export function textLayerText(
   story: TextStory = storyOf(range.startContainer)
 ): string {
   const pieces: Piece[] = [];
+  // Every selected page's mirror and the part of the selection on it, before
+  // collecting, so a drawing's paragraph text can be looked for on any of them.
+  const mirrors: Array<[HTMLElement, Range | null]> = [];
   for (const pageEl of root.querySelectorAll<HTMLElement>(PAGE)) {
     if (!range.intersectsNode(pageEl)) continue;
     const local = pageEl.ownerDocument.createRange();
@@ -72,7 +75,7 @@ export function textLayerText(
       }
     }
     if (!pageEl.classList.contains(MIRROR_TEXT_PAGE_CLASS)) {
-      collect(pieces, pageEl, whole ? null : local, story);
+      mirrors.push([pageEl, whole ? null : local]);
       continue;
     }
     const page = pages.find((page) => String(page.pageIndex) === pageEl.dataset.pageIndex);
@@ -85,9 +88,44 @@ export function textLayerText(
           textOffset(pageEl, local.startContainer, local.startOffset),
           textOffset(pageEl, local.endContainer, local.endOffset)
         );
-    collect(pieces, full, fullRange, story);
+    mirrors.push([full, fullRange]);
   }
+  const lone = loneDrawingBlocks(mirrors.map(([mirror]) => mirror));
+  for (const [mirror, part] of mirrors) collect(pieces, mirror, part, story, null, null, 'body', lone);
   return joined(pieces);
+}
+
+/** A chart block, or a block holding a drawn shape (a text box) and no text. */
+function drawingBlock(el: HTMLElement): boolean {
+  return (
+    el.classList.contains('layout-run-chart') ||
+    (el.querySelector('.layout-run-shape') !== null && el.querySelector(RUN) === null)
+  );
+}
+
+/**
+ * Chart and text box blocks that stand for a whole paragraph: no other block
+ * (a part of their paragraph holding its text) covers their position. One
+ * copies as the empty line its paragraph is, as a lone picture or an empty
+ * paragraph does, in View as in Edit (Epo, Q732).
+ */
+function loneDrawingBlocks(mirrors: readonly HTMLElement[]): Set<Element> {
+  const drawings: Array<[HTMLElement, number]> = [];
+  const others: Array<[number, number]> = [];
+  for (const mirror of mirrors) {
+    for (const el of mirror.querySelectorAll<HTMLElement>(BLOCK)) {
+      const start = Number(el.dataset.docStart);
+      const end = Number(el.dataset.docEnd);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (drawingBlock(el)) drawings.push([el, start]);
+      else others.push([start, end]);
+    }
+  }
+  return new Set(
+    drawings
+      .filter(([, at]) => !others.some(([start, end]) => start <= at && at < end))
+      .map(([el]) => el)
+  );
 }
 
 function joined(pieces: Piece[]): string {
@@ -108,10 +146,30 @@ function collect(
   story: TextStory,
   block: HTMLElement | null = null,
   cell: HTMLElement | null = null,
-  current: TextStory = 'body'
+  current: TextStory = 'body',
+  /** Drawing blocks that copy as their paragraph's empty line (`loneDrawingBlocks`). */
+  lone: ReadonlySet<Element> = new Set()
 ): void {
   for (let child = el.firstElementChild; child; child = child.nextElementSibling) {
-    if (!(child instanceof HTMLElement) || leftOut(child)) continue;
+    if (!(child instanceof HTMLElement)) continue;
+    if (lone.has(child)) {
+      if (current === story && (!range || range.intersectsNode(child))) {
+        pieces.push({
+          run: child,
+          text: '',
+          cut: false,
+          tabsBefore: 0,
+          breaksBefore: 0,
+          tabsAfter: 0,
+          breaksAfter: 0,
+          listMarker: false,
+          blockId: child.getAttribute('data-block-id'),
+          cell,
+        });
+      }
+      continue;
+    }
+    if (leftOut(child)) continue;
     const childStory = noteStory(child) ?? current;
     // other notes are skipped whole; body containers hold the notes
     if (childStory !== 'body' && childStory !== story) continue;
@@ -142,7 +200,8 @@ function collect(
       story,
       child.hasAttribute('data-block-id') ? child : block,
       role === 'cell' || role === 'columnheader' ? child : cell,
-      childStory
+      childStory,
+      lone
     );
   }
 }

@@ -496,6 +496,18 @@ describe('text layer over a laid-out document', () => {
     expect(await editCopied(ownLineChart)).toBe('Lead\nAa\nBb\nCc');
   }, 30_000);
 
+  // A chart or text box alone in its paragraph copies as that paragraph's
+  // empty line, as a lone picture or an empty paragraph does (Q732).
+  for (const [name, drawing] of [['chart', chart], ['text box', shape]] as const) {
+    const lone = p(t('Lead')) + p(drawing) + p(t('Cc'));
+    test(`view mode copies a ${name} alone in its paragraph as an empty line`, async () => {
+      expect(await copied(lone)).toBe('Lead\n\nCc');
+    }, 30_000);
+    test(`edit mode copies a ${name} alone in its paragraph as an empty line`, async () => {
+      expect(await editCopied(lone)).toBe('Lead\n\nCc');
+    }, 30_000);
+  }
+
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');
     const text = await copied(
