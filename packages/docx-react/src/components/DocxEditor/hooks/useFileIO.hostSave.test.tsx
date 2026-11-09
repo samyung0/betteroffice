@@ -73,6 +73,7 @@ function setup(
       disableFindReplaceShortcuts: true,
       showFileOpen: false,
       readOnly: false,
+      showHiddenText: false,
       findReplace: {} as never,
       hyperlinkDialog: {} as never,
       tableSelection: { state: { tableIndex: null } } as never,

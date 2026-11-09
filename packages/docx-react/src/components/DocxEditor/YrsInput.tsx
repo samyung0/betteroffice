@@ -107,6 +107,8 @@ export interface YrsInputProps {
   story?: string;
   isSuggesting?: boolean;
   author?: string;
+  /** Whether the layout shows hidden text, which copy follows. */
+  showHiddenText?: boolean;
   inputPositionMap(story?: string): YrsInputPositionMap | null;
   displayPositionToLoc(position: number, story?: string): YrsLoc | null;
   resolveDisplayTarget?(position: number): { story: string; displayPosition: number } | null;
@@ -239,6 +241,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     story = 'body',
     isSuggesting = false,
     author = 'User',
+    showHiddenText = false,
     inputPositionMap,
     displayPositionToLoc,
     resolveDisplayTarget,
@@ -1255,9 +1258,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   const clipboardSelection = useCallback((): YrsSelectionText | null => {
     if (!session || composingRef.current || compositionPendingRef.current) return null;
     if (inputOperationQueueRef.current?.hasPending()) return null;
-    const selected = yrsSelectionText(session);
+    const selected = yrsSelectionText(session, showHiddenText);
     return selected.text ? selected : null;
-  }, [session]);
+  }, [session, showHiddenText]);
   const clipboardSelectionRef = useRef(clipboardSelection);
   clipboardSelectionRef.current = clipboardSelection;
 

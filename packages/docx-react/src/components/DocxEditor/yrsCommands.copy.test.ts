@@ -49,7 +49,7 @@ function copy(session: YrsSession, [from, start]: [number, number], [to, end]: [
     { story: 'body', paraId: paragraphs[from]!.paraId, offset: start },
     { story: 'body', paraId: paragraphs[to]!.paraId, offset: end }
   );
-  return yrsSelectionText(session);
+  return yrsSelectionText(session, false);
 }
 
 beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));

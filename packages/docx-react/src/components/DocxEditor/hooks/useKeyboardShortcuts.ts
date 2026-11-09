@@ -29,6 +29,7 @@ export function useKeyboardShortcuts({
   hyperlinkDialog,
   tableSelection,
   readOnly,
+  showHiddenText,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   containerRef?: React.RefObject<HTMLElement | null>;
@@ -40,6 +41,7 @@ export function useKeyboardShortcuts({
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
   tableSelection: ReturnType<typeof useTableSelection>;
   readOnly: boolean;
+  showHiddenText: boolean;
 }) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -86,7 +88,7 @@ export function useKeyboardShortcuts({
           e.preventDefault();
           const session = pagedEditorRef.current?.getYrsSession();
           if (session) {
-            const selectedText = yrsSelectedText(session);
+            const selectedText = yrsSelectedText(session, showHiddenText);
             const existingLink = yrsHyperlinkAtSelection(session);
             if (existingLink) {
               hyperlinkDialog.openEdit({
@@ -117,5 +119,6 @@ export function useKeyboardShortcuts({
     hyperlinkDialog,
     tableSelection,
     readOnly,
+    showHiddenText,
   ]);
 }

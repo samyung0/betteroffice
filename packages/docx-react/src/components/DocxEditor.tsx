@@ -1210,6 +1210,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     hyperlinkDialog,
     tableSelection,
     readOnly,
+    showHiddenText,
   });
 
   // Handle table insert from toolbar
@@ -1360,6 +1361,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     i18n,
     partEditOpen: partEditTarget !== null,
     readOnly,
+    showHiddenText,
     onAddComment: useCallback(
       ({ from, to, yPos }: { from: number; to: number; yPos: number | null }) => {
         setCommentSelectionRange({ from, to });
@@ -1438,7 +1440,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onEditAction: (action) => void handleContextMenuAction(action),
       onFindReplace: () => {
         const session = pagedEditorRef.current?.getYrsSession();
-        openReplace(session ? yrsSelectedText(session) : '');
+        openReplace(session ? yrsSelectedText(session, showHiddenText) : '');
       },
       onAddComment: () => void handleContextMenuAction('addComment'),
       onInsertImageFile: insertImageFile,
@@ -1455,6 +1457,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       handleContextMenuAction,
       insertImageFile,
       openReplace,
+      showHiddenText,
       showCommentsSidebar,
       setShowCommentsSidebar,
       showRuler,

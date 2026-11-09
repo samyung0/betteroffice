@@ -1897,6 +1897,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}
           author={author}
+          showHiddenText={showHiddenText}
           inputPositionMap={yrsInputPositionMap}
           displayPositionToLoc={yrsDisplayPositionToLoc}
           resolveDisplayTarget={resolveYrsDisplayTarget}

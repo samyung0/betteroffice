@@ -29,6 +29,7 @@ function options(
     partEditOpen,
     onAddComment,
     readOnly,
+    showHiddenText: false,
   };
 }
 

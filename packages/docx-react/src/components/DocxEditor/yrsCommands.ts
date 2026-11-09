@@ -283,15 +283,17 @@ function anchoredDrawing(data: Record<string, unknown>, chart: boolean): boolean
  * their own (#1899's bridge rule): a floating chart, and a paragraph's only
  * inline chart or text box when it is a text box after visible text. Every
  * other inline chart or text box shares its line, and copy gives what the page
- * shows (Epo, Q711).
+ * shows (Epo, Q711). Hidden text is not on the page unless it is shown.
  */
 function ownLineDrawings(
   segments: readonly YrsStorySegment[],
   start: number,
-  end: number
+  end: number,
+  showHiddenText: boolean
 ): Set<YrsStorySegment> {
   const own = new Set<YrsStorySegment>();
-  const visible = (text: unknown) => typeof text === 'string' && /\S/.test(text);
+  const visible = (segment: YrsStorySegment, text: unknown) =>
+    (showHiddenText || !segment.attributes.hidden) && typeof text === 'string' && /\S/.test(text);
   let offset = 0;
   let paragraphStart = 0;
   let inline = 0;
@@ -307,9 +309,9 @@ function ownLineDrawings(
       inline = 0;
       visibleText = false;
     } else if (segment.kind === 'text') {
-      visibleText ||= visible(segment.text);
+      visibleText ||= visible(segment, segment.text);
     } else if (segment.embedKind === 'field') {
-      visibleText ||= visible(segment.payload.displayText);
+      visibleText ||= visible(segment, segment.payload.displayText);
     } else if (segment.embedKind === 'chart' || segment.embedKind === 'shape') {
       const chart = segment.embedKind === 'chart';
       const data = drawingData(segment.payload, chart ? 'chartJson' : 'shapeJson');
@@ -333,16 +335,17 @@ function ownLineDrawings(
  * holding anything
  * else plain text cannot carry (a table, image, field, note reference, content
  * control, page break…) is not `plain`. Bookmarks are not in the text, so a
- * selection over one stays plain.
+ * selection over one stays plain. `showHiddenText` is the layout's: whether
+ * hidden text is on the page.
  */
-export function yrsSelectionText(session: YrsSession): YrsSelectionText {
+export function yrsSelectionText(session: YrsSession, showHiddenText: boolean): YrsSelectionText {
   const range = currentYrsSelectionRange(session);
   if (!range) return { text: '', plain: true };
   const start = yrsStoryOffsetForLoc(session, { story: range.story, ...range.start });
   const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
   const segments = session.storySegments(range.story);
   const fieldEnds = continuedFieldEnds(segments);
-  const ownLine = ownLineDrawings(segments, start, end);
+  const ownLine = ownLineDrawings(segments, start, end, showHiddenText);
   let text = '';
   let plain = true;
   let offset = 0;
@@ -405,8 +408,8 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
 }
 
 /** Plain text covered by the current Yrs selection. */
-export function yrsSelectedText(session: YrsSession): string {
-  return yrsSelectionText(session).text;
+export function yrsSelectedText(session: YrsSession, showHiddenText: boolean): string {
+  return yrsSelectionText(session, showHiddenText).text;
 }
 
 interface TablePayloadCell {

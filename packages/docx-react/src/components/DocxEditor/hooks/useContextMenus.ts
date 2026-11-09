@@ -55,6 +55,7 @@ export function useContextMenus({
   partEditOpen,
   onAddComment,
   readOnly,
+  showHiddenText,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
   focusActiveEditor: () => void;
@@ -67,6 +68,8 @@ export function useContextMenus({
   onAddComment: (range: { from: number; to: number; yPos: number | null }) => void;
   /** Only Copy and Select all, and no image menu. */
   readOnly: boolean;
+  /** Whether the layout shows hidden text, which copy follows. */
+  showHiddenText: boolean;
 }) {
   // DocxEditor's body sits outside its LocaleProvider, so the menus take the
   // strings from `i18n` itself.
@@ -340,7 +343,7 @@ export function useContextMenus({
       switch (action) {
         case 'cut': {
           const session = paged.getYrsSession();
-          const selected = session ? yrsSelectionText(session) : null;
+          const selected = session ? yrsSelectionText(session, showHiddenText) : null;
           if (!selected?.text) break;
           // Delete only what reached the clipboard. A selection plain text
           // cannot carry only copies, as keyboard cut does.
@@ -353,7 +356,7 @@ export function useContextMenus({
         }
         case 'copy': {
           const session = paged.getYrsSession();
-          const text = session ? yrsSelectedText(session) : '';
+          const text = session ? yrsSelectedText(session, showHiddenText) : '';
           if (text) await navigator.clipboard.writeText(text).catch(() => undefined);
           break;
         }
@@ -448,6 +451,7 @@ export function useContextMenus({
       onAddComment,
       partEditOpen,
       readOnly,
+      showHiddenText,
     ]
   );
 

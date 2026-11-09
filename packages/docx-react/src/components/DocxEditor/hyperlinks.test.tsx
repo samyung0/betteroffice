@@ -57,6 +57,7 @@ function LinkDialog({ editor }: { editor: React.RefObject<PagedEditorRef | null>
     hyperlinkDialog,
     tableSelection: noTableSelection,
     readOnly: false,
+    showHiddenText: false,
   });
   const { state } = hyperlinkDialog;
   return state.isOpen ? (

@@ -428,7 +428,7 @@ describe('text layer over a laid-out document', () => {
   });
 
   /** The editor's copy of the whole body (`yrsSelectionText`). */
-  async function editCopied(body: string): Promise<string> {
+  async function editCopied(body: string, { showHiddenText = false } = {}): Promise<string> {
     const session = await createYrsSession({ clientId: 31 });
     try {
       session.openDocx(docx(body), true);
@@ -439,7 +439,7 @@ describe('text layer over a laid-out document', () => {
         { story: 'body', paraId: paragraphs[0]!.paraId, offset: 0 },
         { story: 'body', paraId: last.paraId, offset: end }
       );
-      return yrsSelectionText(session).text;
+      return yrsSelectionText(session, showHiddenText).text;
     } finally {
       session.destroy();
     }
@@ -507,6 +507,18 @@ describe('text layer over a laid-out document', () => {
       expect(await editCopied(lone)).toBe('Lead\n\nCc');
     }, 30_000);
   }
+
+  // Hidden text is on the page only while it is shown, so a text box after it
+  // shares its line otherwise, in both modes. Edit copies the hidden text itself
+  // (2026-10-03); View copies the page.
+  const afterHidden = p(t('Lead')) + p(`${t('Secret', '<w:vanish/>')}${shape}${t('Bb')}`) + p(t('Cc'));
+  test('view mode copies a text box after hidden text on the line it shares', async () => {
+    expect(await copied(afterHidden)).toBe('Lead\nBb\nCc');
+  }, 30_000);
+  test('edit mode puts a text box after hidden text on a line of its own only while hidden text shows', async () => {
+    expect(await editCopied(afterHidden)).toBe('Lead\nSecretBb\nCc');
+    expect(await editCopied(afterHidden, { showHiddenText: true })).toBe('Lead\nSecret\nBb\nCc');
+  }, 30_000);
 
   test('copies a repeated table header row once', async () => {
     const rows = Array.from({ length: 60 }, (_, i) => `<w:tr>${tc(t(`r${i}a`))}${tc(t(`r${i}b`))}</w:tr>`).join('');
