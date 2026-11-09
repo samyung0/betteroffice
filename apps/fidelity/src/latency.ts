@@ -52,7 +52,6 @@ export interface Latency {
   p95: number;
   withinFrame: number;
   multiEditor: number;
-  crossSdk: number;
 }
 
 export interface LatestE2e {
@@ -176,7 +175,6 @@ export function summarizeLatency(runs: unknown[]): Latency {
     p95: percentile(pooled, 95),
     withinFrame: all.reduce((sum, entry) => sum + entry.withinFrame, 0),
     multiEditor: cases.filter((entry) => entry.participants.length > 1).length,
-    crossSdk: cases.filter((entry) => entry.participants.includes('python')).length,
   };
 }
 

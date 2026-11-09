@@ -980,8 +980,8 @@ function latencySection(latency: Latency | null, published: boolean, n: number, 
     'Latency',
     'Editing latency',
     latency?.ops
-      ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}, in WASM and Python.`
-      : 'SDK calls timed by the end-to-end suite on main, in WASM and Python.'
+      ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}.`
+      : 'SDK calls timed by the end-to-end suite on main.'
   );
   if (!latency?.ops)
     return h(
@@ -1008,7 +1008,7 @@ function latencySection(latency: Latency | null, published: boolean, n: number, 
         share: latency.formats[format]!.passed / Math.max(1, latency.formats[format]!.cases.length),
       })),
       {
-        note: `${plural(latency.multiEditor, ['case', 'cases'])} with several editors, ${latency.crossSdk} across Python and WASM`,
+        note: `${plural(latency.multiEditor, ['case', 'cases'])} with several editors`,
         compact: true,
       }
     ),

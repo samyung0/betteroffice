@@ -38,7 +38,7 @@ test('operation variants group under their verb', () => {
   expect(groupName('open')).toBe('open');
 });
 
-test('formats aggregate ops, frame budget, collaboration and cross-SDK cases', () => {
+test('formats aggregate ops, frame budget and collaboration cases', () => {
   const latency = summarizeLatency([
     run('docx', [
       scenario('typing-burst', ['web'], [
@@ -49,7 +49,7 @@ test('formats aggregate ops, frame budget, collaboration and cross-SDK cases', (
       ]),
       scenario('two-editors-converge', ['web:a', 'web:b'], [['applyUpdate', 0.2]]),
     ]),
-    run('xlsx', [scenario('python-roundtrip', ['web', 'python'], [['python:set', 20]])], {
+    run('xlsx', [scenario('shared-edit', ['web:a', 'web:b'], [['set', 20]])], {
       recordedAt: '2026-09-22T19:50:00.000Z',
     }),
   ]);
@@ -66,7 +66,6 @@ test('formats aggregate ops, frame budget, collaboration and cross-SDK cases', (
   expect(latency.ops).toBe(6);
   expect([latency.p50, latency.p95]).toEqual([12, 40]);
   expect(latency.multiEditor).toBe(2);
-  expect(latency.crossSdk).toBe(1);
   expect(latency.recordedAt).toBe('2026-09-22T19:50:00.000Z');
   expect(latency.environment?.cpus).toBe(4);
   expect(FRAME_MS).toBeCloseTo(16.667, 3);
