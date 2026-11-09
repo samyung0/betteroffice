@@ -331,11 +331,15 @@ describe('text layer over a laid-out document', () => {
   const sdt = (content: string) =>
     `<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${content}</w:sdtContent></w:sdt>`;
 
-  // One bar chart, which an inline drawing (`chart`) shows on a line of its own.
+  // One bar chart: an inline drawing (`chart`) shares its line with text
+  // (#1899), a floating top-and-bottom one (`floatingChart`) sits on a line of
+  // its own.
   const CHART =
     '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:order val="0"/><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>';
   const chart =
     '<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><wp:extent cx="914400" cy="457200"/><wp:docPr id="2" name="Chart 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart1"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const floatingChart =
+    '<w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" behindDoc="0" distT="0" distB="0" distL="0" distR="0" simplePos="0" locked="0" layoutInCell="1" allowOverlap="1" relativeHeight="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="457200"/><wp:wrapTopAndBottom/><wp:docPr id="3" name="Chart 2"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rIdChart1"/></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>';
 
   function docx(body: string, footnotes = ''): Uint8Array {
     const parts: Record<string, string> = {
@@ -443,7 +447,8 @@ describe('text layer over a laid-out document', () => {
 
   const pb = '<w:r><w:br w:type="page"/></w:r>';
   const cb = '<w:r><w:br w:type="column"/></w:r>';
-  // An inline text box: a block between two parts of its paragraph that is no break.
+  // An inline text box: it shares its line with text, unless it is its
+  // paragraph's only one and comes after text, which puts it on a line of its own (#1899).
   const shape = `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wp:extent cx="457200" cy="228600"/><wp:docPr id="1" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
   // A page or column break inside a paragraph copies as a soft line break does, in both modes.
   test.each([
@@ -456,8 +461,13 @@ describe('text layer over a laid-out document', () => {
     ['a page then a soft break', `${t('Aa')}${pb}${br}${t('Bb')}`, 'Aa\n\nBb'],
     ['a shape then a page break', `${t('Aa')}${shape}${pb}${t('Bb')}`, 'Aa\nBb'],
     ['a page break then a shape', `${t('Aa')}${pb}${shape}${t('Bb')}`, 'Aa\nBb'],
-    ['an inline chart', `${t('Aa')}${chart}${t('Bb')}`, 'Aa\nBb'],
-    ['two inline charts', `${t('Aa')}${chart}${chart}${t('Bb')}`, 'Aa\nBb'],
+    // Copy gives what the page shows (Q711): an inline chart or text box sharing
+    // its line with text adds no line break, one on a line of its own adds one.
+    ['an inline chart', `${t('Aa')}${chart}${t('Bb')}`, 'AaBb'],
+    ['two inline charts', `${t('Aa')}${chart}${chart}${t('Bb')}`, 'AaBb'],
+    ['two text boxes', `${t('Aa')}${shape}${shape}${t('Bb')}`, 'AaBb'],
+    ['a chart and a text box', `${t('Aa')}${chart}${shape}${t('Bb')}`, 'AaBb'],
+    ['a lone text box after text', `${t('Aa')}${shape}${t('Bb')}`, 'Aa\nBb'],
     ['a chart then a page break', `${t('Aa')}${chart}${pb}${t('Bb')}`, 'Aa\nBb'],
     ['a page break then a chart', `${t('Aa')}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
     ['a chart, a page break, a chart', `${t('Aa')}${chart}${pb}${chart}${t('Bb')}`, 'Aa\nBb'],
@@ -476,10 +486,14 @@ describe('text layer over a laid-out document', () => {
     30_000
   );
 
-  // Edit mode writes nothing for them; view mode paints them on a line of their own.
-  test('copies one newline in view mode for shapes between two parts of a paragraph', async () => {
-    const body = p(t('Lead')) + p(`${t('Aa')}${shape}${shape}${t('Bb')}`) + p(t('Cc'));
-    expect(await copied(body)).toBe('Lead\nAa\nBb\nCc');
+  // A chart on a line of its own between text still copies with a line break
+  // (2026-10-08); since #1899 that is a floating one, as inline charts share their line.
+  const ownLineChart = p(t('Lead')) + p(`${t('Aa')}${floatingChart}${t('Bb')}`) + p(t('Cc'));
+  test('view mode copies a chart on a line of its own with a line break', async () => {
+    expect(await copied(ownLineChart)).toBe('Lead\nAa\nBb\nCc');
+  }, 30_000);
+  test('edit mode copies a chart on a line of its own with a line break', async () => {
+    expect(await editCopied(ownLineChart)).toBe('Lead\nAa\nBb\nCc');
   }, 30_000);
 
   test('copies a repeated table header row once', async () => {

@@ -263,11 +263,74 @@ const FLOW_BREAKS = new Set(['pageBreak', 'columnBreak']);
 /** Embeds that can open a paragraph slot ahead of its text. */
 const BLOCKS = new Set(['table', 'blockSdt', ...FLOW_BREAKS]);
 
+/** A chart's or shape's stored JSON, or its map entries when it has none (as the bridge reads them). */
+function drawingData(payload: Record<string, unknown>, key: string): Record<string, unknown> {
+  const json = payload[key];
+  return typeof json === 'string' ? (JSON.parse(json) as Record<string, unknown>) : payload;
+}
+
+/** A `wp:anchor` drawing, as the bridge tells one: a position, or a wrap other than a chart's inline one. */
+function anchoredDrawing(data: Record<string, unknown>, chart: boolean): boolean {
+  const object = (value: unknown) =>
+    value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : undefined;
+  if (object(data.position)) return true;
+  const wrap = object(data.wrap)?.type;
+  return typeof wrap === 'string' && (!chart || wrap !== 'inline');
+}
+
+/**
+ * The selected paragraphs' charts and text boxes the layout draws on a line of
+ * their own (#1899's bridge rule): a floating chart, and a paragraph's only
+ * inline chart or text box when it is a text box after visible text. Every
+ * other inline chart or text box shares its line, and copy gives what the page
+ * shows (Epo, Q711).
+ */
+function ownLineDrawings(
+  segments: readonly YrsStorySegment[],
+  start: number,
+  end: number
+): Set<YrsStorySegment> {
+  const own = new Set<YrsStorySegment>();
+  const visible = (text: unknown) => typeof text === 'string' && /\S/.test(text);
+  let offset = 0;
+  let paragraphStart = 0;
+  let inline = 0;
+  let lone: YrsStorySegment | undefined;
+  let loneTextBoxAfterText = false;
+  let visibleText = false;
+  for (const segment of segments) {
+    if (paragraphStart >= end) break;
+    offset += segment.kind === 'text' ? segment.text.length : 1;
+    if (segment.kind === 'pilcrow') {
+      if (offset > start && inline === 1 && loneTextBoxAfterText) own.add(lone!);
+      paragraphStart = offset;
+      inline = 0;
+      visibleText = false;
+    } else if (segment.kind === 'text') {
+      visibleText ||= visible(segment.text);
+    } else if (segment.embedKind === 'field') {
+      visibleText ||= visible(segment.payload.displayText);
+    } else if (segment.embedKind === 'chart' || segment.embedKind === 'shape') {
+      const chart = segment.embedKind === 'chart';
+      const data = drawingData(segment.payload, chart ? 'chartJson' : 'shapeJson');
+      if (anchoredDrawing(data, chart)) {
+        if (chart) own.add(segment);
+      } else if (chart || data.textBox === true || data.shapeType === 'textBox') {
+        inline += 1;
+        lone = segment;
+        loneTextBoxAfterText = !chart && visibleText;
+      }
+    }
+  }
+  return own;
+}
+
 /**
  * The current Yrs selection as plain text: paragraph ends, soft line breaks
- * and page or column breaks after text become newlines, as does an inline
- * chart between text on its own line (none beside a break), and a field its
- * shown text. A selection holding anything
+ * and page or column breaks after text become newlines, as does a chart or
+ * text box drawn on a line of its own between text (none beside a break; one
+ * sharing its line writes nothing), and a field its shown text. A selection
+ * holding anything
  * else plain text cannot carry (a table, image, field, note reference, content
  * control, page break…) is not `plain`. Bookmarks are not in the text, so a
  * selection over one stays plain.
@@ -279,6 +342,7 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   const end = yrsStoryOffsetForLoc(session, { story: range.story, ...range.end });
   const segments = session.storySegments(range.story);
   const fieldEnds = continuedFieldEnds(segments);
+  const ownLine = ownLineDrawings(segments, start, end);
   let text = '';
   let plain = true;
   let offset = 0;
@@ -289,9 +353,10 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
   let inUnmatchedField = false;
   // Whether text comes before this point in its paragraph.
   let textBefore = false;
-  // A selected chart after text owes the newline of its own line to the text
-  // after it, unless a break since the last text gave that line already.
-  let chartLine = false;
+  // A selected drawing on a line of its own after text owes that line's
+  // newline to the text after it, unless a break since the last text gave
+  // that line already.
+  let drawingLine = false;
   let breakSinceText = false;
   for (const segment of segments) {
     if (offset >= end) break;
@@ -301,10 +366,12 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
     // A page or column break after text in its paragraph copies as a line
     // break; one opening the paragraph follows the previous mark's newline.
     const breakAfterText = textBefore && FLOW_BREAKS.has(embedKind);
-    const chartAfterText = textBefore && embedKind === 'chart';
-    const lineContent = segment.kind !== 'pilcrow' && !BLOCKS.has(embedKind) && embedKind !== 'chart';
+    const ownLineDrawing = ownLine.has(segment);
+    const drawingAfterText = textBefore && ownLineDrawing;
+    const lineContent =
+      segment.kind !== 'pilcrow' && !BLOCKS.has(embedKind) && embedKind !== 'chart' && !ownLineDrawing;
     textBefore = segment.kind !== 'pilcrow' && (textBefore || lineContent);
-    if (segment.kind === 'pilcrow' || breakAfterText) chartLine = false;
+    if (segment.kind === 'pilcrow' || breakAfterText) drawingLine = false;
     if (segment.kind === 'pilcrow' || lineContent) breakSinceText = false;
     if (breakAfterText) breakSinceText = true;
     if (segment.kind === 'pilcrow') inUnmatchedField = false;
@@ -314,10 +381,10 @@ export function yrsSelectionText(session: YrsSession): YrsSelectionText {
       else fieldUntil = Math.max(fieldUntil, until);
     }
     if (offset <= start) continue;
-    if (chartAfterText && !breakSinceText) chartLine = true;
-    if (chartLine && lineContent) {
+    if (drawingAfterText && !breakSinceText) drawingLine = true;
+    if (drawingLine && lineContent) {
       text += '\n';
-      chartLine = false;
+      drawingLine = false;
     }
     if (segment.kind === 'text') {
       const from = Math.max(start, segmentStart);
