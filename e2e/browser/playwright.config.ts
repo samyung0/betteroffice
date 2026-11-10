@@ -1,6 +1,8 @@
 import { defineConfig } from 'playwright/test';
 import { resolve } from 'node:path';
 
+import { shardTestMatch } from './shards';
+
 const root = resolve(import.meta.dirname, '../..');
 const output =
   process.env.BETTEROFFICE_BROWSER_OUTPUT ??
@@ -8,11 +10,12 @@ const output =
 
 export default defineConfig({
   testDir: import.meta.dirname,
-  testMatch: '**/*.browser.ts',
+  testMatch: shardTestMatch() ?? '**/*.browser.ts',
   outputDir: resolve(output, 'results'),
   reporter: [
     ['list'],
     ['html', { outputFolder: resolve(output, 'report'), open: 'never' }],
+    ['json', { outputFile: resolve(output, 'report.json') }],
   ],
   fullyParallel: false,
   workers: 1,

@@ -36,10 +36,10 @@ them with the variable set each time:
 `DOCX_PEERLESS_HARNESS=1 bunx playwright test --config e2e/browser/playwright.config.ts --grep @harness`.
 CI runs them in the third browser shard.
 
-CI splits both browser configs into shards by measured time per file
+CI splits the browser files into shards by measured time per file
 (`e2e/browser/shard-weights.json`), set with `BETTEROFFICE_BROWSER_SHARD=1/3`.
-After the suite changes a lot, refresh the weights from a CI run's
-`report.json` and `plugin-host-report.json` files:
+After the suite changes a lot, refresh the weights from a run's
+`report.json` files:
 `bun scripts/browser-shard-weights.ts <reports>...`.
 
 This covers browser editing and persistence for all three formats. Browser
