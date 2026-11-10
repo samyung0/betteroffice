@@ -38,8 +38,7 @@ packages/<fmt>-react        React editor
 ```
 
 Shared `ooxml-*` crates hold the OPC container, DrawingML, text, metafile, diff and
-redaction code. `bindings/` (PyO3) is a separate Cargo workspace that a root `cargo test`
-does not build.
+redaction code.
 
 - Lossless round-trip is the core invariant: parsers keep unknown XML, attribute order and
   source order, and saving patches the intact source part, so unchanged parts stay byte-identical.
