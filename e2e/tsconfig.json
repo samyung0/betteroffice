@@ -20,7 +20,11 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "noUnusedLocals": true,
-    "noUnusedParameters": true
+    "noUnusedParameters": true,
+    "paths": {
+      "@betteroffice/fonts": ["../packages/fonts/src/index.ts"],
+      "@betteroffice/fonts/progressive": ["../packages/fonts/src/progressive-entry.ts"]
+    }
   },
   "include": [
     "./**/*.ts"
