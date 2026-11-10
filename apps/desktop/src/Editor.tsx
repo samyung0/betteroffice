@@ -45,7 +45,9 @@ export async function prepareFile(
     openWorkbook(bytes).dispose();
     return { bytes, format };
   }
-  const { initWasm, openPresentation } = await import("@betteroffice/pptx");
+  const { initWasm, openPresentation, decodeFontFace } = await import(
+    "@betteroffice/pptx"
+  );
   await initWasm();
   const fonts = await Promise.all(
     [false, true].flatMap((bold) =>
@@ -57,7 +59,12 @@ export async function prepareFile(
           family: "Arial",
           bold,
           italic,
-          bytes: new Uint8Array(await loadBundledFontBytes(face)),
+          // The engine decodes the packed faces, so no fontpack.wasm loads.
+          bytes: new Uint8Array(
+            await loadBundledFontBytes(face, undefined, {
+              decoder: decodeFontFace,
+            })
+          ),
         };
       })
     )

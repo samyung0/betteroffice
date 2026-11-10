@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from 'playwright/test';
 import JSZip from 'jszip';
+import { pinnedEvaluate } from './pinned-evaluate';
 
 const latin = 'Packed Latin regular and bold';
 const devanagari = 'नमस्ते';
@@ -32,15 +33,19 @@ async function presentationBytes() {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
+// Capy's DOCX pages paint from a worker through OffscreenCanvas, so the pixels are read from a screenshot.
 async function painted(canvas: Locator): Promise<boolean> {
-  return canvas.evaluate((element: HTMLCanvasElement) => {
-    if (!element.width || !element.height) return false;
-    const pixels = element.getContext('2d')!.getImageData(0, 0, element.width, element.height).data;
+  const png = (await canvas.screenshot()).toString('base64');
+  return pinnedEvaluate(canvas.page(), async (data) => {
+    const image = await createImageBitmap(new Blob([Uint8Array.from(atob(data), (char) => char.charCodeAt(0))], { type: 'image/png' }));
+    const context = new OffscreenCanvas(image.width, image.height).getContext('2d')!;
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, image.width, image.height).data;
     for (let index = 0; index < pixels.length; index += 4) {
-      if (pixels[index + 3]! > 0 && Math.min(pixels[index]!, pixels[index + 1]!, pixels[index + 2]!) < 128) return true;
+      if (Math.min(pixels[index]!, pixels[index + 1]!, pixels[index + 2]!) < 128) return true;
     }
     return false;
-  });
+  }, png);
 }
 
 for (const format of ['docx', 'pptx'] as const) {
@@ -63,11 +68,10 @@ for (const format of ['docx', 'pptx'] as const) {
       name: `single-decoder.${format}`, mimeType: 'application/octet-stream',
       buffer: format === 'docx' ? await documentBytes() : await presentationBytes(),
     });
-    const canvas = format === 'docx' ? page.locator('.paged-editor__page canvas').first() : page.getByTestId('pptx-slide-canvas');
+    const canvas = format === 'docx' ? page.locator('.canvas-page canvas').first() : page.getByTestId('pptx-slide-canvas');
     await expect(canvas).toBeVisible({ timeout: 45_000 });
     if (format === 'docx') {
-      await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false', { timeout: 45_000 });
-      await expect(page.locator('.canvas-page-mirror').first()).toContainText(latin);
+      await expect(page.locator('.canvas-page-mirror').first()).toContainText(latin, { timeout: 45_000 });
       await expect(page.locator('.canvas-page-mirror').first()).toContainText(devanagari);
     } else {
       await expect(page.getByRole('complementary', { name: 'Slides', exact: true }).getByRole('button'))

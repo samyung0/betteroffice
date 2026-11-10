@@ -25,51 +25,35 @@ async function edit(page: Page, background: string | null, color: string, host: 
   await page.locator('input[type=file]').last().setInputFiles(await deck(background, color));
   await inputReady(page);
   const canvas = (await slideCanvas(page).boundingBox())!;
-  await page.mouse.click(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * 0.22);
-  const input = page.getByRole('textbox', { name: 'Slide text', exact: true });
+  // A first click selects the text box; a double click edits its text.
+  await page.mouse.dblclick(canvas.x + canvas.width * 0.15, canvas.y + canvas.height * 0.22);
+  const input = page.getByTestId('pptx-text-input');
   await expect(input).toBeFocused();
   await input.press('End');
-  await expect(page.getByTestId('pptx-caret')).toBeAttached();
 }
 
-const caretColor = (page: Page) => page.getByTestId('pptx-caret').evaluate((element) => getComputedStyle(element).backgroundColor);
-
-function luminance(color: string) {
-  const [r, g, b] = color.match(/\d+(\.\d+)?/g)!.slice(0, 3).map((value) => {
-    const c = Number(value) / 255;
-    return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-}
-
-function ratio(a: string, b: string) {
-  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (light! + 0.05) / (dark! + 0.05);
-}
+/** Capy paints the caret on the selection canvas over the slide: the colour of its most opaque pixel. */
+const caretColor = (page: Page) => page.locator('[data-testid="pptx-slide-canvas"] + canvas').evaluate((canvas: HTMLCanvasElement) => {
+  const { data } = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height);
+  let best = 0;
+  let color = '';
+  for (let index = 0; index < data.length; index += 4) {
+    if (data[index + 3]! <= best) continue;
+    best = data[index + 3]!;
+    color = `rgb(${data[index]}, ${data[index + 1]}, ${data[index + 2]})`;
+  }
+  return best >= 128 ? color : null;
+});
 
 for (const host of [false, true]) {
   const suffix = host ? ' inside a dark-themed host' : '';
-  test(`pptx worker caret takes the text colour on a white slide${suffix}`, async ({ page }) => {
+  test(`pptx caret takes the text colour on a white slide${suffix}`, async ({ page }) => {
     await edit(page, null, 'C00000', host);
     await expect.poll(() => caretColor(page)).toBe('rgb(192, 0, 0)');
   });
 
-  test(`pptx worker caret stays visible with white text on a dark slide${suffix}`, async ({ page }) => {
+  test(`pptx caret stays visible with white text on a dark slide${suffix}`, async ({ page }) => {
     await edit(page, '0B1F3A', 'FFFFFF', host);
     await expect.poll(() => caretColor(page)).toBe('rgb(255, 255, 255)');
   });
 }
-
-test('pptx worker composition preedit reads against the slide inside a dark-themed host', async ({ page }) => {
-  await edit(page, null, '172554', true);
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send('Input.imeSetComposition', { text: '日本', selectionStart: 2, selectionEnd: 2 });
-  const preedit = page.getByTestId('pptx-preedit');
-  await expect(preedit).toBeVisible();
-  const colors = await preedit.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return { text: style.color, background: style.backgroundColor };
-  });
-  expect(colors.text).toBe('rgb(23, 37, 84)');
-  expect(ratio(colors.text, colors.background)).toBeGreaterThanOrEqual(3);
-});

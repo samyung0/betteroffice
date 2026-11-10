@@ -7,20 +7,20 @@ const cell = (shading: string, run: string) => '<w:tbl><w:tblPr><w:tblW w:w="576
 const DARK_CELL = cell('1F1F1F', '<w:r><w:rPr><w:color w:val="FFFFFF"/></w:rPr><w:t>Dark</w:t></w:r>');
 const HIGHLIGHT = '<w:p><w:r><w:rPr><w:color w:val="FFFFFF"/><w:highlight w:val="darkBlue"/></w:rPr><w:t>Highlighted</w:t></w:r></w:p>';
 
-async function open(page: Page, arm: string, body: string, host?: string, back = 0, dark = false) {
+async function open(page: Page, body: string, host?: string, back = 0, dark = false) {
   const zip = new JSZip();
   zip.file('[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
   zip.file('_rels/.rels', '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDoc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
   zip.file('word/document.xml', '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body + '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>');
-  await page.goto('/?format=docx' + arm);
+  await page.goto('/?format=docx');
   if (host) await page.addStyleTag({ content: `body { color: ${host}; }` });
   await page.locator('input[type=file]').last().setInputFiles({ name: 'caret.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: await zip.generateAsync({ type: 'nodebuffer' }) });
-  const surface = page.locator('.canvas-page, .paged-editor__page').first();
+  const surface = page.locator('.canvas-page').first();
   await expect(surface.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
   if (host) await page.evaluate((color) => { (document.querySelector('.oox-root')!.parentElement as HTMLElement).style.color = color; }, host);
   if (dark) await page.evaluate(() => { for (const root of document.querySelectorAll('.oox-root')) root.classList.add('dark'); });
   await surface.click({ position: { x: 140, y: 100 } });
-  const input = page.locator('[data-testid=yrs-input], .paged-editor__input').first();
+  const input = page.getByTestId('yrs-input').first();
   await expect(input).toBeEditable();
   await input.press('ControlOrMeta+Home');
   await input.press('End');
@@ -28,7 +28,7 @@ async function open(page: Page, arm: string, body: string, host?: string, back =
 }
 
 async function caretBox(page: Page) {
-  const caret = page.locator('[data-testid=caret], [data-docx-pages-host] > div[aria-hidden][style*="will-change: transform"]').first();
+  const caret = page.getByTestId('caret').first();
   await expect(caret).toBeAttached();
   await expect.poll(async () => (await caret.boundingBox())?.height ?? 0).toBeGreaterThan(4);
   return (await caret.boundingBox())!;
@@ -79,46 +79,32 @@ async function caretContrast(page: Page) {
   return best;
 }
 
-for (const [arm, label] of [['', 'worker'], ['&peerless=0', 'non-worker']] as const) {
-  test(`docx caret stays visible on the page inside a dark-themed host (${label})`, async ({ page }) => {
-    await open(page, arm, PLAIN, DARK_HOST);
-    expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
-  });
-}
-
-test('docx worker caret follows white text in a dark-shaded table cell', async ({ page }) => {
-  await open(page, '', DARK_CELL);
+test('docx caret stays visible on the page inside a dark-themed host', async ({ page }) => {
+  await open(page, PLAIN, DARK_HOST);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
 
-test('docx worker caret follows white text in a dark-shaded cell inside a dark-themed host', async ({ page }) => {
-  await open(page, '', DARK_CELL, DARK_HOST);
+test('docx caret follows white text in a dark-shaded table cell', async ({ page }) => {
+  await open(page, DARK_CELL);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
 
-test('docx worker caret follows white text on a dark highlight', async ({ page }) => {
-  await open(page, '', HIGHLIGHT, undefined, 4);
+test('docx caret follows white text in a dark-shaded cell inside a dark-themed host', async ({ page }) => {
+  await open(page, DARK_CELL, DARK_HOST);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
 
-test('docx worker caret stays visible right after a dark highlight', async ({ page }) => {
-  await open(page, '', HIGHLIGHT);
+test('docx caret follows white text on a dark highlight', async ({ page }) => {
+  await open(page, HIGHLIGHT, undefined, 4);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
 
-test('docx non-worker caret follows white text in a dark-shaded table cell', async ({ page }) => {
-  await open(page, '&peerless=0', DARK_CELL);
+test('docx caret stays visible right after a dark highlight', async ({ page }) => {
+  await open(page, HIGHLIGHT);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
 
-test('docx non-worker caret follows white text on a dark highlight', async ({ page }) => {
-  await open(page, '&peerless=0', HIGHLIGHT, undefined, 4);
+test('docx caret stays visible on the page in dark mode', async ({ page }) => {
+  await open(page, PLAIN, undefined, 0, true);
   expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
 });
-
-for (const [arm, label] of [['', 'worker'], ['&peerless=0', 'non-worker']] as const) {
-  test(`docx caret stays visible on the page in dark mode (${label})`, async ({ page }) => {
-    await open(page, arm, PLAIN, undefined, 0, true);
-    expect(await caretContrast(page)).toBeGreaterThanOrEqual(3);
-  });
-}

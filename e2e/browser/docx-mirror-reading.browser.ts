@@ -19,43 +19,42 @@ async function longDocument(): Promise<Buffer> {
   return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-async function open(browser: Browser, worker: boolean) {
+async function open(browser: Browser) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   const page = await context.newPage();
-  await page.goto(`/?format=docx&peerless=${worker ? 1 : 0}`);
+  await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({
     name: 'reading.docx',
     mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     buffer: await longDocument(),
   });
-  await expect(page.locator('.canvas-page[data-page-index="1"] canvas')).toBeAttached({ timeout: 60_000 });
+  await expect(page.locator('canvas[data-page-index="1"]')).toBeAttached({ timeout: 60_000 });
   await expect(page.getByRole('status').filter({ hasText: /^\d+ of \d+$/ })).toHaveText(`1 of ${PAGES}`, { timeout: 60_000 });
   await expect(page.locator('.notice, [data-testid$="-error"]')).toHaveCount(0);
-  if (worker) await expect(page.locator('[data-docx-worker-editor]')).toHaveAttribute('aria-busy', 'false');
   await page.addStyleTag({ content: SETTLE });
   return { context, page };
 }
 
 type AXNode = { ignored?: boolean; name?: { value?: string } };
 
-for (const worker of [true, false]) {
-  test(`docx ${worker ? 'worker' : 'in-thread'} editor: the page mirror reads whole words`, async ({ browser }, info) => {
-    test.setTimeout(120_000);
-    const { context, page } = await open(browser, worker);
-    try {
-      await expect(page.locator('.canvas-page[data-page-index="0"] .layout-run-text').first()).toBeAttached();
-      const cdp = await context.newCDPSession(page);
-      const names = async () => {
-        const { nodes } = await cdp.send('Accessibility.getFullAXTree') as { nodes: AXNode[] };
-        return nodes.filter((node) => !node.ignored).map((node) => String(node.name?.value ?? ''));
-      };
-      const snapshot = await page.locator('.canvas-page[data-page-index="0"]').first().ariaSnapshot();
-      await info.attach('page-1.yml', { body: snapshot, contentType: 'text/yaml' });
-      await expect.poll(async () => (await names()).filter((name) => name.includes('Marker01 line 1 keeps')).length,
-        { timeout: 30_000 }).toBeGreaterThan(0);
-      expect(snapshot).toContain('paragraph: Marker01 line 1 keeps the quick brown fox');
-    } finally {
-      await context.close();
-    }
-  });
-}
+test('docx: the page mirror reads whole words', async ({ browser }, info) => {
+  test.fixme(true, "Capy's page mirror exposes each letter as its own text (M a r k e r); upstream #2268's whole-word mirror is not ported (needs a Capy pin)");
+  test.setTimeout(120_000);
+  const { context, page } = await open(browser);
+  try {
+    const first = page.locator('.canvas-page:has(> canvas[data-page-index="0"])');
+    await expect(first.locator('.layout-run-text').first()).toBeAttached();
+    const cdp = await context.newCDPSession(page);
+    const names = async () => {
+      const { nodes } = await cdp.send('Accessibility.getFullAXTree') as { nodes: AXNode[] };
+      return nodes.filter((node) => !node.ignored).map((node) => String(node.name?.value ?? ''));
+    };
+    const snapshot = await first.ariaSnapshot();
+    await info.attach('page-1.yml', { body: snapshot, contentType: 'text/yaml' });
+    await expect.poll(async () => (await names()).filter((name) => name.includes('Marker01 line 1 keeps')).length,
+      { timeout: 30_000 }).toBeGreaterThan(0);
+    expect(snapshot).toContain('paragraph: Marker01 line 1 keeps the quick brown fox');
+  } finally {
+    await context.close();
+  }
+});

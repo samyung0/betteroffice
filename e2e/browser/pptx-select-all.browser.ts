@@ -3,8 +3,8 @@ import { readFile } from 'node:fs/promises';
 import JSZip from 'jszip';
 import { inputReady, slideCanvas } from './pptx-async-helpers';
 
-const input = (page: Page) => page.getByRole('textbox', { name: 'Slide text', exact: true });
-const textSelected = (page: Page) => page.getByRole('status').filter({ hasText: 'Text selected' });
+// Capy's slide text input; it has no "Text selected" status, so the copied text shows what is selected.
+const input = (page: Page) => page.getByTestId('pptx-text-input');
 const clipboard = (page: Page) => page.evaluate(() => navigator.clipboard.readText());
 
 async function fixture() {
@@ -24,20 +24,22 @@ test.beforeEach(async ({ page, context }) => {
   await inputReady(page);
 });
 
-async function click(page: Page, x: number, y: number) {
+// Upstream's table-cell case is not kept: Capy's editor enters a cell only through its API and
+// leaves Tab in a cell to the browser, so no pointer or keyboard path reaches a cell's text here.
+async function click(page: Page, x: number, y: number, clickCount = 1) {
   const canvas = (await slideCanvas(page).boundingBox())!;
-  await page.mouse.click(canvas.x + canvas.width * x, canvas.y + canvas.height * y);
+  await page.mouse.click(canvas.x + canvas.width * x, canvas.y + canvas.height * y, { clickCount });
 }
 
+// In Capy's editor, as in PowerPoint, a first click selects the shape; a double click edits its text.
 async function caretInBox(page: Page) {
-  await click(page, 0.15, 0.42);
+  await click(page, 0.15, 0.42, 2);
   await expect(input(page)).toBeFocused();
 }
 
 test('pptx select all: Ctrl or Meta A selects the whole text box', async ({ page }) => {
   await caretInBox(page);
   await input(page).press('ControlOrMeta+a');
-  await expect(textSelected(page)).toBeVisible();
   await input(page).press('ControlOrMeta+c');
   await expect.poll(() => clipboard(page)).toBe('Whole box');
 });
@@ -45,11 +47,8 @@ test('pptx select all: Ctrl or Meta A selects the whole text box', async ({ page
 test('pptx select all: typing replaces the selected text box text', async ({ page }) => {
   await caretInBox(page);
   await input(page).press('ControlOrMeta+a');
-  await expect(textSelected(page)).toBeVisible();
   await page.keyboard.type('Z');
-  await expect(textSelected(page)).toBeHidden();
   await input(page).press('ControlOrMeta+a');
-  await expect(textSelected(page)).toBeVisible();
   await input(page).press('ControlOrMeta+c');
   await expect.poll(() => clipboard(page)).toBe('Z');
 });
@@ -60,27 +59,12 @@ test('pptx select all: text typed just before is included across paragraphs', as
   await page.keyboard.press('Enter');
   await page.keyboard.type('Next');
   await input(page).press('ControlOrMeta+a');
-  await expect(textSelected(page)).toBeVisible();
   await input(page).press('ControlOrMeta+c');
   await expect.poll(async () => (await clipboard(page)).replace(/\r\n?/gu, '\n')).toBe('Whole box\nNext');
-});
-
-test('pptx select all: a table cell selects that cell text only', async ({ page }) => {
-  await click(page, 0.24, 0.17);
-  await expect(input(page)).toBeFocused();
-  for (let cell = 0; cell < 3; cell += 1) await input(page).press('Tab');
-  await expect(textSelected(page)).toBeVisible();
-  await input(page).press('ArrowRight');
-  await expect(textSelected(page)).toBeHidden();
-  await input(page).press('ControlOrMeta+a');
-  await expect(textSelected(page)).toBeVisible();
-  await input(page).press('ControlOrMeta+c');
-  await expect.poll(() => clipboard(page)).toBe('Middle');
 });
 
 test('pptx select all: nothing selected keeps the page text unselected', async ({ page }) => {
   await click(page, 0.5, 0.95);
   await page.keyboard.press('ControlOrMeta+a');
   expect(await page.evaluate(() => getSelection()?.toString() ?? '')).toBe('');
-  await expect(textSelected(page)).toBeHidden();
 });

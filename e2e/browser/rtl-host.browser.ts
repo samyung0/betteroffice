@@ -64,8 +64,9 @@ test('xlsx: grid paints on an rtl host page', async ({ page }) => {
 
 test('docx: File menu stays inside the viewport on an rtl host page', async ({ page }) => {
   await openRtl(page, 'docx', 'betteroffice-demo.docx');
-  await page.getByRole('menuitem', { name: 'File', exact: true }).click();
-  const menu = page.getByRole('menu', { name: 'File' });
+  await page.getByRole('menubar', { name: 'Menu bar' }).getByRole('button', { name: 'File', exact: true }).click();
+  // Capy's menu bar dropdown is a plain fixed layer, not an ARIA menu.
+  const menu = page.locator('[data-docx-escape-layer="true"]').last();
   await expect(menu).toBeVisible();
   const box = (await menu.boundingBox())!;
   const viewport = page.viewportSize()!;
@@ -85,5 +86,6 @@ test('pptx: layout dropdown stays inside the viewport on an rtl host page', asyn
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
   await expect.poll(() => menu.evaluate((element) => getComputedStyle(element).direction)).toBe('ltr');
-  await expectRootLtr(page, '[data-testid="pptx-worker-editor"]');
+  // Capy's PptxEditor root: the outermost ltr element around the slide canvas.
+  await expectRootLtr(page, 'div[dir="ltr"]:has([data-testid="pptx-slide-canvas"])');
 });
