@@ -17,6 +17,8 @@ const PAGE = '.layout-page-mirror';
 const RUN = '.layout-run-text';
 const BLOCK = '[data-block-id]';
 const PARAGRAPH = '.layout-paragraph[data-block-id]';
+/** A run of its story's text; a text box's runs carry no doc positions. */
+const POSITIONED_RUN = `${RUN}[data-doc-start]`;
 const CELL = '[role="cell"], [role="columnheader"]';
 /**
  * Footnotes and endnotes are stories of their own, as in Word: a selection
@@ -92,16 +94,69 @@ export function textLayerText(
     mirrors.push([full, fullRange]);
   }
   const lone = loneDrawingBlocks(mirrors.map(([mirror]) => mirror));
-  for (const [mirror, part] of mirrors) collect(pieces, mirror, part, story, null, null, 'body', lone);
+  const order = readingOrders(mirrors.map(([mirror]) => mirror));
+  for (const [mirror, part] of mirrors) {
+    collect(pieces, mirror, part, story, null, null, 'body', lone, order);
+  }
   return joined(pieces);
 }
 
-/** A chart block, or a block holding a drawn shape (a text box) and no text. */
+/**
+ * A chart block, or a block holding a drawn shape with no text, in itself or
+ * in its text box's paragraphs (the blocks `<id>:…` beside it).
+ */
 function drawingBlock(el: HTMLElement): boolean {
-  return (
-    el.classList.contains('layout-run-chart') ||
-    (el.querySelector('.layout-run-shape') !== null && el.querySelector(RUN) === null)
-  );
+  if (el.classList.contains('layout-run-chart')) return true;
+  if (el.querySelector('.layout-run-shape') === null || el.querySelector(RUN) !== null) return false;
+  return el.parentElement!.querySelector(`[data-block-id^="${el.dataset.blockId}:"] ${RUN}`) === null;
+}
+
+/**
+ * Containers whose blocks read in another order than they are drawn in. A
+ * text box with text that has no line of its own (it shares a line, or
+ * floats) is drawn ahead of the paragraph part it sits in, the part after it
+ * whose range holds its position; it reads after that part's text, as Edit
+ * copies it, and a part with no text of its own (only its empty line's run)
+ * reads as its boxes' text (Epo, Q741). A box on a line of its own already
+ * sits between its paragraph's parts.
+ */
+function readingOrders(mirrors: readonly HTMLElement[]): Map<Element, Element[]> {
+  const orders = new Map<Element, Element[]>();
+  const moved = new Map<Element, number>();
+  const empty = new Set<Element>();
+  for (const mirror of mirrors) {
+    for (const shape of mirror.querySelectorAll<HTMLElement>('.layout-run-shape')) {
+      const box = shape.closest<HTMLElement>(PARAGRAPH);
+      const at = Number(shape.dataset.docStart);
+      if (!box || !Number.isFinite(at)) continue;
+      const parent = box.parentElement!;
+      const prefix = `${box.dataset.blockId}:`;
+      const texts = Array.from(parent.children).filter((el) =>
+        el.getAttribute('data-block-id')?.startsWith(prefix)
+      );
+      if (!texts.some((el) => el.querySelector(RUN))) continue;
+      let host: HTMLElement | null = null;
+      for (let next = box.nextElementSibling; next && !host; next = next.nextElementSibling) {
+        if (!(next instanceof HTMLElement) || !next.querySelector(POSITIONED_RUN)) continue;
+        if (Number(next.dataset.docStart) < at && at < Number(next.dataset.docEnd)) host = next;
+      }
+      if (!host) continue;
+      const children = orders.get(parent) ?? Array.from(parent.children);
+      for (const el of [box, ...texts]) children.splice(children.indexOf(el), 1);
+      const after = moved.get(host) ?? 0;
+      children.splice(children.indexOf(host) + 1 + after, 0, box, ...texts);
+      moved.set(host, after + 1 + texts.length);
+      orders.set(parent, children);
+      if (!Array.from(host.querySelectorAll(POSITIONED_RUN)).some((run) => run.textContent)) {
+        empty.add(host);
+      }
+    }
+  }
+  for (const host of empty) {
+    const children = orders.get(host.parentElement!)!;
+    children.splice(children.indexOf(host), 1);
+  }
+  return orders;
 }
 
 /**
@@ -167,9 +222,11 @@ function collect(
   cell: HTMLElement | null = null,
   current: TextStory = 'body',
   /** Drawing blocks that copy as their paragraph's empty line (`loneDrawingBlocks`). */
-  lone: ReadonlySet<Element> = new Set()
+  lone: ReadonlySet<Element> = new Set(),
+  /** Children of these containers in reading order (`readingOrders`). */
+  order: ReadonlyMap<Element, readonly Element[]> = new Map()
 ): void {
-  for (let child = el.firstElementChild; child; child = child.nextElementSibling) {
+  for (const child of order.get(el) ?? el.children) {
     if (!(child instanceof HTMLElement)) continue;
     if (lone.has(child)) {
       if (current === story && (!range || range.intersectsNode(child))) {
@@ -220,7 +277,8 @@ function collect(
       child.hasAttribute('data-block-id') ? child : block,
       role === 'cell' || role === 'columnheader' ? child : cell,
       childStory,
-      lone
+      lone,
+      order
     );
   }
 }

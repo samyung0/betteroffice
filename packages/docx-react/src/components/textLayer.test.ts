@@ -544,6 +544,45 @@ describe('text layer over a laid-out document', () => {
     }, 30_000);
   }
 
+  // A text box's text copies a line per box paragraph (Q741): in place when
+  // the box has a line of its own, after its paragraph's text when it shares
+  // a line or floats, and as the paragraph's line when it is alone there.
+  const boxed = (...lines: string[]) =>
+    shape.replace('<w:txbxContent><w:p/></w:txbxContent>', `<w:txbxContent>${lines.map((line) => p(t(line))).join('')}</w:txbxContent>`);
+  const pict = (content: string) =>
+    `<w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="tb1" type="#_x0000_t202" style="width:100pt;height:30pt"><v:textbox><w:txbxContent>${content}</w:txbxContent></v:textbox></v:shape></w:pict>`;
+  const vml = (line: string) => `<w:r>${pict(p(t(line)))}</w:r>`;
+  const inRun = (run: string) => run.slice('<w:r>'.length, -'</w:r>'.length);
+  const alternate = (line: string) =>
+    `<w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><mc:Choice Requires="wps">${inRun(boxed(line))}</mc:Choice><mc:Fallback>${pict(p(t(line)))}</mc:Fallback></mc:AlternateContent></w:r>`;
+  const floatingBox = (line: string) =>
+    boxed(line)
+      .replace('<wp:inline ', '<wp:anchor behindDoc="0" distT="0" distB="0" distL="0" distR="0" simplePos="0" locked="0" layoutInCell="1" allowOverlap="1" relativeHeight="1" ')
+      .replace('<wp:extent cx="457200" cy="228600"/>', '<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="457200" cy="228600"/><wp:wrapTopAndBottom/>')
+      .replace('</wp:inline>', '</wp:anchor>');
+  test.each([
+    ['a text box with text alone in its paragraph', boxed('Inside'), 'Inside'],
+    ['an AlternateContent text box with text alone in its paragraph', alternate('Inside'), 'Inside'],
+    ['a VML text box with text alone in its paragraph', vml('Inside'), 'Inside'],
+    ['a text box with text on a line of its own between text', `${t('Aa')}${boxed('Inside')}${t('Bb')}`, 'Aa\nInside\nBb'],
+    ['an AlternateContent text box with text between text', `${t('Aa')}${alternate('Inside')}${t('Bb')}`, 'Aa\nInside\nBb'],
+    ['a VML text box with text between text', `${t('Aa')}${vml('Inside')}${t('Bb')}`, 'Aa\nInside\nBb'],
+    ['an empty VML text box between text', `${t('Aa')}<w:r>${pict('<w:p/>')}</w:r>${t('Bb')}`, 'Aa\nBb'],
+    ['two text boxes with text sharing a line between text', `${t('Aa')}${boxed('In1')}${boxed('In2')}${t('Bb')}`, 'AaBb\nIn1\nIn2'],
+    ['a text box with text opening a paragraph it shares a line with', `${boxed('Inside')}${t('Bb')}`, 'Bb\nInside'],
+    ['two text boxes with text alone in their paragraph', `${boxed('In1')}${boxed('In2')}`, 'In1\nIn2'],
+    ['a text box with two paragraphs between text', `${t('Aa')}${boxed('In1', 'In2')}${t('Bb')}`, 'Aa\nIn1\nIn2\nBb'],
+    ['a floating text box with text between text', `${t('Aa')}${floatingBox('Inside')}${t('Bb')}`, 'AaBb\nInside'],
+  ])(
+    'copies %s the same in view and edit mode',
+    async (_, runs, text) => {
+      const body = p(t('Lead')) + p(runs) + p(t('Cc'));
+      expect(await copied(body)).toBe(`Lead\n${text}\nCc`);
+      expect(await editCopied(body)).toBe(`Lead\n${text}\nCc`);
+    },
+    30_000
+  );
+
   // A table cell's own lines: a cell holding only a drawing keeps its slot.
   const firstCell = (root: HTMLElement, range: Range) =>
     range.selectNodeContents(root.querySelector('[role="cell"]')!);

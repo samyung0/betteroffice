@@ -278,12 +278,45 @@ function anchoredDrawing(data: Record<string, unknown>, chart: boolean): boolean
   return typeof wrap === 'string' && (!chart || wrap !== 'inline');
 }
 
+/** A legacy VML text box's display shape, which the bridge keeps as a block of its own. */
+function vmlTextBox(segment: YrsStorySegment): Record<string, unknown> | undefined {
+  if (segment.kind !== 'embed' || segment.embedKind !== 'opaqueDrawing') return undefined;
+  const json = segment.payload.textBoxJson;
+  return typeof json === 'string' ? (JSON.parse(json) as Record<string, unknown>) : undefined;
+}
+
+/** A text box's paragraphs that hold text, as plain text: a `txBox` shape's or a VML text box's. */
+function textBoxLines(segment: YrsStorySegment, showHiddenText: boolean): string[] {
+  if (segment.kind !== 'embed' || (segment.attributes.hidden && !showHiddenText)) return [];
+  const box =
+    segment.embedKind === 'shape' ? drawingData(segment.payload, 'shapeJson') : vmlTextBox(segment);
+  if (!box || box.hidden === true || (box.textBox !== true && box.shapeType !== 'textBox')) return [];
+  const children = (node: Record<string, unknown>, keys: readonly string[]) =>
+    keys.flatMap((key) => (Array.isArray(node[key]) ? (node[key] as unknown[]) : []));
+  const text = (node: unknown): string => {
+    if (node === null || typeof node !== 'object') return '';
+    const item = node as Record<string, unknown>;
+    if (item.type === 'text') return typeof item.text === 'string' ? item.text : '';
+    if (item.type === 'tab') return '\t';
+    if (item.type === 'break') return '\n';
+    return children(item, ['content', 'fieldResult']).map(text).join('');
+  };
+  const paragraphs = (node: unknown): string[] => {
+    if (node === null || typeof node !== 'object') return [];
+    const item = node as Record<string, unknown>;
+    if (item.type === 'paragraph') return [text(item)];
+    return children(item, ['content', 'rows', 'cells']).flatMap(paragraphs);
+  };
+  return paragraphs(box.textBody).filter((line) => line !== '');
+}
+
 /**
  * The selected paragraphs' charts and text boxes the layout draws on a line of
- * their own (#1899's bridge rule): a floating chart, and a paragraph's only
- * inline chart or text box when it is a text box after visible text. Every
- * other inline chart or text box shares its line, and copy gives what the page
- * shows (Epo, Q711). Hidden text is not on the page unless it is shown.
+ * their own (#1899's bridge rule): a floating chart, a VML text box that does
+ * not float, and a paragraph's only inline chart or text box when it is a text
+ * box after visible text. Every other inline chart or text box shares its
+ * line, and copy gives what the page shows (Epo, Q711). Hidden text and
+ * drawings are not on the page unless hidden text is shown.
  */
 function ownLineDrawings(
   segments: readonly YrsStorySegment[],
@@ -292,8 +325,9 @@ function ownLineDrawings(
   showHiddenText: boolean
 ): Set<YrsStorySegment> {
   const own = new Set<YrsStorySegment>();
+  const shown = (segment: YrsStorySegment) => showHiddenText || !segment.attributes.hidden;
   const visible = (segment: YrsStorySegment, text: unknown) =>
-    (showHiddenText || !segment.attributes.hidden) && typeof text === 'string' && /\S/.test(text);
+    shown(segment) && typeof text === 'string' && /\S/.test(text);
   let offset = 0;
   let paragraphStart = 0;
   let inline = 0;
@@ -312,6 +346,11 @@ function ownLineDrawings(
       visibleText ||= visible(segment, segment.text);
     } else if (segment.embedKind === 'field') {
       visibleText ||= visible(segment, segment.payload.displayText);
+    } else if (!shown(segment)) {
+      continue;
+    } else if (segment.embedKind === 'opaqueDrawing') {
+      const box = vmlTextBox(segment);
+      if (box && box.hidden !== true && !anchoredDrawing(box, false)) own.add(segment);
     } else if (segment.embedKind === 'chart' || segment.embedKind === 'shape') {
       const chart = segment.embedKind === 'chart';
       const data = drawingData(segment.payload, chart ? 'chartJson' : 'shapeJson');
@@ -331,7 +370,9 @@ function ownLineDrawings(
  * The current Yrs selection as plain text: paragraph ends, soft line breaks
  * and page or column breaks after text become newlines, as does a chart or
  * text box drawn on a line of its own between text (none beside a break; one
- * sharing its line writes nothing), and a field its shown text. A selection
+ * sharing its line writes nothing), and a field its shown text. A text box's
+ * text copies a line per box paragraph: in place when the box has a line of
+ * its own, after its paragraph's text when it shares a line or floats. A selection
  * holding anything
  * else plain text cannot carry (a table, image, field, note reference, content
  * control, page break…) is not `plain`. Bookmarks are not in the text, so a
@@ -361,6 +402,15 @@ export function yrsSelectionText(session: YrsSession, showHiddenText: boolean): 
   // that line already.
   let drawingLine = false;
   let breakSinceText = false;
+  // A text box sharing its line, or floating, copies after the paragraph's
+  // text, a line per box paragraph; the paragraph's copy starts at `paragraphStart`.
+  let sharedBoxLines: string[] = [];
+  let paragraphStart = 0;
+  const flushBoxLines = () => {
+    if (sharedBoxLines.length === 0) return;
+    text += (text.length > paragraphStart ? '\n' : '') + sharedBoxLines.join('\n');
+    sharedBoxLines = [];
+  };
   for (const segment of segments) {
     if (offset >= end) break;
     const segmentStart = offset;
@@ -394,7 +444,11 @@ export function yrsSelectionText(session: YrsSession, showHiddenText: boolean): 
       text += segment.text.slice(from - segmentStart, Math.min(end, offset) - segmentStart);
       // A complex field's result shown as its own text is still the field's.
       if (segment.attributes.fieldResult || inUnmatchedField || from < fieldUntil) plain = false;
-    } else if (segment.kind === 'pilcrow' || segment.embedKind === 'break') {
+    } else if (segment.kind === 'pilcrow') {
+      flushBoxLines();
+      text += '\n';
+      paragraphStart = text.length;
+    } else if (segment.embedKind === 'break') {
       text += '\n';
     } else {
       plain = false;
@@ -402,8 +456,18 @@ export function yrsSelectionText(session: YrsSession, showHiddenText: boolean): 
       if (segment.embedKind === 'field' && typeof segment.payload.displayText === 'string') {
         text += segment.payload.displayText;
       }
+      // A text box on a line of its own copies its text there (Epo, Q741).
+      const boxLines = textBoxLines(segment, showHiddenText);
+      if (boxLines.length > 0 && ownLineDrawing) {
+        if (drawingLine) text += '\n';
+        text += boxLines.join('\n');
+        drawingLine = true;
+      } else {
+        sharedBoxLines.push(...boxLines);
+      }
     }
   }
+  flushBoxLines();
   return { text, plain };
 }
 
