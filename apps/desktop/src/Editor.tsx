@@ -16,8 +16,8 @@ import {
   resolveLastResortFace,
   resolveMetricCompatFace,
 } from "@betteroffice/fonts";
-import { createRoomTransport } from "../../demo/app/collab/createRoomTransport";
-import type { CollaborationReplica } from "../../demo/app/collab/types";
+import { createRoomTransport } from "../../../shared/editor-host/collaboration/createRoomTransport";
+import type { CollaborationReplica } from "../../../shared/editor-host/collaboration/types";
 import type { Format } from "./bridge";
 import "@betteroffice/docx-react/styles.css";
 
