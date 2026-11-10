@@ -1,6 +1,16 @@
 {
-  "e2e/browser/docx-ancestor-zoom.browser.ts": 36,
-  "e2e/browser/editors.browser.ts": 52,
+  "e2e/browser/docx-ancestor-zoom.browser.ts": 0,
+  "e2e/browser/docx-caret-color.browser.ts": 16,
+  "e2e/browser/docx-context-menu-close.browser.ts": 9,
+  "e2e/browser/docx-mirror-reading.browser.ts": 0,
+  "e2e/browser/docx-table-resize.browser.ts": 13,
+  "e2e/browser/editors.browser.ts": 14,
+  "e2e/browser/fonts-single-decoder.browser.ts": 11,
   "e2e/browser/pinned-evaluate.browser.ts": 0,
-  "e2e/browser/rtl-host.browser.ts": 13
+  "e2e/browser/pptx-caret-color.browser.ts": 5,
+  "e2e/browser/pptx-select-all.browser.ts": 5,
+  "e2e/browser/rtl-host.browser.ts": 5,
+  "e2e/browser/vsdx-text-advance.browser.ts": 1,
+  "e2e/browser/xlsx-cell-editor-color.browser.ts": 1,
+  "e2e/browser/xlsx-text-advance.browser.ts": 0
 }
