@@ -93,6 +93,7 @@ async function loadFace(
         || regular.codec !== entry.codec || regular.family !== entry.family)) {
         throw new Error(`Missing bundled font dictionary for ${face.file}`);
       }
+      preloadDecoder(wasmUrl, decoder);
       const [encoded, prerequisite] = await Promise.all([
         readFontBytes(face.file, url, timeoutMs),
         regular === undefined ? undefined : loadFace(
@@ -144,6 +145,11 @@ function packFor(face: BundledFontFace): PackManifest {
 /** The host's decoder when it has one, else the bundled one at `wasmUrl`. */
 function decodeWith(wasmUrl?: URL, decoder?: FontDecoder): FontDecoder {
   return decoder ?? (async (bytes, options) => (await import('./decode')).decodeFontFace(bytes, options.dict, { ...options, wasmUrl }));
+}
+
+/** @internal Without a host decoder, starts loading the bundled one while the faces download. */
+export function preloadDecoder(wasmUrl?: URL, decoder?: FontDecoder): void {
+  if (decoder === undefined) void import('./decode').then((module) => module.preloadFontDecoder(wasmUrl)).catch(() => {});
 }
 
 /** @internal Decodes slice files the way a provider decodes its whole faces. */

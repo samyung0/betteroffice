@@ -1,15 +1,29 @@
 import type { CompatibilityFlags } from './docx/settingsParser';
+import type { ProgressiveFontFace, SliceLocation, SlicedFontFace } from './layout/measure/fontRegistry';
 import {
   createRustMeasureSource,
   type ResidentFontRequirement,
-  type RustMeasureSource,
 } from './layout/measure/rustMeasureSource';
 import type { DisplayList } from './layout/render';
+import { drawnByFont } from './yrs/residentProgressiveFonts';
 
 export { configureDefaultFonts } from './layout/measure/defaultFontProvider';
 
+/** A sliced face the layout measured with, and its bytes with every outline the pages draw. */
+export interface DocxViewerSlicedFace {
+  /** The `slices` of the font loader that located the face. */
+  slices: SliceLocation;
+  bytes: ArrayBuffer;
+}
+
 export interface DocxViewerHandle {
   displayList(pageGap?: number): DisplayList;
+  /**
+   * The sliced (CJK) faces the layout measured with. A painter registers
+   * these bytes as the face: they hold the outline of every glyph the pages
+   * draw, and the same tables the layout measured.
+   */
+  slicedFaces(): DocxViewerSlicedFace[];
   dispose(): void;
 }
 
@@ -31,7 +45,9 @@ export interface DocxViewerAnalysis {
 
 let modulePromise: Promise<typeof import('./wasm/viewer')> | null = null;
 let initialization: Promise<void> | null = null;
-let measureSource: RustMeasureSource | null = null;
+
+/** Packed faces decode with the fonts package's own decoder, never the edit engine's. */
+const viewerRuntime = {};
 
 function loadModule(): Promise<typeof import('./wasm/viewer')> {
   modulePromise ??= import('./wasm/viewer');
@@ -120,8 +136,34 @@ function readingRequest(request: ViewRequest, { width, padding }: DocxReadingLay
 }
 
 /**
+ * The faces of `faces` with the outline of every glyph `list` draws: chunks by
+ * the glyph ids the layout shaped, and by the characters, whose chunks hold
+ * every glyph another shaper (the painter's) can draw for them.
+ */
+async function outlineSlicedFaces(
+  faces: ReadonlyMap<number, SlicedFontFace>,
+  list: DisplayList
+): Promise<DocxViewerSlicedFace[]> {
+  if (faces.size === 0) return [];
+  const drawn = new Map<number, { glyphs: Set<number>; characters: Set<string> }>();
+  for (const page of list.pages) drawnByFont(page, drawn);
+  const wanted = new Map<ProgressiveFontFace, { slices: SliceLocation; glyphs: Set<number>; characters: Set<string> }>();
+  for (const [id, { face, slices }] of faces) {
+    let entry = wanted.get(face);
+    if (!entry) wanted.set(face, entry = { slices, glyphs: new Set(), characters: new Set() });
+    const used = drawn.get(id);
+    for (const glyph of used?.glyphs ?? []) entry.glyphs.add(glyph);
+    for (const character of used?.characters ?? []) entry.characters.add(character);
+  }
+  await Promise.all([...wanted].map(([face, { glyphs, characters }]) =>
+    Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
+  return [...wanted].map(([face, { slices }]) => ({ slices, bytes: face.bytes() }));
+}
+
+/**
  * Measures with the faces `configureDefaultFonts` provides; without them text
- * gets synthetic metrics and paragraphs do not wrap.
+ * gets synthetic metrics and paragraphs do not wrap. A face that fails to
+ * load, an outline chunk of a sliced face included, fails the open.
  */
 export async function openDocumentViewer(
   bytes: Uint8Array,
@@ -132,6 +174,15 @@ export async function openDocumentViewer(
   const document = module.openViewDocument(bytes);
   let pageGap: number;
   let list: DisplayList | null;
+  // A registry per open: its failures and sliced faces are this open's. The
+  // engine answers bytes it already holds with their first id.
+  const failures: Error[] = [];
+  const source = createRustMeasureSource({
+    engine: module.viewTextEngine,
+    runtime: viewerRuntime,
+    progressive: true,
+    onError: (error) => failures.push(error),
+  });
   try {
     const parsed = JSON.parse(document.layoutRequestJson()) as ViewRequest;
     const request = options.reading ? readingRequest(parsed, options.reading) : parsed;
@@ -140,8 +191,8 @@ export async function openDocumentViewer(
     const requirements = JSON.parse(
       document.fontRequirementsJson(requestJson)
     ) as ResidentFontRequirement[];
-    const source = (measureSource ??= createRustMeasureSource({ engine: module.viewTextEngine }));
     await source.prepareFontRequirements(requirements);
+    if (failures.length > 0) throw failures[0];
     source.setCompat(request.regions.settings?.compatibilityFlags);
     const measurement = source.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error('DOCX viewer fonts did not load');
@@ -166,6 +217,7 @@ export async function openDocumentViewer(
   }
   // Every page is built: the engine goes now, not on dispose.
   document.free();
+  let sliced = await outlineSlicedFaces(source.progressiveFaces(), list!);
   return {
     displayList(gap) {
       if (!list) throw new Error('DOCX viewer handle is disposed');
@@ -174,8 +226,13 @@ export async function openDocumentViewer(
       }
       return list;
     },
+    slicedFaces() {
+      if (!list) throw new Error('DOCX viewer handle is disposed');
+      return sliced;
+    },
     dispose() {
       list = null;
+      sliced = [];
     },
   };
 }

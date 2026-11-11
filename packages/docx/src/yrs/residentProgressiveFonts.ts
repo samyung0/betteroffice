@@ -40,6 +40,41 @@ interface OutlineEngine {
   updateFontOutlines(fontId: number, bytes: Uint8Array): void;
 }
 
+/** The glyph ids and characters a font draws. */
+export interface DrawnGlyphs {
+  glyphs: Set<number>;
+  characters: Set<string>;
+}
+
+/**
+ * Glyph ids and characters per font id drawn by a display page: its own runs
+ * and those of its regions (headers, footers, text boxes) and note areas.
+ */
+export function drawnByFont(page: unknown, into = new Map<number, DrawnGlyphs>()): Map<number, DrawnGlyphs> {
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 12 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, depth + 1);
+      return;
+    }
+    const value = node as { kind?: unknown; fontId?: unknown; glyphs?: unknown; text?: unknown; paintText?: unknown };
+    if (value.kind === 'glyphRun' && typeof value.fontId === 'number' && Array.isArray(value.glyphs)) {
+      let drawn = into.get(value.fontId);
+      if (!drawn) into.set(value.fontId, drawn = { glyphs: new Set(), characters: new Set() });
+      for (const glyph of value.glyphs as Array<{ id?: unknown }>) {
+        if (typeof glyph.id === 'number') drawn.glyphs.add(glyph.id);
+      }
+      for (const text of [value.text, value.paintText]) {
+        if (typeof text === 'string') for (const character of text) drawn.characters.add(character);
+      }
+      return;
+    }
+    for (const child of Object.values(node)) visit(child, depth + 1);
+  };
+  visit(page, 0);
+  return into;
+}
+
 /** Glyph ids per font id drawn by a display page: its own runs and those of its regions and note areas. */
 export function glyphsByFont(page: unknown, into = new Map<number, Set<number>>()): Map<number, Set<number>> {
   const visit = (node: unknown, depth: number): void => {

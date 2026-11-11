@@ -22,6 +22,10 @@ rewrites.
 - `book-30p.docx`, `images-10.docx` and `deck-50.pptx` come from a full run of the Capy
   storage probe `gen_files.py` (seeded RNG): a text-only book, ten large pictures, and 50
   text-heavy slides. The golden seed tests pin their seeds and state sizes.
+- `long-handbook.docx` (Capy `bench/editor/fixtures/office`, `gen_long_docx.py`) is a 61-page
+  document of Latin, Simplified and Traditional Chinese paragraphs; `japanese.docx` (Capy's
+  Japanese DOCX probe) is one page of Japanese text tagged `ja-JP`. With `exchange-plan.docx`
+  they pin that sliced CJK faces lay out as the whole faces do.
 - `wordprocessingml-comprehensive.docx` (a copy of the `betteroffice-docx` corpus fixture)
   carries run-level `w:rFonts w:hint`, so the golden seed test sees a change to how runs seed.
 

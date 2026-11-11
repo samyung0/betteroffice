@@ -80,10 +80,11 @@ test('outlines a frame draws install before it paints, one fetch per chunk acros
   expect(new Set([...first, ...second])).toEqual(new Set([10]));
   expect(updates.map((update) => update.fontId)).toEqual([10]);
   expect(hits.get(chunkFile(41))).toBe(1);
-  expect([ref.index, index.skeleton.file, index.core.file].map((file) => hits.get(file))).toEqual([1, 1, 1]);
+  // The core loads like any chunk, when a glyph needs it.
+  expect([ref.index, index.skeleton.file, index.core.file].map((file) => hits.get(file))).toEqual([1, 1, undefined]);
   expect(resident.fontIdsOf(new Set([10]))).toEqual(new Set([10, 11]));
 
-  expect(await resident.ensure(new Map([[10, new Set([glyph, glyphIn(0)])]]))).toEqual(new Set());
+  expect(await resident.ensure(new Map([[10, new Set([glyph])]]))).toEqual(new Set());
   expect(updates).toHaveLength(1);
   expect(hits.get(chunkFile(41))).toBe(1);
   expect(await resident.ensure(new Map([[99, new Set([glyph])]]))).toEqual(new Set());

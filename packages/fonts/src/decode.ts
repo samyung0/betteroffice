@@ -327,6 +327,16 @@ function decodeWasm(
   }
 }
 
+/**
+ * Starts fetching and instantiating the decoder `decodeFontFace` would use,
+ * so a face that arrives finds it ready. Node decodes zstd built in and skips
+ * it; a failure here is left for the decode to report.
+ */
+export function preloadFontDecoder(wasmUrl?: URL): void {
+  if (typeof builtinModule<NodeZlibLike>('node:zlib')?.zstdDecompressSync === 'function') return;
+  void loadDecoder(wasmUrl).catch(() => {});
+}
+
 export async function decodeFontBytes(
   bytes: ArrayBuffer | Uint8Array,
   dict?: ArrayBuffer | Uint8Array,

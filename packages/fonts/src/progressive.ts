@@ -17,6 +17,8 @@ export interface ProgressiveFontFace {
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
   /** Starts loading the outlines of these characters' glyphs; `ensureGlyphs` is authoritative. */
   prefetch(text: string): void;
+  /** Loads the outlines of every glyph these characters can shape to; resolves with a revision that includes them. */
+  ensureText(text: string): Promise<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
@@ -123,18 +125,20 @@ async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Ui
   return new Uint8Array(decoded);
 }
 
-/** @internal Loads a sliced face's index, skeleton and core; chunks follow on demand. */
+/**
+ * @internal Loads a sliced face's index and skeleton; every outline chunk, the
+ * core (chunk 0) included, loads when a glyph or character needs it.
+ */
 export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
   const indexBytes = await transport.read(ref.index);
   if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
   if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
-  const [skeletonBytes, core] = await Promise.all([readFile(transport, index.skeleton), readFile(transport, index.core)]);
-  const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
-  const files = new Map<number, SliceFile>(index.chunks.map((chunk) => [chunk.id!, chunk]));
+  const skeleton: SliceSkeleton = parseSkeleton(await readFile(transport, index.skeleton));
+  const files = new Map<number, SliceFile>([[0, index.core], ...index.chunks.map((chunk): [number, SliceFile] => [chunk.id!, chunk])]);
   const outlines = new Map<number, Uint8Array>();
-  const loaded = new Set<number>([0]);
+  const loaded = new Set<number>();
   const pending = new Map<number, Promise<void>>();
   const listeners = new Set<(revision: number) => void>();
   let revision = 1;
@@ -142,7 +146,6 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   const install = (bytes: Uint8Array) => {
     for (const [glyph, outline] of chunkEntries(bytes)) outlines.set(glyph, outline);
   };
-  install(core);
 
   const load = (chunk: number): Promise<void> => {
     if (loaded.has(chunk)) return Promise.resolve();
@@ -186,6 +189,17 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     return next;
   };
 
+  // A chunk holds the GSUB closure of its codepoints, so these chunks hold
+  // every glyph a shaper can draw for `text`.
+  const ensureText = (text: string): Promise<number> => {
+    const chunks: number[] = [];
+    for (const character of text) {
+      const chunk = skeleton.chunkOfCodepoint(character.codePointAt(0)!);
+      if (chunk !== undefined) chunks.push(chunk);
+    }
+    return ensure(chunks);
+  };
+
   const face: ProgressiveFontFace = {
     get revision() {
       return revision;
@@ -202,13 +216,9 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return ensure(chunks);
     },
     prefetch(text) {
-      const chunks: number[] = [];
-      for (const character of text) {
-        const chunk = skeleton.chunkOfCodepoint(character.codePointAt(0)!);
-        if (chunk !== undefined) chunks.push(chunk);
-      }
-      void ensure(chunks).catch(() => {});
+      void ensureText(text).catch(() => {});
     },
+    ensureText,
     onUpdate(listener) {
       listeners.add(listener);
       return () => {
@@ -216,7 +226,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       };
     },
     complete() {
-      return loaded.size === files.size + 1;
+      return loaded.size === files.size;
     },
   };
   opened.set(face, [ref, index, transport]);

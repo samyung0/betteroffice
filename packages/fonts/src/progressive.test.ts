@@ -72,11 +72,11 @@ test('every sliced face reassembles from all its chunks to its recorded SHA-256 
   }
 });
 
-test('a progressive face loads index, skeleton and core, then only the chunks of the glyphs asked for', async () => {
+test('a progressive face loads index and skeleton, then only the chunks of the glyphs asked for, the core included', async () => {
   const reads: string[] = [];
   const face = await openProgressiveFace(jpRef, transport(reads));
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
-  expect(reads.sort()).toEqual([jpRef.index, index.core.file, index.skeleton.file].sort());
+  expect(reads.sort()).toEqual([jpRef.index, index.skeleton.file].sort());
   expect(face.revision).toBe(1);
   expect(face.complete()).toBe(false);
   const skeleton = parseSkeleton(await decode(index.skeleton.file));
@@ -90,7 +90,10 @@ test('a progressive face loads index, skeleton and core, then only the chunks of
   face.onUpdate((revision) => updates.push(revision));
 
   reads.length = 0;
-  expect(await face.ensureGlyphs([glyphOf(0)])).toBe(1);
+  expect(await face.ensureGlyphs([glyphOf(0)])).toBe(2);
+  expect(reads).toEqual([index.core.file]);
+  reads.length = 0;
+  expect(await face.ensureGlyphs([glyphOf(0)])).toBe(2);
   expect(reads).toEqual([]);
 
   const [first, second] = await Promise.all([face.ensureGlyphs([glyphOf(40)]), face.ensureGlyphs([glyphOf(40), glyphOf(41)])]);
@@ -197,16 +200,15 @@ test('opening rejects an index whose SHA-256 differs from the manifest pointer',
 test('a served index, skeleton, core or chunk changed at its recorded length is refused by its SHA-256', async () => {
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
   await expect(openProgressiveFace(jpRef, flipping(jpRef.index))).rejects.toThrow(`Font slice index ${jpRef.index} SHA-256 mismatch`);
-  for (const file of [index.skeleton.file, index.core.file]) {
-    await expect(openProgressiveFace(jpRef, flipping(file))).rejects.toThrow(`Font slice ${file} SHA-256 mismatch`);
-  }
-  const chunk = index.chunks[9]!.file;
-  const face = await openProgressiveFace(jpRef, flipping(chunk));
+  await expect(openProgressiveFace(jpRef, flipping(index.skeleton.file))).rejects.toThrow(`Font slice ${index.skeleton.file} SHA-256 mismatch`);
   const skeleton = parseSkeleton(await decode(index.skeleton.file));
-  let glyph = 0;
-  while (skeleton.chunkOfGlyph(glyph) !== 10) glyph += 1;
-  await expect(face.ensureGlyphs([glyph])).rejects.toThrow(`Font slice ${chunk} SHA-256 mismatch`);
-  expect(face.revision).toBe(1);
+  for (const [file, chunk] of [[index.core.file, 0], [index.chunks[9]!.file, 10]] as const) {
+    const face = await openProgressiveFace(jpRef, flipping(file));
+    let glyph = 0;
+    while (skeleton.chunkOfGlyph(glyph) !== chunk) glyph += 1;
+    await expect(face.ensureGlyphs([glyph])).rejects.toThrow(`Font slice ${file} SHA-256 mismatch`);
+    expect(face.revision).toBe(1);
+  }
 });
 
 test('the progressive entry reaches no module that reads import.meta, so classic workers can load it', async () => {

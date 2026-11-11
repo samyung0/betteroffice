@@ -6,7 +6,7 @@ export type { ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';
-import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, sliceDecoder, sliceRefOf } from './packed';
+import { loadPackedFontBytes, readPackedFontBytes, isBaseLatinFont, isLatinFont, preloadDecoder, sliceDecoder, sliceRefOf } from './packed';
 import { BASE_LATIN_FONT_ASSET_URLS } from './base-latin';
 import type { SliceLocation } from './progressive';
 
@@ -62,7 +62,10 @@ function loadIntlAssetUrls(): Promise<Record<string, () => URL> | undefined> {
 
 let latinAssetUrls: Promise<Record<string, () => URL> | undefined> | undefined;
 
-class MissingCjkAddonError extends Error {}
+/** Named so the DOCX layout can tell an absent optional add-on from a face that failed. */
+class MissingCjkAddonError extends Error {
+  override name = 'MissingCjkAddonError';
+}
 
 const UNRESOLVED_LATIN_ADDON =
   /^(?:Cannot find (?:module|package)|Failed to resolve module specifier|Error resolving module specifier|The specifier|Module name,) ["'“]@betteroffice\/fonts-latin["'”]/;
@@ -227,14 +230,36 @@ function sliceLocation(
   runtime?: { decoder?: FontDecoder; retain?: boolean },
 ): SliceLocation | undefined {
   const ref = sliceRefOf(face.file);
-  return ref && {
+  if (!ref) return undefined;
+  const wasmUrl = baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl);
+  let decoderStarted = false;
+  return {
     ref,
     base: baseUrl?.href ?? '',
-    url: (file) => sliceAssetUrl(file, baseUrl),
-    decode: sliceDecoder(baseUrl === undefined ? undefined : new URL('decoder/fontpack.wasm', baseUrl), runtime?.decoder),
+    // The first file requested also starts the decoder loading.
+    url: (file) => {
+      if (!decoderStarted) preloadDecoder(wasmUrl, runtime?.decoder);
+      decoderStarted = true;
+      return sliceAssetUrl(file, baseUrl);
+    },
+    decode: sliceDecoder(wasmUrl, runtime?.decoder),
     decoder: runtime?.decoder,
     retain: runtime?.retain,
   };
+}
+
+/**
+ * Where a CJK face's slices are, for a host's own font loader to carry as
+ * `slices` so the DOCX layout opens the face from its skeleton and loads only
+ * the outline chunks its glyphs need; `undefined` for a face not shipped in
+ * slices. `options` and `runtime` are those its whole-face loads use.
+ */
+export function bundledFontSlices(
+  face: BundledFontFace,
+  options?: FontAssetOptions,
+  runtime?: { decoder?: FontDecoder; retain?: boolean },
+): SliceLocation | undefined {
+  return sliceLocation(face, options?.baseUrl === undefined ? undefined : resolvedAssetBase(options.baseUrl), runtime);
 }
 
 /** Loads font bytes into consumer-owned buffers with retryable failures. */

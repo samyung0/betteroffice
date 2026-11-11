@@ -1,12 +1,24 @@
 /** Where a sliced face's files are, as `@betteroffice/fonts` loaders carry it; opaque to the registry. */
 export type SliceLocation = object;
 
-/** What the registry uses of a face `@betteroffice/fonts/progressive` opens. */
+/** What the layout uses of a face `@betteroffice/fonts/progressive` opens. */
 export interface ProgressiveFontFace {
+  /** Increases each time outlines are added. */
+  readonly revision: number;
+  /** The face with every outline loaded so far. */
   bytes(): ArrayBuffer;
+  ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
+  ensureText(text: string): Promise<number>;
+}
+
+/** A sliced face registered from its skeleton, and where it came from. */
+export interface SlicedFontFace {
+  face: ProgressiveFontFace;
+  slices: SliceLocation;
 }
 
 import { baseLatinAlias, baseLatinCandidate, coverageFromBits, symbolFamily, wordsCoverage, type FontCoverage } from './fontCoverage';
+import { ImplicitFontAbsentError } from './defaultFontProvider';
 
 async function parsedCoverage(data: Uint8Array): Promise<FontCoverage | undefined> {
   try {
@@ -47,6 +59,12 @@ export interface TextEngineFontSink {
    * its own metrics.
    */
   registerSubstituteFont?(id: number, family: string): number;
+  /**
+   * Called once `id` is registered from a sliced face's skeleton:
+   * its glyphs measure exactly, and their outlines install with
+   * `face.ensureGlyphs` and the engine's outline update before they paint.
+   */
+  registerSlicedFont?(id: number, face: ProgressiveFontFace): void;
 }
 
 /**
@@ -244,25 +262,40 @@ export class TextMeasureFontRegistry {
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
 
-  /** Script-fallback faces registered from their skeleton and core, by font id. */
-  private progressiveIds = new Map<number, ProgressiveFontFace>();
+  /** Sliced faces registered from their skeleton, by font id and measurement view id. */
+  private progressiveIds = new Map<number, SlicedFontFace>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  private readonly onError?: (error: Error) => void;
 
-  /** `progressive` opens sliced faces, which register from their skeleton and core. */
+  /**
+   * `progressive` opens sliced faces, which register from their skeleton.
+   * `onError` hears every face that fails to load (the chain then
+   * measures without it), so a host can show the failure rather than a
+   * fallback layout.
+   */
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
     progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    onError?: (error: Error) => void;
   }) {
     this.sink = sink;
     this.bundledSource = opts?.bundled;
     this.baseLatinSource = opts?.baseLatin;
     this.progressive = opts?.progressive;
+    this.onError = opts?.onError;
   }
 
-  /** The sliced faces registered from their skeleton and core, by font id. */
-  progressiveFaces(): ReadonlyMap<number, ProgressiveFontFace> {
+  /** The sliced faces registered from their skeleton, by font id and measurement view id. */
+  progressiveFaces(): ReadonlyMap<number, SlicedFontFace> {
     return this.progressiveIds;
+  }
+
+  /** Warns once and reports a face that failed to load; an absent optional add-on is not a failure. */
+  private failed(message: string, error: unknown): void {
+    this.warnFailure(`${message}: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof ImplicitFontAbsentError) return;
+    this.onError?.(error instanceof Error ? error : new Error(String(error)));
   }
 
   /** Shares in-flight resolution but evicts misses for retry. */
@@ -421,9 +454,9 @@ export class TextMeasureFontRegistry {
           coverage: (id) => this.coverage.get(id),
           candidate: baseLatinCandidate,
         });
-      } catch {
+      } catch (error) {
         failed = new Set(missing);
-        this.warnFailure(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`);
+        this.failed(`[fontRegistry] base Latin face for "${family}" failed to load; falling back`, error);
       }
     }
     if (generation !== this.generation) return false;
@@ -510,14 +543,13 @@ export class TextMeasureFontRegistry {
     const ids: number[] = [];
     let retryable = false;
 
-    for (const byFamily of [this.facesByFamily, this.appFacesByFamily]) {
+    // Every face the chain may use starts loading at once, so a document's
+    // faces download in one batch; the ids still go in chain order. Only a
+    // last resort that stands in for a failed primary waits for it.
+    const embedded = [this.facesByFamily, this.appFacesByFamily].map((byFamily) => {
       const face = this.pickEmbeddedFace(family, bold, italic, byFamily);
-      if (face) {
-        const id = await this.registerFace(face);
-        if (id !== null && !ids.includes(id)) ids.push(id);
-        else if (id === null) retryable = true;
-      }
-    }
+      return face && this.registerFace(face);
+    });
 
     const bundled = await this.bundled();
     if (bundled === undefined && typeof this.bundledSource === 'function') retryable = true;
@@ -531,14 +563,6 @@ export class TextMeasureFontRegistry {
           `${error instanceof Error ? error.message : String(error)}`
       );
     }
-    let primaryRegistered = false;
-    if (loader) {
-      const id = await this.registerBundled(key, loader, family);
-      if (id !== null && !ids.includes(id)) ids.push(id);
-      if (id === null) retryable = true;
-      primaryRegistered = id !== null;
-    }
-
     // Terminal link: the always-available last-resort base face. Appended after
     // the embedded + metric-compatible faces so the chain NEVER ends empty — a
     // run whose family has no embedded/bundled match still has real (Liberation)
@@ -555,21 +579,38 @@ export class TextMeasureFontRegistry {
           `${error instanceof Error ? error.message : String(error)}`
       );
     }
-    if (lastResort && !(lastResort.onlyIfPrimaryFails && primaryRegistered)) {
-      const id = await this.registerLastResort(key, lastResort, family);
-      if (id !== null && !ids.includes(id)) ids.push(id);
-      if (id === null) retryable = true;
-    }
-
+    let coverage: (() => Promise<ArrayBuffer>) | undefined;
     try {
-      const coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
-      if (coverage) {
-        const id = await this.registerLastResort(`${key}|coverage`, coverage, family);
-        if (id !== null && !ids.includes(id)) ids.push(id);
-        if (id === null) retryable = true;
-      }
+      coverage = bundled?.resolveGlyphFallback?.(family, bold, italic, 'word');
     } catch {
       retryable = true;
+    }
+
+    const primary = loader && this.registerBundled(key, loader, family);
+    const eagerLastResort = lastResort && !lastResort.onlyIfPrimaryFails
+      ? this.registerLastResort(key, lastResort, family) : undefined;
+    const glyphFallback = coverage && this.registerLastResort(`${key}|coverage`, coverage, family);
+
+    for (const pending of embedded) {
+      if (!pending) continue;
+      const id = await pending;
+      if (id !== null && !ids.includes(id)) ids.push(id);
+      else if (id === null) retryable = true;
+    }
+    let primaryRegistered = false;
+    if (primary) {
+      const id = await primary;
+      if (id !== null && !ids.includes(id)) ids.push(id);
+      if (id === null) retryable = true;
+      primaryRegistered = id !== null;
+    }
+    const lastResortId = eagerLastResort ??
+      (lastResort && !primaryRegistered ? this.registerLastResort(key, lastResort, family) : undefined);
+    for (const pending of [lastResortId, glyphFallback]) {
+      if (!pending) continue;
+      const id = await pending;
+      if (id !== null && !ids.includes(id)) ids.push(id);
+      if (id === null) retryable = true;
     }
 
     if (ids.length === 0) {
@@ -643,6 +684,8 @@ export class TextMeasureFontRegistry {
       if (coverage) this.coverage.set(id, coverage);
       const exact = this.inexact.get(base);
       if (exact) this.inexact.set(id, exact);
+      const sliced = this.progressiveIds.get(base);
+      if (sliced) this.progressiveIds.set(id, sliced);
       return id;
     } catch (error) {
       this.warnFailure(
@@ -694,8 +737,13 @@ export class TextMeasureFontRegistry {
     if (coverage) this.coverage.set(id, coverage);
   }
 
-  /** Registers a sliced face's skeleton and core when progressive loading is on, else the whole face. */
-  private registerFaceLoader(loader: BundledFontLoader, label: string): Promise<number> {
+  /**
+   * Registers a sliced face's skeleton when progressive loading is
+   * on, else the whole face. A sliced face that fails to open fails: only a
+   * host without the optional CJK add-on loads the face whole, which stands in
+   * a Latin face.
+   */
+  private registerFaceLoader(loader: BundledFontLoader): Promise<number> {
     const open = this.progressive;
     const slices = loader.slices;
     if (open === undefined || slices === undefined) return this.registerLoader(loader);
@@ -708,16 +756,17 @@ export class TextMeasureFontRegistry {
         try {
           face = await open(slices);
         } catch (error) {
-          this.warnFailure(
-            `[fontRegistry] sliced face for "${label}" failed to open; loading it whole: ` +
-              `${error instanceof Error ? error.message : String(error)}`
-          );
+          if ((error as { name?: unknown } | null)?.name !== 'MissingCjkAddonError') throw error;
           return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
         }
         const known = loader.coverage === undefined ? undefined
           : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
         const id = await this.registerBuffer(face.bytes(), undefined, known);
-        if (generation === this.generation) this.progressiveIds.set(id, face);
+        // Identical skeletons register once; the first face opened keeps the id.
+        if (generation === this.generation && !this.progressiveIds.has(id)) {
+          this.progressiveIds.set(id, { face, slices });
+          this.sink.registerSlicedFont?.(id, face);
+        }
         return id;
       })();
       evictFailedPromise(ids, loader, pending, () => false);
@@ -772,13 +821,10 @@ export class TextMeasureFontRegistry {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const base = await this.registerFaceLoader(loader, family);
+          const base = await this.registerFaceLoader(loader);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
-          this.warnFailure(
-            `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
-              `falling back: ${error instanceof Error ? error.message : String(error)}`
-          );
+          this.failed(`[fontRegistry] bundled face for "${family}" failed to load or register; falling back`, error);
           return null;
         }
       })();
@@ -803,11 +849,8 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           return this.measuredAs(await this.registerLoader(loader), family);
-        } catch {
-          this.warnFailure(
-            `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +
-              'falling back'
-          );
+        } catch (error) {
+          this.failed(`[fontRegistry] last-resort base face for "${family}" failed to load or register; falling back`, error);
           return null;
         }
       })();
@@ -839,13 +882,10 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            id = await this.registerFaceLoader(loader, script);
+            id = await this.registerFaceLoader(loader);
           } catch (error) {
             retryable = true;
-            this.warnFailure(
-              `[fontRegistry] script-fallback face for "${script}" failed to load or register; ` +
-                `falling back: ${error instanceof Error ? error.message : String(error)}`
-            );
+            this.failed(`[fontRegistry] script-fallback face for "${script}" failed to load or register; falling back`, error);
           }
         }
         const resolution = { id, retryable };

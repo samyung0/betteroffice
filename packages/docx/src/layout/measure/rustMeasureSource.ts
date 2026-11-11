@@ -1,4 +1,4 @@
-import type { ProgressiveFontSpec } from '../../yrs/residentProgressiveFonts';
+import type { ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder } from '@betteroffice/fonts';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
@@ -15,6 +15,8 @@ import {
   type BundledFontProvider,
   type EmbeddedFaceInput,
   type FontScript,
+  type ProgressiveFontFace,
+  type SlicedFontFace,
 } from './fontRegistry';
 
 export interface RustTextEngine {
@@ -26,6 +28,12 @@ export interface RustTextEngine {
    * metrics.
    */
   registerSubstituteFont?(id: number, family: string): number;
+  /**
+   * `id` was registered from a sliced face's skeleton: the engine
+   * installs the face's outlines as its pages need them. `source` names its
+   * files, for an engine worker to open the same face.
+   */
+  registerSlicedFont?(id: number, face: ProgressiveFontFace, source: ProgressiveFontSource): void;
   clearFonts(): void;
 }
 
@@ -83,8 +91,8 @@ export interface RustMeasureSource {
     requirements: ResidentFontRequirement[],
   ): (next: ResidentFontRequirement[]) => boolean;
   clear(): void;
-  /** The script-fallback slots registered from a sliced face's skeleton and core, with their files. */
-  progressiveFonts?(): Promise<ProgressiveFontSpec[]>;
+  /** The sliced faces registered from their skeleton, by font id and measurement view id. */
+  progressiveFaces(): ReadonlyMap<number, SlicedFontFace>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -106,8 +114,13 @@ export function createRustMeasureSource(options: {
   engine: RustTextEngine;
   bundled?: BundledFontProvider;
   runtime?: { decoder?: FontDecoder };
-  /** Register sliced script-fallback faces from their skeleton and core. */
+  /**
+   * Register sliced faces (the CJK faces whose loaders carry `slices`) from
+   * their skeleton (every table but the outlines); their outlines load as glyphs need them.
+   */
   progressive?: boolean;
+  /** Hears every face that fails to load, sliced faces and the base Latin backstop included. */
+  onError?: (error: Error) => void;
 }): RustMeasureSource {
   const engine = options.engine;
   const hosted = hostedFontFamilies(options.bundled);
@@ -116,12 +129,17 @@ export function createRustMeasureSource(options: {
   let appFamilies = new Set<string>();
   const hostedCoverageUnknown = (family: string) => implicit &&
     hosted?.has(family.trim().toLowerCase()) === true && !appFamilies.has(family.trim().toLowerCase());
+  // The files of each sliced face, which an engine worker opens the face from.
+  const sources = new WeakMap<ProgressiveFontFace, ProgressiveFontSource>();
   const registry = new TextMeasureFontRegistry(
     {
       registerFont: (bytes, face) => face ? engine.registerFont(bytes, face) : engine.registerFont(bytes),
       ...(engine.registerSubstituteFont && {
         registerSubstituteFont: (id, family) =>
           engine.registerSubstituteFont!(id, family),
+      }),
+      ...(engine.registerSlicedFont && {
+        registerSlicedFont: (id, face) => engine.registerSlicedFont!(id, face, sources.get(face)!),
       }),
     },
     { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {
@@ -132,24 +150,20 @@ export function createRustMeasureSource(options: {
     }), progressive: options.progressive
       ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
         const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
-        if (!sliceSourceOf(face)) throw new Error('A sliced face opened without file URLs cannot load its outlines in the worker');
+        if (engine.registerSlicedFont) {
+          const source = await sliceSourceOf(face);
+          if (!source) throw new Error('A sliced face opened without file URLs cannot load its outlines in a worker');
+          sources.set(face, source);
+        }
         return face;
       })
-      : undefined },
+      : undefined,
+    onError: options.onError },
   );
   let compat: CompatibilityFlags | undefined;
 
   return {
-    async progressiveFonts() {
-      const specs: ProgressiveFontSpec[] = [];
-      if (registry.progressiveFaces().size === 0) return specs;
-      const { sliceSourceOf } = await import('@betteroffice/fonts/progressive');
-      for (const [slot, face] of registry.progressiveFaces()) {
-        const source = await sliceSourceOf(face as Parameters<typeof sliceSourceOf>[0]);
-        if (source) specs.push({ slot, source });
-      }
-      return specs;
-    },
+    progressiveFaces: () => registry.progressiveFaces(),
 
     setEmbeddedFaces(faces, appFaces): void {
       appFamilies = new Set((appFaces ?? []).map(face => face.family.trim().toLowerCase()));
