@@ -346,6 +346,14 @@ jobs:
           cargo test -p betteroffice-fonts --features manager
           cargo test -p betteroffice-fonts --features manager,fonts-latin,fonts-intl,fonts-cjk
 
+      # The xlsx scan and parse counter tests compile only under `test-counters`,
+      # which no other job or workspace member turns on.
+      - name: Test the xlsx counter tests
+        if: steps.ws.outputs.present == 'true'
+        run: |
+          cargo test -p betteroffice-xlsx-parse --features test-counters
+          cargo test -p betteroffice-xlsx-render --features test-counters
+
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
         run: node scripts/publish-crates.mjs --dry-run
