@@ -447,7 +447,8 @@ fn autofit_rows(
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
-        let style = sheet.effective_style(at);
+        // a present cell's effective style is its own
+        let style = cell.style;
         let wrapped = wrapped_height(styles, style, cell, column_px(at.col), inset, normal, fit)
             .filter(|height| cached_default || *height > default_pt)
             .filter(|_| !anchors.contains(&(at.row, at.col)));
@@ -1020,7 +1021,7 @@ impl GridGeometry {
                     if self.spanned.contains(&(at.row, at.col)) {
                         continue;
                     }
-                    let style = sheet.effective_style(at);
+                    let style = cell.style;
                     let cached_default = sheet.format.default_row_height_pt.is_some();
                     let wrapped = wrapped_height(
                         styles,
@@ -1256,6 +1257,49 @@ mod tests {
             GridGeometry::new(&sheet, &styles).row_y(5),
             row_pt_to_px(DEFAULT_ROW_HEIGHT_PT)
         );
+    }
+
+    #[cfg(feature = "test-counters")]
+    #[test]
+    fn row_fit_reads_each_present_cells_own_style() {
+        let mut sheet = Sheet::new("Fit");
+        for row in 0..3 {
+            sheet.set_cell(
+                CellRef::new(row, 0),
+                xlsx_model::workbook::Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    style: (row == 1).then_some(1),
+                    ..Default::default()
+                },
+            );
+        }
+        let mut styles = Stylesheet::default();
+        styles.fonts = vec![
+            Font::default(),
+            Font {
+                size_pt: Some(32.0),
+                ..Default::default()
+            },
+        ];
+        styles.cell_xfs = vec![
+            Xf::default(),
+            Xf {
+                font: Some(1),
+                ..Default::default()
+            },
+        ];
+        reset_geometry_counters();
+        xlsx_model::open_timing::begin();
+        let mut grid = GridGeometry::new(&sheet, &styles);
+        grid.update_rows(&sheet, &styles, [0, 1, 2]);
+        let sample = xlsx_model::open_timing::finish();
+        assert_eq!(geometry_counters().1, 6);
+        assert_eq!(sample.counts.get("style_effective_cells"), None);
+        assert!(
+            (grid.row_y(2) - grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(32.0))).abs()
+                < 0.001
+        );
+        assert_eq!(grid.row_y(1), row_pt_to_px(DEFAULT_ROW_HEIGHT_PT));
     }
 
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {

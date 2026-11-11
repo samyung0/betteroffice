@@ -25,7 +25,7 @@ xlsx-model.workspace = true
 libm.workspace = true
 
 [features]
-test-counters = []
+test-counters = ["xlsx-model/test-counters"]
 
 [dev-dependencies]
 serde_json = "1"
