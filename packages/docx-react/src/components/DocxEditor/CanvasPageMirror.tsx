@@ -5,7 +5,8 @@
  * painted. The mirror is invisible (opacity 0) and inert to the pointer
  * (pointer-events none) but deliberately NOT aria-hidden — it is the
  * accessible content of the canvas. Rebuilt whenever the page's display list
- * changes — the same trigger that re-rasters the canvas. A position shift
+ * changes — the same trigger that re-rasters the canvas — and patched into the
+ * mounted mirror, so unchanged blocks keep their nodes. A position shift
  * (same page object, new revision) rewrites the existing nodes' positions
  * instead.
  *
@@ -28,6 +29,7 @@ import { useEffect, useRef } from 'react';
 import {
   buildMirrorPage,
   buildMirrorTextPage,
+  patchMirrorPage,
   syncMirrorPositions,
   type DisplayPage,
 } from '@betteroffice/docx/layout/render';
@@ -113,7 +115,12 @@ export function CanvasPageMirror({
       // Keep the previous mirror connected until this replacement is ready.
       // Clearing in effect cleanup creates a detached-DOM window on every page
       // update; unmounting already removes the host and its complete subtree.
-      host.replaceChildren(mirror);
+      // Patching keeps the unchanged blocks' nodes, so a keystroke restyles and
+      // lays out only the blocks it changed, not the whole page.
+      const current = host.firstElementChild;
+      if (!(current instanceof HTMLElement && patchMirrorPage(current, mirror))) {
+        host.replaceChildren(mirror);
+      }
       builtForRef.current = { page, revision, t, full };
     };
     if (!defer && !swapOnly) {

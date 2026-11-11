@@ -74,6 +74,25 @@ test('a selectable page holding a selection end keeps its positioned mirror', as
   expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(true);
 });
 
+test('a new version of the page keeps the mounted mirror and its unchanged runs', () => {
+  const twoRuns = (last: string) =>
+    ({
+      ...page,
+      primitives: [
+        page.primitives[0],
+        { ...page.primitives[0], text: last, x: 150, docStart: 6, docEnd: 6 + last.length },
+      ],
+    }) as unknown as DisplayPage;
+  const { container, rerender } = render(<CanvasPageMirror page={twoRuns('world')} revision={0} full />);
+  const root = mirrorPage(container);
+  const first = container.querySelector('.layout-run-text');
+
+  rerender(<CanvasPageMirror page={twoRuns('worlds')} revision={0} full />);
+  expect(mirrorPage(container)).toBe(root);
+  expect(container.querySelector('.layout-run-text')).toBe(first);
+  expect(root?.textContent).toBe('Helloworlds');
+});
+
 test('a selection end in a plain-text page does not keep it from turning positioned', async () => {
   const { container, rerender } = render(<CanvasPageMirror page={page} revision={0} full={false} selectable />);
   const plain = container.querySelector('.layout-page-mirror-text')!;

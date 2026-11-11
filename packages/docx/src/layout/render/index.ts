@@ -37,6 +37,7 @@ export {
   buildMirrorTextPage,
   MIRROR_CLASS_NAMES,
   MIRROR_TEXT_PAGE_CLASS,
+  patchMirrorPage,
   syncMirrorPositions,
   type BuildMirrorPageOptions,
   type MirrorLabels,
