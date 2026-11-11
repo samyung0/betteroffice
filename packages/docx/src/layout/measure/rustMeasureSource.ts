@@ -30,10 +30,16 @@ export interface RustTextEngine {
   registerSubstituteFont?(id: number, family: string): number;
   /**
    * `id` was registered from a sliced face's skeleton: the engine
-   * installs the face's outlines as its pages need them. `source` names its
-   * files, for an engine worker to open the same face.
+   * installs the face's outlines as its pages need them, and reports a face
+   * whose outlines fail to load to `onError`. `source` names its files, for
+   * an engine worker to open the same face.
    */
-  registerSlicedFont?(id: number, face: ProgressiveFontFace, source: ProgressiveFontSource): void;
+  registerSlicedFont?(
+    id: number,
+    face: ProgressiveFontFace,
+    source: ProgressiveFontSource,
+    onError: (error: Error) => void,
+  ): void;
   clearFonts(): void;
 }
 
@@ -139,7 +145,8 @@ export function createRustMeasureSource(options: {
           engine.registerSubstituteFont!(id, family),
       }),
       ...(engine.registerSlicedFont && {
-        registerSlicedFont: (id, face) => engine.registerSlicedFont!(id, face, sources.get(face)!),
+        registerSlicedFont: (id, face) => engine.registerSlicedFont!(id, face, sources.get(face)!,
+          options.onError ?? ((error) => console.warn('[rustMeasureSource] font outlines failed to load', error))),
       }),
     },
     { baseLatin: () => import('./baseLatinFaces').then(tier => tier.resolveBaseLatinProvider(baseLatinFontState(), options.runtime)), bundled: (hosted ? undefined : options.bundled) ?? (async () => {

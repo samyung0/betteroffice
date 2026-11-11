@@ -25,6 +25,8 @@ import {
   residentCaretSnapshotForFrame,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
+import { glyphsByFont, ResidentProgressiveFonts, sliceFaceOpener } from './residentProgressiveFonts';
+import { decodeFontFace } from '../wasm/fontDecoder';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
 let session: ResidentEngineSession | null = null;
@@ -55,6 +57,11 @@ let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
+// The fonts registered from sliced faces' skeletons, whose outlines this
+// worker loads and installs before it paints the glyphs; the first face that
+// fails fails the frame, so the host takes over painting.
+let progressiveFonts: ResidentProgressiveFonts | null = null;
+let outlineFailure: Error | null = null;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -266,10 +273,10 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
     session.clearFonts();
-    for (const font of snapshot.fonts) {
-      if (font instanceof Uint8Array) session.registerFont(font);
-      else session.registerSubstituteFont(font.substituteOf, font.family);
-    }
+    const ids = snapshot.fonts.map((font) => font instanceof Uint8Array
+      ? session!.registerFont(font)
+      : session!.registerSubstituteFont(font.substituteOf, font.family));
+    setProgressiveFonts(openProgressiveFonts(snapshot, ids));
     fontsRevision = snapshot.fontsRevision;
   }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
@@ -286,6 +293,52 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   pendingUpdates = [];
 }
 
+function setProgressiveFonts(next: ResidentProgressiveFonts | null): void {
+  progressiveFonts?.dispose();
+  progressiveFonts = next;
+  glyphCache = null;
+}
+
+/** The snapshot's sliced faces, by the ids this session registered them under. */
+function openProgressiveFonts(
+  snapshot: YrsResidentWorkerSnapshot,
+  ids: number[]
+): ResidentProgressiveFonts | null {
+  const owner = session;
+  if (!owner || !snapshot.progressiveFonts?.length) return null;
+  const fonts = new ResidentProgressiveFonts({
+    updateFontOutlines: (fontId, bytes) => owner.updateFontOutlines(fontId, bytes),
+  });
+  const decode = async (encoded: ArrayBuffer, maxOutput: number) =>
+    (await decodeFontFace(encoded, { codec: 'zstd', maxOutput })).font;
+  for (const { slot, source } of snapshot.progressiveFonts) {
+    fonts.add(ids[slot] ?? slot, sliceFaceOpener(source, decode), (error) => {
+      outlineFailure ??= error;
+    });
+  }
+  snapshot.fonts.forEach((font, index) => {
+    if (!(font instanceof Uint8Array)) fonts.addView(ids[index]!, ids[font.substituteOf] ?? font.substituteOf);
+  });
+  // Outlines a frame stopped waiting for repaint every page once they land.
+  fonts.onLateInstall(() => {
+    if (progressiveFonts !== fonts) return;
+    glyphCache = null;
+    intactBackBuffers.clear();
+    operations = operations.then(() => replayOffscreen(true)).then(() => {}, () => {});
+  });
+  return fonts;
+}
+
+/** Installs the outlines `page` draws from sliced faces, or waits for them up to the guard. */
+async function ensureOutlines(page: unknown): Promise<void> {
+  const fonts = progressiveFonts;
+  if (fonts) {
+    const changed = await fonts.ensure(glyphsByFont(page));
+    if (changed.size > 0) glyphCache?.invalidateFonts(changed);
+  }
+  if (outlineFailure) throw outlineFailure;
+}
+
 function subscribe(): void {
   if (!session) return;
   unsubscribe = session.onUpdate((update) => pendingUpdates.push(update.slice()));
@@ -300,7 +353,8 @@ function destroySession(): void {
   layoutRevision = 0;
   fontsRevision = -1;
   retainedFrame = null;
-  glyphCache = null;
+  setProgressiveFonts(null);
+  outlineFailure = null;
   offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
@@ -453,13 +507,17 @@ async function replayOffscreen(
       continue;
     }
     preparations.push(
-      rasterizeDisplayPageToBackBuffer(
-        resolvedBuffer,
-        page,
-        { glyphCache: glyphCache ?? undefined },
-        offscreenDpr,
-        offscreenZoom
-      ).then(() => ({ canvas, buffer: resolvedBuffer, pageId }))
+      ensureOutlines(page)
+        .then(() =>
+          rasterizeDisplayPageToBackBuffer(
+            resolvedBuffer,
+            page,
+            { glyphCache: glyphCache ?? undefined },
+            offscreenDpr,
+            offscreenZoom
+          )
+        )
+        .then(() => ({ canvas, buffer: resolvedBuffer, pageId }))
     );
   }
   const prepared = await Promise.all(preparations).catch(async (error) => {

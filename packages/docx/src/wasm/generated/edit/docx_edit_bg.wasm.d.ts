@@ -148,6 +148,7 @@ export const editsession_toggle_mark: (a: number, b: number, c: number, d: numbe
 export const editsession_track_undo: (a: number) => void;
 export const editsession_undo: (a: number) => number;
 export const editsession_undo_capture_mode: (a: number) => [number, number];
+export const editsession_update_measure_font_outlines: (a: number, b: number, c: number, d: number) => [number, number];
 export const editsession_update_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

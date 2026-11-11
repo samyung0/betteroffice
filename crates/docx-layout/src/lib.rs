@@ -1129,6 +1129,12 @@ pub fn update_measure_font_outlines(id: u32, bytes: &[u8]) -> Result<(), String>
     })
 }
 
+/// [`update_measure_font_outlines`] in the store [`register_measure_font_module`]
+/// registers into.
+pub fn update_measure_font_outlines_module(id: u32, bytes: &[u8]) -> Result<(), String> {
+    with_module_fonts(|| update_measure_font_outlines(id, bytes))
+}
+
 /// Reads what measurement font `id` measures with: the bytes it shapes and a descriptor of the
 /// metrics, fallback advance scale and widths layered over them. `None` for an unknown id.
 pub fn with_measure_face<T>(id: u32, read: impl FnOnce(&[u8], &str) -> T) -> Option<T> {
@@ -1323,6 +1329,46 @@ mod tests {
             assert_eq!(measure_fonts_generation().1, 0);
             assert_eq!(register_measure_font_bytes(LIBERATION_SANS).unwrap(), 0);
         }
+    }
+
+    #[test]
+    fn module_outline_updates_install_a_sliced_face_s_chunks_and_refuse_other_faces() {
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/fonts-cjk/assets/NotoSansJP-Regular");
+        let read = |file: &str| {
+            betteroffice_fonts::decode(&std::fs::read(assets.join(file)).unwrap(), None, 64 << 20)
+                .unwrap()
+        };
+        let skeleton_bytes = read("skeleton.zst");
+        let skeleton = betteroffice_fonts::slices::Skeleton::parse(&skeleton_bytes).unwrap();
+        let core = read("core.zst");
+        let id = register_measure_font_module(&skeleton.reassemble(&[]).unwrap()).unwrap();
+        let glyph = with_module_fonts(|| {
+            with_measure_fonts(|store| {
+                store
+                    .borrow()
+                    .glyph_id(ooxml_text::FontId::from_u32(id), 'あ')
+                    .unwrap()
+                    .unwrap()
+            })
+        });
+        let commands = || {
+            let outline: serde_json::Value = serde_json::from_str(
+                &with_module_fonts(|| outline_glyph_json_str(id, u32::from(glyph))).unwrap(),
+            )
+            .unwrap();
+            outline["cmds"].as_array().unwrap().len()
+        };
+        assert_eq!(commands(), 0);
+        let with_core = skeleton.reassemble(&[core.as_slice()]).unwrap();
+        assert_eq!(update_measure_font_outlines_module(id, &with_core), Ok(()));
+        assert!(commands() > 0);
+        assert!(
+            update_measure_font_outlines_module(id, LIBERATION_SANS)
+                .unwrap_err()
+                .contains("table other than CFF")
+        );
+        assert!(update_measure_font_outlines_module(id + 1_000, &with_core).is_err());
     }
 
     #[test]

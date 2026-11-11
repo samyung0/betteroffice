@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { resolve } from 'node:path';
 import type { DecodedFrameDelta, FramePageOperation } from '../layout/render/frameDelta';
 import type { DisplayPage } from '../layout/render/displayList';
-import type { YrsResidentCaretRect } from './index';
+import type { YrsResidentCaretRect, YrsResidentWorkerSnapshot } from './index';
 import type {
   ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
@@ -27,6 +27,20 @@ beforeAll(async () => {
       export const presentOffscreenPageBackBuffer = (...args) => testHarness.present(...args);
       export const presentOffscreenPageBackBufferWithCaret = (...args) => testHarness.presentCaret(...args);
     `,
+    // Sliced faces: each page draws font 7's glyph numbered by its page index.
+    './residentProgressiveFonts': `
+      export const glyphsByFont = (page) => new Map([[7, new Set([page.pageIndex])]]);
+      export const sliceFaceOpener = (source) => source;
+      export class ResidentProgressiveFonts {
+        constructor() { testHarness.progressive = this; }
+        add(id, source, onError) { this.added = [id, source]; this.onError = onError; }
+        addView() {}
+        onLateInstall(listener) { this.late = listener; }
+        ensure(glyphs) { return testHarness.ensure(glyphs); }
+        dispose() {}
+      }
+    `,
+    '../wasm/fontDecoder': 'export const decodeFontFace = () => { throw new Error("no decoder here"); };',
   };
   const result = await Bun.build({
     entrypoints: [resolve(import.meta.dir, 'residentEngineWorker.ts')],
@@ -90,9 +104,18 @@ function worker() {
     relayouts: [] as Array<[string, string, number]>,
     selections: [] as unknown[],
     sessionIds: [] as Array<number | undefined>,
+    progressive: null as null | {
+      added: [number, unknown];
+      onError(error: Error): void;
+      late(fontIds: Set<number>): void;
+    },
+    ensure: async (_glyphs: Map<number, Set<number>>) => new Set<number>(),
     session: {
       loadState() {},
       clearFonts() {},
+      registerFont() {
+        return 7;
+      },
       layoutDocumentJson() {},
       relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number) {
         harness.relayouts.push([layoutInput, extras, expectedFrameEpoch]);
@@ -196,7 +219,7 @@ function worker() {
       harness.rasterized = [];
       harness.presented = [];
     },
-    async bootstrap(pageCount = 3, workerClientId?: number) {
+    async bootstrap(pageCount = 3, workerClientId?: number, fonts: Partial<YrsResidentWorkerSnapshot> = {}) {
       delta(Array.from({ length: pageCount }, (_, index) => index + 1), true, 100, pageCount);
       return send({
         type: 'bootstrap',
@@ -214,6 +237,7 @@ function worker() {
           layoutWithRegions: false,
           layoutRevision: 1,
           selection: null,
+          ...fonts,
         },
       });
     },
@@ -438,6 +462,38 @@ describe('resident worker page damage', () => {
     expect(w.harness.rasterized).toEqual([2]);
     expect(w.surfaces.get('1')!.pixels).toBe('1:120');
     expect(w.surfaces.get('2')!.pixels).toBe('2:100|caret:#f00');
+  });
+});
+
+describe('resident worker sliced faces', () => {
+  test('a page paints after the outlines it draws install, repaints when late ones land, and a failed face fails the frame', async () => {
+    const w = worker();
+    const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
+    await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source }] });
+    expect(w.harness.progressive!.added).toEqual([7, source]);
+
+    const outlines = deferred();
+    const asked: Array<Map<number, Set<number>>> = [];
+    w.harness.ensure = async (glyphs) => {
+      asked.push(glyphs);
+      await outlines.promise;
+      return new Set();
+    };
+    const attached = w.attach([1]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(w.harness.rasterized).toEqual([]);
+    outlines.resolve();
+    expect((await attached).ok).toBe(true);
+    expect(w.harness.rasterized).toEqual([1]);
+    expect(asked).toEqual([new Map([[7, new Set([0])]])]);
+
+    w.resetCalls();
+    w.harness.progressive!.late(new Set([7]));
+    await w.send({ type: 'eraseCaret' });
+    expect(w.harness.rasterized).toEqual([1]);
+
+    w.harness.progressive!.onError(new Error('chunk c093 answered 503'));
+    expect(await w.build([1], 120)).toMatchObject({ ok: false, error: 'chunk c093 answered 503' });
   });
 });
 

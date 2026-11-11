@@ -45,6 +45,11 @@ function releasableTextEngine(engine: RustTextEngine): {
         registerSubstituteFont: (id: number, family: string) =>
           released ? id : engine.registerSubstituteFont!(id, family),
       }),
+      ...(engine.registerSlicedFont && {
+        registerSlicedFont: (...args: Parameters<NonNullable<RustTextEngine['registerSlicedFont']>>) => {
+          if (!released) engine.registerSlicedFont!(...args);
+        },
+      }),
       clearFonts: () => {
         if (!released) engine.clearFonts();
       },
@@ -102,9 +107,14 @@ export function useRustMeasurement(
         const firstLoad = !source;
         if (!source) {
           const releasable = releasableTextEngine(engine);
+          // CJK faces open from their skeletons when the engine installs the
+          // outlines a page draws before it paints. A face that fails to load,
+          // or whose outlines do, is an error, not a fallback layout.
           source = createRustMeasureSource({
             engine: releasable.engine,
             bundled: fontProviderRef.current,
+            progressive: releasable.engine.registerSlicedFont !== undefined,
+            onError: (error) => onErrorRef.current?.(error, engine),
           });
           sourceRef.current = source;
           releaseSourceRef.current = releasable.release;

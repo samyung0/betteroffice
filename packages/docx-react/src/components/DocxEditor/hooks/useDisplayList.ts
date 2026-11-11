@@ -981,6 +981,13 @@ export function useDisplayListQueries(
   }, [displayList, residentQueries]);
 }
 
+/** The engine a canvas renderer builds with: its outlines, and the sliced faces' outline installs. */
+type CanvasDisplayEngine = RustDisplayListEngine & {
+  outlineGlyphJson?: GlyphOutlineProvider;
+  ensureGlyphOutlines?: (page: unknown) => Promise<Set<number>>;
+  onGlyphOutlines?: (listener: (fontIds: Set<number>) => void) => () => void;
+};
+
 export interface UseCanvasRendererResult {
   /** latest display list built from the live document (null until the first pass lands) */
   displayList: DisplayList | null;
@@ -993,7 +1000,7 @@ export interface UseCanvasRendererResult {
   /** feed PagedEditor's per-pass Layout into the interaction query source */
   onLayoutComputed: (
     layout: Layout | null,
-    engine?: (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
+    engine?: CanvasDisplayEngine | null
   ) => void;
   /** media resolver for CanvasPagesView */
   resolveImage: ImageResolver;
@@ -1009,6 +1016,10 @@ export interface UseCanvasRendererResult {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
+  /** Installs the outlines a page draws from sliced faces before it paints (see YrsSession). */
+  ensureGlyphOutlines: ((page: unknown) => Promise<Set<number>>) | null;
+  /** Font ids whose outlines installed after the page that needed them painted. */
+  onGlyphOutlines: ((listener: (fontIds: Set<number>) => void) => () => void) | null;
   /** One-call ordinary text insertion; false until resident state is ready. */
   applyInput(text: string): Promise<ResidentFrameApplyResult | null>;
   /** One-call ordinary deletion/merge; false until resident state is ready. */
@@ -1050,12 +1061,12 @@ export function useCanvasRenderer(
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
-    (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
+    CanvasDisplayEngine | null
   >(null);
   const onLayoutComputed = useCallback(
     (
       next: Layout | null,
-      nextEngine?: (RustDisplayListEngine & { outlineGlyphJson?: GlyphOutlineProvider }) | null
+      nextEngine?: CanvasDisplayEngine | null
     ) => {
       setLayout(next);
       setEngine(nextEngine ?? null);
@@ -1158,6 +1169,8 @@ export function useCanvasRenderer(
     authoritativeCaretActive,
     canvasHostRef,
     glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
+    ensureGlyphOutlines: engine?.ensureGlyphOutlines ?? null,
+    onGlyphOutlines: engine?.onGlyphOutlines ?? null,
     applyInput,
     applyDelete,
     setWorkerPresentationActive,

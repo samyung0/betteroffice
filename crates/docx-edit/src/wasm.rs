@@ -1483,6 +1483,15 @@ impl EditSession {
         docx_layout::measure_font_bytes(id).map_err(|e| JsValue::from_str(&e))
     }
 
+    /// Replaces the outlines of measurement font `font_id` (and of every view
+    /// of its bytes) with `bytes`, a face whose every table but `CFF ` is
+    /// unchanged: a sliced face reassembled with more outline chunks. Layout
+    /// is unaffected. Errors, leaving the font as it was, for other bytes.
+    pub fn update_measure_font_outlines(&self, font_id: u32, bytes: &[u8]) -> Result<(), JsValue> {
+        docx_layout::update_measure_font_outlines_module(font_id, bytes)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics

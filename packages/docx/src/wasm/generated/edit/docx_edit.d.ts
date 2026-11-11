@@ -970,6 +970,13 @@ export class EditSession {
      */
     undo_capture_mode(): string;
     /**
+     * Replaces the outlines of measurement font `font_id` (and of every view
+     * of its bytes) with `bytes`, a face whose every table but `CFF ` is
+     * unchanged: a sliced face reassembled with more outline chunks. Layout
+     * is unaffected. Errors, leaving the font as it was, for other bytes.
+     */
+    update_measure_font_outlines(font_id: number, bytes: Uint8Array): void;
+    /**
      * Rebuilds the table of contents holding `(story, para_id, offset)`,
      * else the body's first (see [`Self::insert_toc`] for `layout_json` and
      * the result). Returns `null` when the body has none.
@@ -1298,6 +1305,7 @@ export interface InitOutput {
     readonly editsession_track_undo: (a: number) => void;
     readonly editsession_undo: (a: number) => number;
     readonly editsession_undo_capture_mode: (a: number) => [number, number];
+    readonly editsession_update_measure_font_outlines: (a: number, b: number, c: number, d: number) => [number, number];
     readonly editsession_update_toc: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];

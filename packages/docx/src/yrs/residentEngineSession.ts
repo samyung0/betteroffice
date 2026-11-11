@@ -41,6 +41,8 @@ export type ResidentEngineSession = Pick<
    * path (a full region pass when the request changed or a story outside the
    * body did) and returns a FrameDelta of the changed pages. */
   relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number): Uint8Array;
+  /** Replaces a sliced face's outlines with those of `bytes`, the face with more chunks. */
+  updateFontOutlines(fontId: number, bytes: Uint8Array): void;
 };
 
 export async function createResidentEngineSession(
@@ -77,6 +79,7 @@ export async function createResidentEngineSession(
     registerSubstituteFont: (base, family) =>
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
+    updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),

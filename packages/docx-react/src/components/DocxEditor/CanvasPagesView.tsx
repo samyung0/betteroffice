@@ -70,6 +70,8 @@ export function CanvasPagedArea({
           zoom={zoom}
           interactive={interactive}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
+          ensureGlyphOutlines={renderer.ensureGlyphOutlines}
+          onGlyphOutlines={renderer.onGlyphOutlines}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
         />
@@ -260,6 +262,8 @@ export function CanvasPagesView({
   selectableText = false,
   flush = false,
   glyphOutlineProvider,
+  ensureGlyphOutlines,
+  onGlyphOutlines,
   offscreenReplay,
   onWorkerPresentationChange,
 }: {
@@ -292,6 +296,10 @@ export function CanvasPagesView({
   /** Outline source sharing the display engine's resident font store. */
   /** False disables the separate outline WASM for display lists that contain browser text runs. */
   glyphOutlineProvider?: GlyphOutlineProvider | null | false;
+  /** Installs the outlines a page draws from sliced faces before it rasters; resolves with the font ids that changed. */
+  ensureGlyphOutlines?: ((page: unknown) => Promise<Set<number>>) | null;
+  /** Font ids whose outlines installed after the page that needed them painted: every page repaints. */
+  onGlyphOutlines?: ((listener: (fontIds: Set<number>) => void) => () => void) | null;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
@@ -492,6 +500,15 @@ export function CanvasPagesView({
   // falls back to fillText inside the backend, so text is never blank).
   const glyphCacheRef = useRef<GlyphCache | null>(null);
   const [glyphCacheReady, setGlyphCacheReady] = useState(false);
+  const glyphProviderRef = useRef<GlyphOutlineProvider | null>(null);
+  // Bumped when outlines a painted page waited for land: a new glyph cache
+  // repaints every page.
+  const [lateOutlines, setLateOutlines] = useState(0);
+  useEffect(() => onGlyphOutlines?.(() => {
+    const provider = glyphProviderRef.current;
+    if (provider) glyphCacheRef.current = new GlyphCache({ provider });
+    setLateOutlines((count) => count + 1);
+  }), [onGlyphOutlines]);
   useEffect(() => {
     setOffscreenFailed(false);
     offscreenFailedRef.current = false;
@@ -509,6 +526,7 @@ export function CanvasPagesView({
     void provider
       .then((provider) => {
         if (cancelled) return;
+        glyphProviderRef.current = provider;
         glyphCacheRef.current = new GlyphCache({ provider });
         setGlyphCacheReady(true);
       })
@@ -616,13 +634,13 @@ export function CanvasPagesView({
       const buffer = document.createElement('canvas');
       preparations.push({
         buffer,
-        ready: rasterizeDisplayPageToBackBuffer(
-          buffer,
-          page,
-          { resolveImage, glyphCache },
-          dpr,
-          zoom
-        ),
+        // Sliced faces' outlines this page draws install first (the frame
+        // waits for them up to a guard, then paints and repaints later).
+        ready: (ensureGlyphOutlines ? ensureGlyphOutlines(page) : Promise.resolve(new Set<number>()))
+          .then((changed) => {
+            if (changed.size > 0) glyphCache?.invalidateFonts(changed);
+            return rasterizeDisplayPageToBackBuffer(buffer, page, { resolveImage, glyphCache }, dpr, zoom);
+          }),
         present() {
           presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
           replayState.didPresent(presentation);
@@ -656,6 +674,8 @@ export function CanvasPagesView({
     frame,
     resolveImage,
     glyphCacheReady,
+    lateOutlines,
+    ensureGlyphOutlines,
     offscreenEligible,
     offscreenFailed,
     offscreenReplay,

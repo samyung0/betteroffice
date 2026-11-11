@@ -20,6 +20,13 @@ import type { Theme } from '../types/drawingml';
 import type { CompatibilityFlags } from '../docx/settingsParser';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import type { ProgressiveFontFace } from '../layout/measure/fontRegistry';
+import {
+  glyphsByFont,
+  ResidentProgressiveFonts,
+  type ProgressiveFontSource,
+  type ProgressiveFontSpec,
+} from './residentProgressiveFonts';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -590,6 +597,9 @@ export interface YrsResidentWorkerSnapshot {
   fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
+  /** With `fonts`: the ids registered from sliced faces' skeletons and their
+   * files, which the worker opens to install the outlines its pages draw. */
+  progressiveFonts?: ProgressiveFontSpec[];
   /** Source package media JSON that `media:<part>` images resolve against;
    * only in full snapshots, since the media never changes within a session. */
   media?: string;
@@ -807,6 +817,27 @@ export interface YrsSession extends CollaborationReplica {
   registerSubstituteFont(base: number, family: string): number;
   /** Clear the session's registered measurement/display fonts. */
   clearFonts(): void;
+  /**
+   * Font `id` was registered from a sliced face's skeleton: the outlines of
+   * the glyphs a page draws with it install (`ensureGlyphOutlines`) before
+   * the page paints, and an engine worker opens the face from `source`.
+   * `onError` hears once that its outlines failed to load or install.
+   */
+  registerSlicedFont(
+    id: number,
+    face: ProgressiveFontFace,
+    source: ProgressiveFontSource,
+    onError: (error: Error) => void
+  ): void;
+  /**
+   * Installs the outlines of the glyphs `page` (a display page) draws from
+   * sliced faces. Resolves with the font ids whose outlines changed once they
+   * are installed, or, after a wait, with those installed so far; the rest
+   * reach `onGlyphOutlines`.
+   */
+  ensureGlyphOutlines(page: unknown): Promise<Set<number>>;
+  /** Calls `listener` with font ids whose outlines installed after the page that needed them painted. */
+  onGlyphOutlines(listener: (fontIds: Set<number>) => void): () => void;
   /** Measure one paragraph through the session's resident text engine. */
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
@@ -1301,6 +1332,11 @@ function wrapSession(
   let residentLayoutRevision = 0;
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
+  // Fonts registered from sliced faces' skeletons: a page's outlines install
+  // before it paints here, and the worker opens the faces from these specs.
+  let progressiveFonts: ResidentProgressiveFonts | null = null;
+  let progressiveSpecs: ProgressiveFontSpec[] = [];
+  const outlineListeners = new Set<(fontIds: Set<number>) => void>();
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1431,6 +1467,7 @@ function wrapSession(
       if (id === base) return id;
       residentFonts.push({ substituteOf: base, family });
       residentFontsRevision += 1;
+      progressiveFonts?.addView(id, base);
       return id;
     },
     clearFonts: () => {
@@ -1439,6 +1476,33 @@ function wrapSession(
       residentMeasureInputs.clear();
       residentFontsRevision += 1;
       ownsResidentFontStore = true;
+      progressiveFonts?.dispose();
+      progressiveFonts = null;
+      progressiveSpecs = [];
+    },
+    registerSlicedFont: (id, face, source, onError) => {
+      if (!progressiveFonts) {
+        const fonts = new ResidentProgressiveFonts({
+          updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
+        });
+        fonts.onLateInstall((fontIds) => {
+          for (const listener of [...outlineListeners]) listener(fontIds);
+        });
+        progressiveFonts = fonts;
+      }
+      // The engine holds the outlines of the revision it registered.
+      progressiveFonts.add(id, async () => face, onError, face.revision);
+      if (progressiveSpecs.some((spec) => spec.slot === id)) return;
+      progressiveSpecs.push({ slot: id, source });
+      residentFontsRevision += 1;
+    },
+    ensureGlyphOutlines: (page) =>
+      progressiveFonts ? progressiveFonts.ensure(glyphsByFont(page)) : Promise.resolve(new Set<number>()),
+    onGlyphOutlines: (listener) => {
+      outlineListeners.add(listener);
+      return () => {
+        outlineListeners.delete(listener);
+      };
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);
@@ -1528,6 +1592,9 @@ function wrapSession(
               typeof font === 'number' ? session.measure_font_bytes(font) : { ...font }
             ),
         fontsRevision: residentFontsRevision,
+        ...(fontsCurrent || progressiveSpecs.length === 0
+          ? {}
+          : { progressiveFonts: progressiveSpecs.map((spec) => ({ ...spec })) }),
         ...(state ? {} : { media: session.media_json() }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,
@@ -2237,6 +2304,8 @@ function wrapSession(
       destroyed = true;
       listeners.clear();
       pendingUpdates.length = 0;
+      progressiveFonts?.dispose();
+      outlineListeners.clear();
       if (observing) session.clear_update_observer();
       session.free();
     },
