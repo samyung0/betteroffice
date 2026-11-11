@@ -182,6 +182,8 @@ test('a worker snapshot names the sliced faces with their files, for the worker 
     const { source } = snapshot.progressiveFonts![0]!;
     expect(source.ref.index).toBe('NotoSansJP-Regular/slices.json');
     expect(Object.keys(source.urls)).toContain('NotoSansJP-Regular/c093.zst');
+    // The page's decoded files go along, so the worker decodes none of them again.
+    expect([...snapshot.progressiveFonts![0]!.files!.keys()]).toContain('NotoSansJP-Regular/skeleton.zst');
     expect(sliced.session.residentWorkerSnapshot({ knownFontsRevision: snapshot.fontsRevision })!.progressiveFonts).toBeUndefined();
   } finally {
     sliced.session.destroy();

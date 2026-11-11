@@ -16,6 +16,7 @@ const rels = (body: string) => `<Relationships xmlns="http://schemas.openxmlform
 // The built app names each slice file `<name>-<hash>.<ext>`.
 const sliceIndex = /\/slices-[\w-]+\.json$/;
 const sliceChunk = /\/(?:core|c\d{3})-[\w-]+\.zst$/;
+const sliceSkeleton = /\/skeleton-[\w-]+\.zst$/;
 const wholeCjkFace = /\/Noto(?:Sans|Serif)(?:JP|KR|SC|TC)-Regular\.otf-[\w-]+\.zst$/;
 
 async function documentBytes() {
@@ -83,6 +84,9 @@ test('a CJK document opens with its sliced faces, fetches only the chunks it dra
   // The two lines draw 28 characters: a handful of each face's ~100 chunks.
   expect(distinct(paths, sliceChunk).size).toBeGreaterThan(0);
   expect(distinct(paths, sliceChunk).size).toBeLessThan(40);
+  // The engine worker takes the page's decoded files: no skeleton or chunk is fetched twice.
+  const slices = paths.filter((path) => sliceChunk.test(path) || sliceSkeleton.test(path));
+  expect(slices.length).toBe(new Set(slices).size);
   // The engine's own decoder decodes the slices; the fonts package's stays unloaded.
   expect(paths.filter((path) => /\/fontpack(-[\w-]+)?\.wasm$/.test(path))).toEqual([]);
   await expect.poll(() => ink(canvas), { timeout: 30_000 }).toBeGreaterThan(0);

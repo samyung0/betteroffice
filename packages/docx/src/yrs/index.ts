@@ -1335,7 +1335,7 @@ function wrapSession(
   // Fonts registered from sliced faces' skeletons: a page's outlines install
   // before it paints here, and the worker opens the faces from these specs.
   let progressiveFonts: ResidentProgressiveFonts | null = null;
-  let progressiveSpecs: ProgressiveFontSpec[] = [];
+  let progressiveSpecs: Array<ProgressiveFontSpec & { face: ProgressiveFontFace }> = [];
   const outlineListeners = new Set<(fontIds: Set<number>) => void>();
   let docxSource: Uint8Array | null = null;
 
@@ -1493,7 +1493,7 @@ function wrapSession(
       // The engine holds the outlines of the revision it registered.
       progressiveFonts.add(id, async () => face, onError, face.revision);
       if (progressiveSpecs.some((spec) => spec.slot === id)) return;
-      progressiveSpecs.push({ slot: id, source });
+      progressiveSpecs.push({ slot: id, source, face });
       residentFontsRevision += 1;
     },
     ensureGlyphOutlines: (page) =>
@@ -1594,7 +1594,10 @@ function wrapSession(
         fontsRevision: residentFontsRevision,
         ...(fontsCurrent || progressiveSpecs.length === 0
           ? {}
-          : { progressiveFonts: progressiveSpecs.map((spec) => ({ ...spec })) }),
+          : {
+              // The files this page decoded, so the worker decodes none again.
+              progressiveFonts: progressiveSpecs.map(({ slot, source, face }) => ({ slot, source, files: face.files() })),
+            }),
         ...(state ? {} : { media: session.media_json() }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,

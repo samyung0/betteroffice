@@ -93,6 +93,15 @@ test('outlines a frame draws install before it paints, one fetch per chunk acros
   expect(await resident.ensure(new Map([[99, new Set([glyph])]]))).toEqual(new Set());
 });
 
+test('an opener handed the files the sender decoded fetches only the index and the chunks it lacks', async () => {
+  const decoded = async (file: string) => decode(await Bun.file(new URL(file, assets)).arrayBuffer(), 64 << 20);
+  const files = new Map([[index.skeleton.file, await decoded(index.skeleton.file)], [chunkFile(42), await decoded(chunkFile(42))]]);
+  const resident = new ResidentProgressiveFonts({ updateFontOutlines() {} });
+  resident.add(10, sliceFaceOpener(spec.source, decode, files), () => {});
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(42), glyphIn(43)])]]))).toEqual(new Set([10]));
+  expect([ref.index, index.skeleton.file, chunkFile(42), chunkFile(43)].map((file) => hits.get(file))).toEqual([1, undefined, undefined, 1]);
+});
+
 test('a frame stops waiting at the guard, logs once, and repaints when the outlines arrive', async () => {
   const { resident, logs, updates } = fonts();
   let release!: () => void;

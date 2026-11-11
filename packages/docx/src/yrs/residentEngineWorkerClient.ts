@@ -386,6 +386,8 @@ function snapshotTransfers(snapshot: YrsResidentWorkerSnapshot): Transferable[] 
   return [
     snapshot.state.buffer,
     ...snapshot.fonts.flatMap((font) => (font instanceof Uint8Array ? [font.buffer] : [])),
+    // Copies made for this snapshot.
+    ...(snapshot.progressiveFonts ?? []).flatMap((spec) => [...(spec.files?.values() ?? [])]),
   ];
 }
 

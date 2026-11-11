@@ -10,6 +10,8 @@ export interface ProgressiveFontSource {
 export interface ProgressiveFontSpec {
   slot: number;
   source: ProgressiveFontSource;
+  /** Decoded files the sender already loaded, by manifest path, which the receiver's open reads instead. */
+  files?: ReadonlyMap<string, ArrayBuffer>;
 }
 
 /** What the engines use of a face `@betteroffice/fonts/progressive` opens. */
@@ -81,14 +83,20 @@ interface ProgressiveModule {
   openProgressiveFace(ref: ProgressiveFontSource['ref'], transport: {
     read(file: string): Promise<ArrayBuffer>;
     decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
+    held?(file: string): ArrayBuffer | undefined;
   }): Promise<OutlineFace>;
   readFontAsset(file: string, url: URL, timeoutMs?: number): Promise<ArrayBuffer>;
 }
 
-/** Opens the face `source` names from its files, for a realm that did not open it (an engine worker). */
+/**
+ * Opens the face `source` names from its files, for a realm that did not open
+ * it (an engine worker); `files` the sender decoded are checked and used
+ * instead of fetched and decoded again.
+ */
 export function sliceFaceOpener(
   source: ProgressiveFontSource,
   decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
+  files?: ReadonlyMap<string, ArrayBuffer>,
   loadModule: () => Promise<ProgressiveModule> = () => import('@betteroffice/fonts/progressive'),
 ): () => Promise<OutlineFace> {
   return () => loadModule().then(({ openProgressiveFace, readFontAsset }) => openProgressiveFace(source.ref, {
@@ -98,6 +106,7 @@ export function sliceFaceOpener(
       return readFontAsset(file, new URL(url), source.timeoutMs);
     },
     decode,
+    ...(files && { held: (file: string) => files.get(file) }),
   }));
 }
 
