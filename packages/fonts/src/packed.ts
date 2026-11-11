@@ -149,7 +149,7 @@ function decodeWith(wasmUrl?: URL, decoder?: FontDecoder): FontDecoder {
 
 /** @internal Without a host decoder, starts loading the bundled one while the faces download. */
 export function preloadDecoder(wasmUrl?: URL, decoder?: FontDecoder): void {
-  if (decoder === undefined) void import('./decode').then((module) => module.preloadFontDecoder(wasmUrl)).catch(() => {});
+  if (decoder === undefined) void import('./decode').then((module) => module.startFontDecoder(wasmUrl)).catch(() => {});
 }
 
 /** @internal Decodes slice files the way a provider decodes its whole faces. */

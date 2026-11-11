@@ -10,6 +10,8 @@ import { preloadOpcWasm, rezipContainer } from './opc';
 
 const root = resolve(import.meta.dir, '../../../..');
 const assets = resolve(root, 'packages/fonts-cjk/assets');
+// Spied before the engine starts: starting it also starts the font decoder.
+const decoderPreload = spyOn(fonts, 'preloadFontDecoder');
 
 beforeAll(async () => {
   await Promise.all([
@@ -19,6 +21,11 @@ beforeAll(async () => {
 });
 
 afterEach(() => configureDefaultFonts({}));
+
+test('starting the view engine also starts the fonts package decoder its faces decode with', () => {
+  expect(decoderPreload).toHaveBeenCalledTimes(1);
+  expect(decoderPreload.mock.calls[0]).toEqual([undefined]);
+});
 
 type Location = fonts.SliceLocation;
 

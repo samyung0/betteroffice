@@ -195,6 +195,18 @@ export function resolveDefaultFontProvider(
   return pending;
 }
 
+/**
+ * Starts loading `@betteroffice/fonts`' own decoder at the configured asset
+ * root, which a viewer's packed faces decode with (it uses no engine decoder).
+ * A failure is left for the first decode to report.
+ */
+export function preloadDefaultFontDecoder(): void {
+  const baseUrl = options.baseUrl;
+  void import('@betteroffice/fonts')
+    .then((fonts) => fonts.preloadFontDecoder(baseUrl === undefined ? undefined : { baseUrl }))
+    .catch(() => {});
+}
+
 /** @internal State the lazily loaded backstop provider resolves against. */
 export function baseLatinFontState(): {
   baseUrl: string | URL | undefined;

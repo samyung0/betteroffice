@@ -48,6 +48,12 @@ export function createDefaultFontPainter(
     onFontError?: (family: string, error: Error) => void;
   } = {},
 ) {
+  // With no engine decoder (null; undefined is one still coming) the faces
+  // decode with the fonts package's own: it loads now, beside the engine, not
+  // after the first face arrives. A failure is left for that face's decode.
+  if (decoder === null && options.defaultFonts !== false && typeof document !== 'undefined') {
+    void xlsxDefaultFontManager.load().then((fonts) => fonts.preloadFontDecoder()).catch(() => {});
+  }
   const owner = Symbol();
   const interests = new Set<Set<symbol>>();
   const loaded = new Set<string>();

@@ -10,6 +10,7 @@ import {
   createFontProvider,
   loadBundledFontBytes,
   maxDigitWidth,
+  preloadFontDecoder,
   resolveBundledFamilyFace,
   resolveDigitAdvance,
   resolveLastResortFace,
@@ -544,6 +545,34 @@ describe('loading', () => {
       } finally {
         globalThis.fetch = realFetch;
         host.getBuiltinModule = original;
+      }
+    },
+  );
+
+  test.skipIf(!existsSync(new URL('./decoder/fontpack.wasm', import.meta.url)))(
+    'preloadFontDecoder loads the decoder before any face, and a failed preload is not kept',
+    async () => {
+      const realFetch = globalThis.fetch;
+      const decoder = await Bun.file(new URL('./decoder/fontpack.wasm', import.meta.url)).arrayBuffer();
+      const requests: string[] = [];
+      let available = false;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        requests.push(String(input));
+        return available
+          ? new Response(decoder, { headers: { 'content-type': 'application/wasm' } })
+          : new Response('unavailable', { status: 503 });
+      }) as unknown as typeof fetch;
+      const baseUrl = 'https://preload.example/assets/';
+      const url = `${baseUrl}decoder/fontpack.wasm`;
+      try {
+        await expect(preloadFontDecoder({ baseUrl })).rejects.toThrow('HTTP 503');
+        available = true;
+        await preloadFontDecoder({ baseUrl });
+        expect(requests).toEqual([url, url]);
+        await preloadFontDecoder({ baseUrl });
+        expect(requests).toEqual([url, url]);
+      } finally {
+        globalThis.fetch = realFetch;
       }
     },
   );

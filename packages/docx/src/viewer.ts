@@ -7,6 +7,8 @@ import {
 import type { DisplayList } from './layout/render';
 import { drawnByFont } from './yrs/residentProgressiveFonts';
 
+import { preloadDefaultFontDecoder } from './layout/measure/defaultFontProvider';
+
 export { configureDefaultFonts } from './layout/measure/defaultFontProvider';
 
 /** A sliced face the layout measured with, and its bytes with every outline the pages draw. */
@@ -54,9 +56,11 @@ function loadModule(): Promise<typeof import('./wasm/viewer')> {
   return modulePromise;
 }
 
+/** Loads the view engine, and beside it the fonts package's decoder its packed faces decode with. */
 export function initWasm(
   input?: Parameters<Awaited<ReturnType<typeof loadModule>>['preloadViewWasm']>[0]
 ): Promise<void> {
+  if (!initialization) preloadDefaultFontDecoder();
   initialization ??= loadModule().then((module) => module.preloadViewWasm(input));
   return initialization;
 }

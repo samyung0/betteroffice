@@ -374,6 +374,18 @@ export function createFontProvider(
 }
 
 /**
+ * Loads this package's font decoder (`fontpack.wasm`, at `<baseUrl>/decoder/`
+ * for a custom `baseUrl`) ahead of the first packed face, for a host to call
+ * beside its engine start. Rejects when the decoder cannot load; a caller may
+ * ignore that, since a failed load is not kept and the first decode loads it
+ * again and reports the failure.
+ */
+export async function preloadFontDecoder(options?: FontAssetOptions): Promise<void> {
+  const baseUrl = options?.baseUrl === undefined ? undefined : resolvedAssetBase(options.baseUrl);
+  await (await import('./decode')).loadFontDecoder(baseUrl && new URL('decoder/fontpack.wasm', baseUrl));
+}
+
+/**
  * Decodes a pack file in the package's own decoder and releases it afterwards, so a large face costs an engine's
  * memory nothing.
  * @internal

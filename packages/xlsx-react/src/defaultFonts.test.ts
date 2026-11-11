@@ -443,3 +443,18 @@ test('no painter work happens before a worker decoder exists', async () => {
   await createDefaultFontPainter(undefined, () => {}).load(display({ family: 'Calibri' }));
   expect(imported).not.toHaveBeenCalled();
 });
+
+test('a painter without an engine decoder loads the fonts package decoder when it starts', async () => {
+  browser();
+  const source = provider();
+  const preload = mock(async () => {});
+  Object.assign(source.module, { preloadFontDecoder: preload });
+  const withEngine = createDefaultFontPainter(decoder(), () => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(preload).not.toHaveBeenCalled();
+  const standalone = createDefaultFontPainter(null, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(preload).toHaveBeenCalledTimes(1);
+  withEngine.dispose();
+  standalone.dispose();
+});
