@@ -9,6 +9,8 @@ export interface ProgressiveFontFace {
   bytes(): ArrayBuffer;
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
   ensureText(text: string): Promise<number>;
+  /** Copies of the decoded files loaded so far, which another realm's open of the face can take. */
+  files(): Map<string, ArrayBuffer>;
 }
 
 /** A sliced face registered from its skeleton, and where it came from. */

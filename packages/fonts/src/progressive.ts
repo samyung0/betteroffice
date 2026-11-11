@@ -23,6 +23,12 @@ export interface ProgressiveFontFace {
   onUpdate(listener: (revision: number) => void): () => void;
   /** Whether every outline is loaded. */
   complete(): boolean;
+  /**
+   * Copies of the decoded files loaded so far (the skeleton and each outline
+   * chunk) by manifest path: what another realm's open of this face takes as
+   * `SliceLocation.files` instead of reading and decoding them again.
+   */
+  files(): Map<string, ArrayBuffer>;
 }
 
 /**
@@ -43,6 +49,12 @@ export interface SliceLocation {
   decoder?: FontDecoder;
   /** @internal Drop the opened face from the shared cache once it settles, as `retain: false` does for whole faces. */
   retain?: boolean;
+  /**
+   * Decoded files of this face another open loaded (its `files()`), used in
+   * place of reading and decoding them when their length and SHA-256 match
+   * the index.
+   */
+  files?: ReadonlyMap<string, ArrayBuffer>;
 }
 
 /** @internal A face row's pointer to its slice index. */
@@ -80,6 +92,8 @@ export interface SliceTransport {
   timeoutMs?: number;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
   decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
+  /** A file's decoded bytes when this realm already holds them. */
+  held?(file: string): ArrayBuffer | undefined;
 }
 
 /** @internal Where a progressive face's files are, so a worker can open the same face. */
@@ -113,6 +127,8 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
 }
 
 async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Array> {
+  const held = transport.held?.(entry.file);
+  if (held?.byteLength === entry.byteLength && await sha256(held) === entry.sha256) return new Uint8Array(held);
   const encoded = await transport.read(entry.file);
   if (encoded.byteLength !== entry.encodedLength) {
     throw new Error(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
@@ -135,7 +151,10 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
   if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
   if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
-  const skeleton: SliceSkeleton = parseSkeleton(await readFile(transport, index.skeleton));
+  const decodedFiles = new Map<string, Uint8Array>();
+  const skeletonBytes = await readFile(transport, index.skeleton);
+  const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
+  decodedFiles.set(index.skeleton.file, skeletonBytes);
   const files = new Map<number, SliceFile>([[0, index.core], ...index.chunks.map((chunk): [number, SliceFile] => [chunk.id!, chunk])]);
   const outlines = new Map<number, Uint8Array>();
   const loaded = new Set<number>();
@@ -155,6 +174,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       if (entry === undefined) return Promise.reject(new Error(`Unknown font slice chunk ${chunk}`));
       promise = readFile(transport, entry).then((bytes) => {
         install(bytes);
+        decodedFiles.set(entry.file, bytes);
         loaded.add(chunk);
         pending.delete(chunk);
         dirty = true;
@@ -227,6 +247,9 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     },
     complete() {
       return loaded.size === files.size;
+    },
+    files() {
+      return new Map([...decodedFiles].map(([file, bytes]) => [file, bytes.slice().buffer]));
     },
   };
   opened.set(face, [ref, index, transport]);

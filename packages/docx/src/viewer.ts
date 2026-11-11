@@ -16,6 +16,11 @@ export interface DocxViewerSlicedFace {
   /** The `slices` of the font loader that located the face. */
   slices: SliceLocation;
   bytes: ArrayBuffer;
+  /**
+   * The decoded slice files behind `bytes`: an editor opening the same face
+   * takes them as its slice location's `files` and decodes none of them again.
+   */
+  files: Map<string, ArrayBuffer>;
 }
 
 export interface DocxViewerHandle {
@@ -161,7 +166,7 @@ async function outlineSlicedFaces(
   }
   await Promise.all([...wanted].map(([face, { glyphs, characters }]) =>
     Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
-  return [...wanted].map(([face, { slices }]) => ({ slices, bytes: face.bytes() }));
+  return [...wanted].map(([face, { slices }]) => ({ slices, bytes: face.bytes(), files: face.files() }));
 }
 
 /**

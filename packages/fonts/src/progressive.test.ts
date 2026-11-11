@@ -108,6 +108,13 @@ test('a progressive face loads index and skeleton, then only the chunks of the g
   expect(bytes.byteLength % 4).toBe(0);
   expect(new DataView(bytes).getUint32(0)).toBe(0x4f54544f);
 
+  // A painter that shapes the text itself draws each character's own glyph, so text loads by code point.
+  reads.length = 0;
+  let mapped = 0;
+  while (skeleton.chunkOfCodepoint(mapped) !== 61) mapped += 1;
+  expect(await face.ensureText(`a${String.fromCodePoint(mapped)}`)).toBe(face.revision);
+  expect(reads).toEqual([index.chunks[60]!.file]);
+
   reads.length = 0;
   let codepoint = 0;
   while (skeleton.chunkOfCodepoint(codepoint) !== 60) codepoint += 1;
@@ -123,6 +130,29 @@ test('a progressive face loads index and skeleton, then only the chunks of the g
   await face.ensureGlyphs(Array.from({ length: skeleton.numGlyphs }, (_, glyph) => glyph));
   expect(face.complete()).toBe(true);
   expect(sha(face.bytes())).toBe(index.sha256);
+});
+
+test('an open handed the decoded files of another reads and decodes none of them, and refuses one that changed', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let glyph = 0;
+  while (skeleton.chunkOfGlyph(glyph) !== 40) glyph += 1;
+  const first = await openProgressiveFace(jpRef, transport([]));
+  await first.ensureGlyphs([glyph]);
+  const files = first.files();
+  expect([...files.keys()].sort()).toEqual([index.chunks[39]!.file, index.skeleton.file].sort());
+
+  const reads: string[] = [];
+  const second = await openProgressiveFace(jpRef, { ...transport(reads), held: (file) => files.get(file) });
+  await second.ensureGlyphs([glyph]);
+  expect(reads).toEqual([jpRef.index]);
+  expect(new Uint8Array(second.bytes())).toEqual(new Uint8Array(first.bytes()));
+
+  const changed = new Uint8Array(files.get(index.skeleton.file)!.slice(0));
+  changed[100] ^= 1;
+  const rereads: string[] = [];
+  await openProgressiveFace(jpRef, { ...transport(rereads), held: (file) => file === index.skeleton.file ? changed.buffer : files.get(file) });
+  expect(rereads).toEqual([jpRef.index, index.skeleton.file]);
 });
 
 test('a glyph whose chunk loaded during another pending request resolves with a revision that draws it', async () => {
