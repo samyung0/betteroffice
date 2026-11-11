@@ -2597,6 +2597,28 @@ fn reads_conditional_formats_only_from_sheets_that_hold_them() {
     assert_eq!(formats[0].rules[0].formulas, ["TRUE()"]);
 }
 
+#[test]
+fn a_view_reads_sheet_protection_capturing_only_the_sheet_that_names_it() {
+    let parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"<sheetData/><sheetProtection sheet="1" objects="1"/>"#,
+    );
+    let preserved = parse_workbook_with_package(&parts).unwrap().package;
+    crate::package::TEMPLATE_CAPTURES.set(0);
+    let viewed = crate::parse_workbook_for_view(owned_parts(&parts)).unwrap();
+    assert_eq!(crate::package::TEMPLATE_CAPTURES.get(), 1);
+    assert_eq!(viewed.workbook, parse_workbook(&parts).unwrap());
+    assert!(viewed.package.source_sheet_is_protected(1));
+    for index in 0..3 {
+        assert_eq!(
+            viewed.package.source_sheet_is_protected(index),
+            preserved.source_sheet_is_protected(index)
+        );
+    }
+    let path = "/xl/worksheets/sheet2.xml";
+    assert_eq!(viewed.package.part_bytes(path), preserved.part_bytes(path));
+}
+
 fn check_source_sheet_after_unrelated_edit(body: &str, axes: SheetAxes, borrowed: bool) {
     let parts = two_sheet_package(
         r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
