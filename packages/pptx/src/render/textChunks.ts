@@ -1,15 +1,63 @@
 import type { PositionedTextRun } from '../types';
 
+/** Most widths remembered per measuring function; the least recently used go first. */
+const MAX_MEASURED_WIDTHS = 4096;
+
+/**
+ * Natural text widths by text and text style, keyed by the context's
+ * `measureText`, which every 2D context of a realm shares. All are dropped
+ * when the font set finishes loading faces or changes size, since either can
+ * change the face a font string draws with.
+ */
+let widthsByMeasure = new WeakMap<object, Map<string, number | undefined>>();
+let watchedFonts: FontFaceSet | undefined;
+let watchedSize = 0;
+const forgetWidths = (): void => {
+  widthsByMeasure = new WeakMap();
+};
+
+/** `ctx.measureText(text).width` in the context's current font, remembered. */
+function textMeasure(ctx: CanvasRenderingContext2D): (text: string) => number | undefined {
+  const fonts =
+    typeof document === 'undefined' ? (globalThis as { fonts?: FontFaceSet }).fonts : document.fonts;
+  if (fonts !== watchedFonts || (fonts && fonts.size !== watchedSize)) {
+    forgetWidths();
+    if (fonts !== watchedFonts) {
+      watchedFonts?.removeEventListener?.('loadingdone', forgetWidths);
+      fonts?.addEventListener?.('loadingdone', forgetWidths);
+      watchedFonts = fonts;
+    }
+    watchedSize = fonts?.size ?? 0;
+  }
+  let widths = widthsByMeasure.get(ctx.measureText);
+  if (!widths) widthsByMeasure.set(ctx.measureText, (widths = new Map()));
+  const font = [ctx.font, ctx.fontKerning, ctx.letterSpacing, ctx.textRendering, ''].join('\u0000');
+  return (text) => {
+    const key = font + text;
+    if (widths.has(key)) {
+      const width = widths.get(key);
+      widths.delete(key);
+      widths.set(key, width);
+      return width;
+    }
+    const width = ctx.measureText(text)?.width;
+    widths.set(key, width);
+    if (widths.size > MAX_MEASURED_WIDTHS) widths.delete(widths.keys().next().value!);
+    return width;
+  };
+}
+
 export function paintTextChunks(
   ctx: CanvasRenderingContext2D,
   run: PositionedTextRun,
   runBaseline: number,
   spacing: number
 ): void {
+  let measure: ((text: string) => number | undefined) | undefined;
   for (const chunk of positionedTextChunks(run)) {
     const cjk = Array.from(chunk.text).some((character) => isCjkCharacter(character.codePointAt(0)));
     const measured = cjk || chunk.width === undefined || spacing !== 0
-      ? 0 : ctx.measureText(chunk.fitText ?? chunk.text)?.width;
+      ? 0 : (measure ??= textMeasure(ctx))(chunk.fitText ?? chunk.text);
     let scale = measured && measured > 0 ? (chunk.width ?? 0) / measured : 1;
     if (Math.abs(scale - 1) < 0.001 || scale < 0.75 || scale > 1.33) scale = 1;
     if (scale === 1) {
