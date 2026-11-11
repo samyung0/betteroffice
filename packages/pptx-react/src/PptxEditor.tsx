@@ -253,6 +253,8 @@ interface EditorModel {
   slideIndex: number;
   frame: SlideDisplayList | null;
   thumbnails: Map<string, SlideDisplayList>;
+  /** The layout key each thumbnail was laid out under; none for the active slide's frame. */
+  thumbnailKeys: Map<string, string>;
 }
 
 interface PptxShapeSelection {
@@ -659,23 +661,44 @@ function PptxEditorContent({
     onErrorRef.current?.(next);
   }, []);
 
+  /** `refreshAll` lays out every other slide's thumbnail again; `'changed'`
+   *  only those whose layout key moved, as after a remote update. */
   const refreshAt = useCallback(
-    (requestedIndex?: number, notify = false, refreshAll = false): EditorModel | null => {
+    (
+      requestedIndex?: number,
+      notify = false,
+      refreshAll: boolean | 'changed' = false
+    ): EditorModel | null => {
       const handle = handleRef.current;
       if (!handle) return null;
       try {
         caretGoalRef.current = null;
-        const snapshot = handle.snapshot();
+        const previous = modelRef.current;
+        // Laying thumbnails out: learn the key each is laid out under.
+        const { snapshot, keys } =
+          refreshAll || !previous
+            ? handle.snapshotWithLayoutKeys()
+            : { snapshot: handle.snapshot(), keys: undefined };
         const index = clampSlideIndex(
-          requestedIndex ?? modelRef.current?.slideIndex ?? 0,
+          requestedIndex ?? previous?.slideIndex ?? 0,
           snapshot.slides.length
         );
         const thumbnails = new Map<string, SlideDisplayList>();
+        const thumbnailKeys = new Map<string, string>();
         for (let slideIndex = 0; slideIndex < snapshot.slides.length; slideIndex += 1) {
-          const slide = snapshot.slides[slideIndex];
-          const cached = modelRef.current?.thumbnails.get(slide.id);
-          if (slideIndex !== index && cached && !refreshAll) thumbnails.set(slide.id, cached);
-          else if (slideIndex !== index) thumbnails.set(slide.id, handle.layoutSlide(slideIndex));
+          if (slideIndex === index) continue;
+          const { id } = snapshot.slides[slideIndex];
+          const cached = previous?.thumbnails.get(id);
+          const cachedKey = previous?.thumbnailKeys.get(id);
+          const unchanged =
+            refreshAll === 'changed' && cachedKey !== undefined && keys?.[id] === cachedKey;
+          if (cached && (!refreshAll || unchanged)) {
+            thumbnails.set(id, cached);
+            if (cachedKey !== undefined) thumbnailKeys.set(id, cachedKey);
+          } else {
+            thumbnails.set(id, handle.layoutSlide(slideIndex));
+            if (keys?.[id] !== undefined) thumbnailKeys.set(id, keys[id]);
+          }
         }
         let caret = null;
         try {
@@ -686,7 +709,7 @@ function PptxEditorContent({
         const frame = snapshot.slides.length > 0 ? handle.layoutSlide(index, caret) : null;
         frameCaretRef.current = caretKey(caret);
         if (frame) thumbnails.set(snapshot.slides[index].id, frame);
-        const next = { snapshot, slideIndex: index, frame, thumbnails };
+        const next = { snapshot, slideIndex: index, frame, thumbnails, thumbnailKeys };
         const activeSlide = snapshot.slides[index];
         setSelection((current) =>
           current && activeSlide && findShape(activeSlide.shapes, current.shapeId) ? current : null
@@ -908,7 +931,7 @@ function PptxEditorContent({
           handleRef.current = handle;
           firstPaintPendingRef.current = true;
           unsubscribeUpdates = handle.onUpdate((_update, origin) => {
-            if (origin === 'remote') refreshAt(undefined, true, true);
+            if (origin === 'remote') refreshAt(undefined, true, 'changed');
           });
           const requestedSlide = initialSlideRef.current;
           refreshAt(

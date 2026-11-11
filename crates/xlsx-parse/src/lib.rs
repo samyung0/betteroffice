@@ -117,6 +117,46 @@ pub fn parse_workbook_with_owned_package(
     })
 }
 
+/// A workbook opened only to be read: the model, its package parts and each
+/// source sheet's protection, without the save templates
+/// [`parse_workbook_with_owned_package`] captures.
+pub struct ViewedWorkbook {
+    pub workbook: Workbook,
+    pub active_sheet: SheetId,
+    pub package: ViewedPackage,
+}
+
+/// The source package parts a read-only view draws from.
+pub struct ViewedPackage {
+    parts: Vec<(String, Vec<u8>)>,
+    protected: Vec<bool>,
+}
+
+impl ViewedPackage {
+    /// [`PreservedPackage::part_bytes`].
+    pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
+        xml::find_part(&self.parts, path)
+    }
+
+    /// [`PreservedPackage::source_sheet_is_protected`].
+    pub fn source_sheet_is_protected(&self, index: usize) -> bool {
+        self.protected.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// Parses the model for a read-only view; nothing it returns can be saved.
+pub fn parse_workbook_for_view(
+    parts: Vec<(String, Vec<u8>)>,
+) -> Result<ViewedWorkbook, ParseError> {
+    let parsed = read::parse_workbook_indexed(&parts)?;
+    let protected = package::source_sheet_protection(&parts)?;
+    Ok(ViewedWorkbook {
+        workbook: parsed.workbook,
+        active_sheet: parsed.active_sheet,
+        package: ViewedPackage { parts, protected },
+    })
+}
+
 /// hard nesting limit for xml elements; deeper input is rejected as hostile.
 pub const MAX_DEPTH: usize = 64;
 

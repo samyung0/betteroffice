@@ -91,10 +91,7 @@ impl PreservedPackage {
                 .relationship_id
                 .as_deref()
                 .and_then(|id| relationship_by_id.get(id).copied());
-            let path = relationship
-                .and_then(Relationship::target)
-                .map(|target| resolve_part_path("xl", target))
-                .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
+            let path = sheet_part_path(relationship, index);
             let bytes =
                 find_part(&parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
             let relationship_type = relationship
@@ -474,15 +471,7 @@ impl PreservedPackage {
     pub fn source_sheet_is_protected(&self, index: usize) -> bool {
         self.sheets
             .get(index)
-            .and_then(|sheet| sheet.template.child("sheetProtection"))
-            .is_some_and(|protection| {
-                attributes_from_fragment(&protection.bytes).map_or(true, |attributes| {
-                    attributes.iter().any(|attribute| {
-                        attribute.local_name() == "sheet"
-                            && matches!(attribute.value.as_str(), "1" | "true")
-                    })
-                })
-            })
+            .is_some_and(|sheet| protects_sheet(&sheet.template))
     }
 
     /// Whether a protected source sheet still lets users format cells (`formatCells="0"`).
@@ -763,6 +752,8 @@ impl XmlTemplate {
     }
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
+        #[cfg(test)]
+        TEMPLATE_CAPTURES.set(TEMPLATE_CAPTURES.get() + 1);
         let bom = utf8_bom_len(data);
         Self::capture_from_reader(data, NsReader::from_reader(&data[bom..]), 0)
     }
@@ -1527,6 +1518,63 @@ pub(crate) fn relationships_by_id(relationships: &[Relationship]) -> HashMap<&st
         .iter()
         .filter(|relationship| relationship.target().is_some())
         .filter_map(|relationship| relationship.id().map(|id| (id, relationship)))
+        .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// [`XmlTemplate::capture`] calls on this thread.
+    pub(crate) static TEMPLATE_CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The part a `<sheet>` entry names, or its conventional path.
+fn sheet_part_path(relationship: Option<&Relationship>, index: usize) -> String {
+    relationship
+        .and_then(Relationship::target)
+        .map(|target| resolve_part_path("xl", target))
+        .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1))
+}
+
+/// A sheet's `sheetProtection` turns protection on, or cannot be read.
+fn protects_sheet(template: &XmlTemplate) -> bool {
+    template.child("sheetProtection").is_some_and(|protection| {
+        attributes_from_fragment(&protection.bytes).map_or(true, |attributes| {
+            attributes.iter().any(|attribute| {
+                attribute.local_name() == "sheet"
+                    && matches!(attribute.value.as_str(), "1" | "true")
+            })
+        })
+    })
+}
+
+/// [`PreservedPackage::source_sheet_is_protected`] for every source sheet,
+/// without the save templates: only a sheet whose bytes name
+/// `sheetProtection` is captured to read it.
+pub(crate) fn source_sheet_protection(
+    parts: &[(String, Vec<u8>)],
+) -> Result<Vec<bool>, ParseError> {
+    let workbook_xml = find_part(parts, "xl/workbook.xml")
+        .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
+    let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
+        .map(parse_relationships)
+        .transpose()?
+        .unwrap_or_default();
+    let relationship_by_id = relationships_by_id(&workbook_relationships);
+    parse_sheet_entries(workbook_xml)?
+        .into_iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let relationship = entry
+                .relationship_id
+                .as_deref()
+                .and_then(|id| relationship_by_id.get(id).copied());
+            let path = sheet_part_path(relationship, index);
+            let bytes = find_part(parts, &path).ok_or(ParseError::MissingPart(path))?;
+            if memchr::memmem::find(bytes, b"sheetProtection").is_none() {
+                return Ok(false);
+            }
+            Ok(protects_sheet(&XmlTemplate::capture(bytes)?))
+        })
         .collect()
 }
 

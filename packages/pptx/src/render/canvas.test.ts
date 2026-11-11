@@ -654,6 +654,40 @@ describe('PPTX canvas replay', () => {
     expect(calls).toEqual([['text', 'ab ', 40], ['text', 'cd', 70]]);
   });
 
+  test('measures an unchanged run once across paints until the font set loads faces', async () => {
+    const host = (typeof document === 'undefined' ? globalThis : document) as unknown as Record<string, unknown>;
+    const saved = Object.getOwnPropertyDescriptor(host, 'fonts');
+    const fonts = Object.assign(new EventTarget(), { size: 1 });
+    Object.defineProperty(host, 'fonts', { configurable: true, value: fonts });
+    try {
+      const measured: string[] = [];
+      const calls: unknown[] = [];
+      const state: Record<string, unknown> = {
+        measureText: (text: string) => {
+          measured.push(text);
+          return { width: text.length * 8 };
+        },
+        fillText: (text: string, x: number) => calls.push(['text', text, x]),
+        translate: (x: number) => calls.push(['translate', x]),
+        scale: (x: number, y: number) => calls.push(['scale', x, y]),
+      };
+      const run = syntheticPositionedRun('ab cd', [[0, 40], [1, 50], [2, 60], [3, 70], [4, 80]]);
+      run.width = 50;
+      await paintPositionedRun(run, state);
+      expect(measured).toEqual(['ab', 'cd']);
+      const painted = calls.splice(0);
+      await paintPositionedRun(run, state);
+      expect(measured).toHaveLength(2);
+      expect(calls).toEqual(painted);
+      fonts.dispatchEvent(new Event('loadingdone'));
+      await paintPositionedRun(run, state);
+      expect(measured).toEqual(['ab', 'cd', 'ab', 'cd']);
+    } finally {
+      if (saved) Object.defineProperty(host, 'fonts', saved);
+      else delete host.fonts;
+    }
+  });
+
   test('positions proportional Japanese kana at table advances without scaling their outlines', async () => {
     for (const family of ['MS UI Gothic', 'MS PGothic', 'ＭＳ Ｐゴシック', 'MS PMincho', 'ＭＳ Ｐ明朝']) {
       const advance = family === 'MS UI Gothic' ? 13.056

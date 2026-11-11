@@ -7,7 +7,7 @@ use wasm_bindgen::prelude::*;
 use xlsx_model::{
     CellRange, CellRef, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetId, Stylesheet, Workbook,
 };
-use xlsx_parse::PreservedPackage;
+use xlsx_parse::ViewedPackage;
 use xlsx_render::{
     ChartRegion, GridGeometry, RenderError, Viewport, build_display_list_with_charts,
     chart_at_point, chart_regions, display_text,
@@ -18,7 +18,7 @@ const MAX_DISPLAY_CELLS: u64 = 250_000;
 #[wasm_bindgen]
 pub struct XlsxViewDocument {
     workbook: Workbook,
-    package: PreservedPackage,
+    package: ViewedPackage,
     active_sheet: SheetId,
 }
 
@@ -74,7 +74,7 @@ struct MergedRanges {
 impl XlsxViewDocument {
     pub fn open(bytes: &[u8]) -> Result<XlsxViewDocument, JsValue> {
         let parts = ooxml_opc::unzip_parts(bytes).map_err(js_error)?;
-        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts).map_err(js_error)?;
+        let parsed = xlsx_parse::parse_workbook_for_view(parts).map_err(js_error)?;
         let active_sheet = if (parsed.active_sheet.0 as usize) < parsed.workbook.sheets.len() {
             parsed.active_sheet
         } else {

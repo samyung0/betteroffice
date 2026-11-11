@@ -78,6 +78,9 @@ export interface PresentationHandle extends CollaborationReplica {
   rejectProposal(id: string): boolean;
   readonly clientId: number;
   snapshot(): DeckSnapshot;
+  /** `snapshot` with each slide's layout key by slide id: a key stays the same
+   *  while `layoutSlide` of that slide would return the same display list. */
+  snapshotWithLayoutKeys(): { snapshot: DeckSnapshot; keys: Record<string, string> };
   story(storyId: string): StorySnapshot;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
@@ -483,6 +486,9 @@ export function openPresentation(
     },
     snapshot(): DeckSnapshot {
       return jsonWasmCall(() => doc.snapshotJson());
+    },
+    snapshotWithLayoutKeys(): { snapshot: DeckSnapshot; keys: Record<string, string> } {
+      return jsonWasmCall(() => withEmbeddedFonts().snapshotWithLayoutKeysJson(doc));
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
