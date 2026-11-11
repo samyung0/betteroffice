@@ -2581,6 +2581,22 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
+#[test]
+fn reads_conditional_formats_only_from_sheets_that_hold_them() {
+    let parts = two_sheet_package(
+        r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,
+        r#"<sheetData/><conditionalFormatting sqref="A1:A9"><cfRule type="expression" priority="1"><formula>TRUE()</formula></cfRule></conditionalFormatting>"#,
+    );
+    crate::read::CONDITIONAL_FORMAT_PASSES.set(0);
+    let workbook = parse_workbook(&parts).unwrap();
+    assert_eq!(crate::read::CONDITIONAL_FORMAT_PASSES.get(), 1);
+    assert!(workbook.sheets[0].conditional_formats.is_empty());
+    let formats = &workbook.sheets[1].conditional_formats;
+    assert_eq!(formats.len(), 1);
+    assert_eq!(formats[0].sqref, "A1:A9");
+    assert_eq!(formats[0].rules[0].formulas, ["TRUE()"]);
+}
+
 fn check_source_sheet_after_unrelated_edit(body: &str, axes: SheetAxes, borrowed: bool) {
     let parts = two_sheet_package(
         r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#,

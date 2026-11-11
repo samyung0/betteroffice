@@ -664,10 +664,13 @@ fn parse_worksheet(
     let mut columns = ColumnRuns::default();
     let mut shared_formulas = SharedFormulas::default();
     let mut alternate_depth: usize = 0;
+    let mut has_conditional_formats = false;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) => match local_name(&e).as_slice() {
+                // the conditional-format pass reads only these, at this depth
+                b"conditionalFormatting" if depth == 2 => has_conditional_formats = true,
                 b"row" => {
                     let row = match attr(&e, b"r")? {
                         Some(v) => parse_index(&v, MAX_ROWS)?,
@@ -810,7 +813,9 @@ fn parse_worksheet(
     }
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
-    sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
+    if has_conditional_formats {
+        sheet.conditional_formats = parse_conditional_formats(data, dxfs)?;
+    }
     sheet.auto_filter = parse_auto_filter(data)?;
     Ok(sheet)
 }
@@ -868,10 +873,18 @@ fn parse_auto_filter(data: &[u8]) -> Result<Option<xlsx_model::AutoFilter>, Pars
     }))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// [`parse_conditional_formats`] passes over sheet XML on this thread.
+    pub(crate) static CONDITIONAL_FORMAT_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn parse_conditional_formats(
     data: &[u8],
     dxfs: &[DifferentialFormat],
 ) -> Result<Vec<ConditionalFormatting>, ParseError> {
+    #[cfg(test)]
+    CONDITIONAL_FORMAT_PASSES.set(CONDITIONAL_FORMAT_PASSES.get() + 1);
     let bom = crate::xml::utf8_bom_len(data);
     let mut reader = reader(data);
     let mut buf = Vec::new();
