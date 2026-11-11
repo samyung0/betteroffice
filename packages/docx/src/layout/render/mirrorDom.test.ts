@@ -516,6 +516,97 @@ describe('patchMirrorPage', () => {
     expect(moved?.dataset.docStart).toBe('28');
   });
 
+  // A page with the header above and one line per paragraph: each entry is a
+  // block id and its runs (text, or text with extra fields), numbered from
+  // `start` with one position between paragraphs.
+  type Block = [number, ...(string | [string, Record<string, unknown>])[]];
+  const blocks = (start: number, ...entries: Block[]): DisplayPage => {
+    const primitives: unknown[] = [];
+    let pos = start;
+    entries.forEach(([blockId, ...runs], line) => {
+      let x = 100;
+      for (const entry of runs) {
+        const [text, extra] = typeof entry === 'string' ? [entry, {}] : entry;
+        primitives.push(run(text, pos, { blockId, x, baselineY: 100 + line * 30, ...extra }));
+        x += text.length * 8;
+        pos += text.length;
+      }
+      pos += 1;
+    });
+    return { ...twoParagraphs(), primitives } as unknown as DisplayPage;
+  };
+  // every body position the owned frame delta moves
+  const shiftBody = (page: DisplayPage, delta: number) => {
+    for (const p of page.primitives) {
+      for (const field of ['docStart', 'docEnd', 'fragmentDocStart', 'fragmentDocEnd'] as const) {
+        const value = p[field];
+        if (value !== undefined) p[field] = value + delta;
+      }
+    }
+  };
+  // `before`'s mirror patched to `after` equals a fresh build, and its position
+  // bindings reach the mounted nodes: a later shift moves them in place
+  const expectPatched = (before: DisplayPage, after: DisplayPage) => {
+    for (const build of [buildMirrorPage, buildMirrorTextPage]) {
+      const mirror = build(before, labels);
+      const next = structuredClone(after);
+      expect(patchMirrorPage(mirror, build(next, labels))).toBe(true);
+      expect(mirror.isEqualNode(build(next, labels))).toBe(true);
+      shiftBody(next, 5);
+      expect(syncMirrorPositions(mirror)).toBe(true);
+      expect(mirror.isEqualNode(build(next, labels))).toBe(true);
+    }
+  };
+  const base = () => blocks(10, [1, 'First ', 'paragraph.'], [2, 'Second ', 'one']);
+
+  test('deleting text equals a fresh build', () => {
+    expectPatched(base(), blocks(10, [1, 'First ', 'para.'], [2, 'Second ', 'one']));
+  });
+
+  test('Enter splitting a paragraph equals a fresh build', () => {
+    expectPatched(base(), blocks(10, [1, 'First '], [3, 'paragraph.'], [2, 'Second ', 'one']));
+  });
+
+  test('Backspace joining two paragraphs equals a fresh build', () => {
+    expectPatched(base(), blocks(10, [1, 'First ', 'paragraph.', 'Second ', 'one']));
+  });
+
+  test('a paragraph leaving the page and one arriving at its top equals a fresh build', () => {
+    expectPatched(
+      blocks(10, [1, 'First ', 'paragraph.'], [2, 'Second ', 'one'], [3, 'Third.']),
+      blocks(1, [8, 'Last.'], [1, 'First ', 'paragraph.'], [2, 'Second ', 'one'])
+    );
+  });
+
+  test('an edit inside a table cell equals a fresh build', () => {
+    const table = { tableId: 't', rowStart: 0, rowEnd: 1, rowCount: 1, columnCount: 2 };
+    const cell = (col: number) => ({
+      table,
+      cell: { row: 0, col, rowSpan: 1, colSpan: 1, cellId: `t-r0-c${col}` },
+      x: 100 + col * 200,
+      baselineY: 130,
+    });
+    const page = (first: string) =>
+      blocks(
+        10,
+        [1, 'Intro'],
+        [2, [first, cell(0)]],
+        [3, ['Beta', cell(1)]],
+        [4, ['Outro', { baselineY: 160 }]]
+      );
+    expectPatched(page('Alpha'), page('Alphas'));
+  });
+
+  test('typing in a right-to-left run equals a fresh build', () => {
+    const page = (word: string) =>
+      blocks(
+        10,
+        [1, 'Say ', [word, { bidiLevel: 1, lang: 'he' }], ' now.'],
+        [2, 'Second ', 'one']
+      );
+    expectPatched(page('שלום'), page('שלומי'));
+  });
+
   test('leaves a mirror of the other form to be swapped', () => {
     const page = twoParagraphs();
     expect(patchMirrorPage(buildMirrorPage(page), buildMirrorTextPage(page))).toBe(false);
