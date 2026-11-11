@@ -551,6 +551,48 @@ describe('PptxEditor host integration', () => {
     }
   }, 30000);
 
+  it('lays out and repaints only the thumbnail a remote update changed', async () => {
+    const painted: SlideDisplayList[] = [];
+    const painting = spyOn(pptx, 'paintSlide').mockImplementation(async (_ctx, list) => {
+      painted.push(list);
+    });
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      setTransform() {}, drawImage() {},
+    } as unknown as CanvasRenderingContext2D);
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    let api: PptxEditorApi | undefined;
+    render(<PptxEditor file={fixture} fonts={fonts} clientId={9140} onReady={(ready) => { api = ready; }} />);
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    const peer = pptx.openPresentation(fixture, {
+      clientId: 9141,
+      fonts,
+      initialUpdate: api!.handle.encodeStateAsUpdate(),
+    });
+    const layouts = spyOn(api!.handle, 'layoutSlide');
+    try {
+      const slides = peer.snapshot().slides;
+      const target = slides.length - 1;
+      expect(target).toBeGreaterThan(1);
+      const story = slides[target].shapes.find((shape) => shape.textStories.length > 0)!.textStories[0];
+      peer.insertText(story.id, 0, 'Remote ');
+      await act(async () => {});
+      layouts.mockClear();
+      painted.length = 0;
+      act(() => {
+        api!.handle.applyUpdate(peer.encodeStateAsUpdate());
+      });
+      // the active slide's frame (its canvas and thumbnail) and the edited slide's thumbnail
+      expect(layouts.mock.calls.map(([index]) => index).sort()).toEqual([0, target]);
+      await waitFor(() => expect(painted).toHaveLength(3));
+      expect(new Set(painted).size).toBe(2);
+    } finally {
+      layouts.mockRestore();
+      peer.dispose();
+      painting.mockRestore();
+      context.mockRestore();
+    }
+  }, 30000);
+
   it('keeps viewing mode navigable without exposing user mutations', async () => {
     let api: PptxEditorApi | undefined;
     const cursors: Array<PptxPresenceCursor | null> = [];
