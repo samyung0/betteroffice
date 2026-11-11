@@ -304,6 +304,101 @@ export function syncMirrorPositions(root: HTMLElement): boolean {
   return true;
 }
 
+/**
+ * Makes `current` equal `next`, a mirror of the same page built the same way,
+ * keeping the nodes an edit left unchanged: a run that only moved in the
+ * document takes the new range in place. False when the page shells differ;
+ * the caller then swaps the whole mirror.
+ */
+export function patchMirrorPage(current: HTMLElement, next: HTMLElement): boolean {
+  if (!sameAttributes(current, next)) return false;
+  const kept = new Map<Node, Node>([[next, current]]);
+  patchChildren(current, next, kept);
+  const positions = mirrorPositions.get(next);
+  mirrorPositions.delete(next);
+  if (!positions) {
+    mirrorPositions.delete(current);
+    return true;
+  }
+  mirrorPositions.set(current, {
+    ...positions,
+    bindings: positions.bindings.map((binding) => {
+      const el = kept.get(binding.el) as HTMLElement | undefined;
+      return el ? { ...binding, el } : binding;
+    }),
+  });
+  return true;
+}
+
+/** `kept` maps the nodes of `next` that stay to their nodes in `current`. */
+function patchChildren(current: Element, next: Element, kept: Map<Node, Node>): void {
+  const before = Array.from(current.childNodes);
+  const after = Array.from(next.childNodes);
+  let head = 0;
+  while (
+    head < before.length &&
+    head < after.length &&
+    samePositions(before[head]!, after[head]!) &&
+    before[head]!.isEqualNode(after[head]!)
+  ) {
+    mapKept(before[head]!, after[head]!, kept);
+    head++;
+  }
+  let tail = 0;
+  while (tail < before.length - head && tail < after.length - head) {
+    const a = before[before.length - 1 - tail]!;
+    const b = after[after.length - 1 - tail]!;
+    if (a instanceof Element && b instanceof Element && a.nodeName === b.nodeName) {
+      copyPositions(a, b);
+      if (a.isEqualNode(b)) mapKept(a, b, kept);
+      else if (sameAttributes(a, b)) {
+        kept.set(b, a);
+        patchChildren(a, b, kept);
+      } else current.replaceChild(b, a);
+    } else if (a.isEqualNode(b)) {
+      mapKept(a, b, kept);
+    } else {
+      break;
+    }
+    tail++;
+  }
+  const anchor = current.childNodes[before.length - tail] ?? null;
+  for (const a of before.slice(head, before.length - tail)) current.removeChild(a);
+  for (const b of after.slice(head, after.length - tail)) current.insertBefore(b, anchor);
+}
+
+const POSITION_ATTRIBUTES = ['data-doc-start', 'data-doc-end', 'data-sdt-pos'] as const;
+
+function samePositions(a: Node, b: Node): boolean {
+  if (!(a instanceof Element) || !(b instanceof Element)) return true;
+  return POSITION_ATTRIBUTES.every((name) => a.getAttribute(name) === b.getAttribute(name));
+}
+
+function copyPositions(current: Element, next: Element): void {
+  for (const name of POSITION_ATTRIBUTES) {
+    const value = next.getAttribute(name);
+    if (current.getAttribute(name) === value) continue;
+    if (value === null) current.removeAttribute(name);
+    else current.setAttribute(name, value);
+  }
+}
+
+function sameAttributes(a: Element, b: Element): boolean {
+  const names = a.getAttributeNames();
+  return (
+    names.length === b.getAttributeNames().length &&
+    names.every((name) => a.getAttribute(name) === b.getAttribute(name))
+  );
+}
+
+function mapKept(current: Node, next: Node, kept: Map<Node, Node>): void {
+  kept.set(next, current);
+  let b = next.firstChild;
+  for (let a = current.firstChild; a && b; a = a.nextSibling, b = b.nextSibling) {
+    mapKept(a, b, kept);
+  }
+}
+
 function registerPositions(root: HTMLElement, built: readonly BuildBinding[]): void {
   const sources: DisplayPrimitive[] = [];
   const indexes = new Map<DisplayPrimitive, number>();

@@ -15,6 +15,7 @@ import {
   buildMirrorPage,
   buildMirrorTextPage,
   MIRROR_TEXT_PAGE_CLASS,
+  patchMirrorPage,
   syncMirrorPositions,
 } from './mirrorDom';
 
@@ -423,6 +424,16 @@ describe('syncMirrorPositions', () => {
     expect(syncMirrorPositions(mirror)).toBe(false);
   });
 
+  test('moves a patched mirror the same way', () => {
+    const page = shiftedPage();
+    const mirror = buildMirrorPage(page);
+    const next = structuredClone(page);
+    expect(patchMirrorPage(mirror, buildMirrorPage(next))).toBe(true);
+    shiftBody(next, 3);
+    expect(syncMirrorPositions(mirror)).toBe(true);
+    expect(positions(mirror)).toEqual(positions(buildMirrorPage(next)));
+  });
+
   test('writes nothing when a later element gives up', () => {
     const page = shiftedPage();
     const mirror = buildMirrorPage(page);
@@ -435,5 +446,78 @@ describe('syncMirrorPositions', () => {
     last.docEnd += 1;
     expect(syncMirrorPositions(mirror)).toBe(false);
     expect(positions(mirror)).toEqual(before);
+  });
+});
+
+describe('patchMirrorPage', () => {
+  // two paragraphs and a header, each run placed by its own x
+  const twoParagraphs = () =>
+    ({
+      pageIndex: 0,
+      width: 500,
+      height: 500,
+      header: {
+        kind: 'header',
+        rId: 'rId1',
+        y: 0,
+        height: 40,
+        primitives: [run('Head', 0, { blockId: 9, x: 100 })],
+      },
+      primitives: [
+        run('First ', 10, { blockId: 1, x: 100 }),
+        run('paragraph.', 16, { blockId: 1, x: 148 }),
+        run('Second ', 27, { blockId: 2, x: 100, baselineY: 130 }),
+        run('one', 34, { blockId: 2, x: 156, baselineY: 130 }),
+      ],
+    }) as unknown as DisplayPage;
+  const labels = { labels: { page: 'Page 1' } };
+  const blockNodes = (root: Element, blockId: number): Element[] => [
+    ...root.querySelectorAll(`[data-block-id="${blockId}"], [data-block-id="${blockId}"] *`),
+  ];
+  const typed = (page: DisplayPage, index: number, text: string): DisplayPage => {
+    const next = structuredClone(page);
+    type Run = { text: string; width: number; docStart: number; docEnd: number };
+    const runs = next.primitives as unknown as Run[];
+    runs[index]!.text += text;
+    runs[index]!.width += text.length * 8;
+    runs[index]!.docEnd += text.length;
+    for (const later of runs.slice(index + 1)) {
+      later.docStart += text.length;
+      later.docEnd += text.length;
+    }
+    return next;
+  };
+
+  for (const [name, build] of [
+    ['positioned', buildMirrorPage],
+    ['plain-text', buildMirrorTextPage],
+  ] as const) {
+    test(`a key typed at the end of a ${name} page's last paragraph keeps the other nodes`, () => {
+      const page = twoParagraphs();
+      const mirror = build(page, labels);
+      const first = blockNodes(mirror, 1);
+      const next = typed(page, 3, 'a');
+      expect(patchMirrorPage(mirror, build(next, labels))).toBe(true);
+      expect(mirror.isEqualNode(build(next, labels))).toBe(true);
+      expect(first.length).toBeGreaterThan(0);
+      expect(blockNodes(mirror, 1).every((node, index) => node === first[index])).toBe(true);
+    });
+  }
+
+  test('a key typed in the first paragraph moves the later runs in place', () => {
+    const page = twoParagraphs();
+    const mirror = buildMirrorPage(page, labels);
+    const second = blockNodes(mirror, 2);
+    const next = typed(page, 0, 'x');
+    expect(patchMirrorPage(mirror, buildMirrorPage(next, labels))).toBe(true);
+    expect(mirror.isEqualNode(buildMirrorPage(next, labels))).toBe(true);
+    expect(blockNodes(mirror, 2).every((node, index) => node === second[index])).toBe(true);
+    const moved = mirror.querySelector<HTMLElement>('[data-block-id="2"] .layout-run-text');
+    expect(moved?.dataset.docStart).toBe('28');
+  });
+
+  test('leaves a mirror of the other form to be swapped', () => {
+    const page = twoParagraphs();
+    expect(patchMirrorPage(buildMirrorPage(page), buildMirrorTextPage(page))).toBe(false);
   });
 });
