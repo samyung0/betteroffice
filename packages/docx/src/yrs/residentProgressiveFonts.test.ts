@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import { REQUEST_TIMEOUT_MS } from './residentEngineWorkerClient';
@@ -123,6 +123,27 @@ test('a frame stops waiting at the guard, logs once, and repaints when the outli
   expect(late[0]).toEqual(new Set([10, 11]));
   expect(resident.lateInstalls).toBe(late.length);
   expect([chunkFile(50), chunkFile(51)].map((file) => hits.get(file))).toEqual([1, 1]);
+});
+
+test('a frame that stops waiting says so at debug level, not as a warning', async () => {
+  const debug = spyOn(console, 'debug').mockImplementation(() => {});
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const resident = new ResidentProgressiveFonts({ updateFontOutlines() {} });
+    resident.add(10, sliceFaceOpener(spec.source, decode), () => {});
+    let release!: () => void;
+    gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    await resident.ensure(new Map([[10, new Set([glyphIn(55)])]]), 20);
+    release();
+    await resident.whenInstalled();
+    expect(debug.mock.calls.map(([message]) => String(message))).toEqual([expect.stringContaining('still loading after 20 ms')]);
+    expect(warn).not.toHaveBeenCalled();
+  } finally {
+    debug.mockRestore();
+    warn.mockRestore();
+  }
 });
 
 test('a chunk slower than the wait yields the frame within the wait and repaints once it lands, inside every frame request budget', async () => {

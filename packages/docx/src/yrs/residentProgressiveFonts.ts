@@ -271,7 +271,8 @@ export class ResidentProgressiveFonts {
 
   constructor(
     private readonly engine: OutlineEngine,
-    private readonly log: (message: string) => void = (message) => console.warn(message),
+    // A page painting before its outlines land is expected (Q750 B): debug, not a warning.
+    private readonly log: (message: string) => void = (message) => console.debug(message),
   ) {}
 
   /**
