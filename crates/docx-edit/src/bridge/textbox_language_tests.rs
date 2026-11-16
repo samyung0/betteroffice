@@ -176,3 +176,38 @@ fn a_document_naming_no_language_prefers_simplified_forms() {
         json!(["cjk-sc", "cjk-jp"])
     );
 }
+
+/// A kanji-only paragraph in MS Mincho whose only languages are the
+/// settings' `w:themeFontLang` East Asian language (`theme`) and the document
+/// default East Asian language (`default`), when they name one.
+fn untagged_document(theme: Option<&str>, default: Option<&str>) -> Vec<u8> {
+    let theme_language = theme.map_or_else(String::new, |tag| {
+        format!(r#"<w:themeFontLang w:val="en-US" w:eastAsia="{tag}"/>"#)
+    });
+    let default_language = default.map_or_else(String::new, |tag| {
+        format!(r#"<w:lang w:val="en-US" w:eastAsia="{tag}"/>"#)
+    });
+    let parts = [
+        ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/word/settings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"/></Types>"#.to_owned()),
+        ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="doc" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_owned()),
+        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/></Relationships>"#.to_owned()),
+        ("word/styles.xml", format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr>{default_language}</w:rPr></w:rPrDefault></w:docDefaults></w:styles>"#)),
+        ("word/settings.xml", format!(r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{theme_language}</w:settings>"#)),
+        ("word/document.xml", format!(r#"<w:document {NAMESPACES}><w:body><w:p>{}</w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"#, run("骨直角", "MS Mincho"))),
+    ];
+    let parts: Vec<_> = parts
+        .into_iter()
+        .map(|(name, value)| (name.to_owned(), value.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn untagged_han_takes_the_theme_font_language_before_simplified_chinese() {
+    let mincho = |theme, default| scripts(&untagged_document(theme, default), "ms mincho");
+    assert_eq!(mincho(Some("ja-JP"), None), json!(["cjk-jp"]));
+    assert_eq!(mincho(Some("zh-TW"), None), json!(["cjk-tc"]));
+    assert_eq!(mincho(None, None), json!(["cjk-sc"]));
+    // The document default East Asian language still comes first.
+    assert_eq!(mincho(Some("ja-JP"), Some("ko-KR")), json!(["cjk-kr"]));
+}

@@ -320,3 +320,28 @@ test('an editor page paints its list marker and watermark with the sliced face, 
     }
   });
 }, 60_000);
+
+/**
+ * Kanji-only text naming no language, in a family no face stands in for (so
+ * its Han draws with the script slot's face), in a document whose theme
+ * fonts are for `theme` (`w:themeFontLang`).
+ */
+const untaggedHan = (theme?: string) => packageOf({
+  styles: `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Han Test Face" w:hAnsi="Han Test Face" w:eastAsia="Han Test Face"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
+  settings: `<w:settings ${W}>${theme ? `<w:themeFontLang w:val="en-US" w:eastAsia="${theme}"/>` : ''}</w:settings>`,
+}, '<w:p><w:r><w:t>骨直角</w:t></w:r></w:p>');
+
+for (const [theme, face] of [['ja-JP', 'NotoSansJP'], ['zh-TW', 'NotoSansTC'], [undefined, 'NotoSansSC']] as const) {
+  test(`untagged Han ${theme ? `in a document whose theme fonts are for ${theme}` : 'naming no language anywhere'} draws with ${face}`, async () => {
+    const sliced = await editor(true, untaggedHan(theme));
+    try {
+      const list = await sliced.display();
+      const faces = sliced.source.progressiveFaces();
+      const drawing = [...new Set(fontIds(list))].filter((id) => faces.has(id) && glyphsOf(list, id).size > 0);
+      expect(drawing.map((id) => (faces.get(id)!.slices as fonts.SliceLocation).ref.index)).toEqual([`${face}-Regular/slices.json`]);
+      expect(sliced.errors).toEqual([]);
+    } finally {
+      sliced.session.destroy();
+    }
+  }, 60_000);
+}

@@ -106,7 +106,9 @@ pub struct RenderEnv {
     /// The docDefaults font size in pt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_default_font_size: Option<f64>,
-    /// The docDefaults run language, which runs that name none inherit.
+    /// The docDefaults run language, which runs that name none inherit; a
+    /// layout request's split fills its East Asian slot from
+    /// `w:themeFontLang` when docDefaults names none (Q751 B).
     pub doc_default_language: Option<RunLanguageSlots>,
     /// The numbering part's first picture bullet in pt, whose box Word puts at
     /// the start of the main document's first paragraph (#1936).
@@ -3579,7 +3581,10 @@ fn flush_paragraph(
         .strip_prefix(&generated_prefix)
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(values);
-    let defaults = paragraph_run_defaults(values, env);
+    let mut defaults = paragraph_run_defaults(values, env);
+    // Slots the paragraph's resolved defaults leave unset take the document's,
+    // whose East Asian language the theme's stands in for (Q751 B).
+    shapes::inherit_default_language(&mut defaults, env);
     let semantic_toc = style_id
         .as_ref()
         .is_some_and(|id| env.toc_style_ids.contains(id));

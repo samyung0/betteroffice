@@ -832,7 +832,7 @@ fn shape_run_formatting_with_shading(source: Option<&Value>, env: &RenderEnv) ->
 /// defaults. A shape's text is stored as its own parse, outside the style
 /// resolution body runs go through, so without this a text box loses the
 /// language its document declares.
-fn inherit_default_language(formatting: &mut RunFormatting, env: &RenderEnv) {
+pub(super) fn inherit_default_language(formatting: &mut RunFormatting, env: &RenderEnv) {
     let Some(defaults) = &env.doc_default_language else {
         return;
     };

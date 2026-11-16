@@ -346,9 +346,10 @@ pub struct FontRequirementCollector {
 
 impl FontRequirementCollector {
     /// Puts the CJK script of the document's default East Asian language
-    /// (`w:docDefaults` `w:lang/@w:eastAsia`) first among the CJK scripts a
-    /// family gathers across paragraphs, so a stray paragraph of another CJK
-    /// script does not give the document's own Han text its glyph forms. A
+    /// (`w:docDefaults` `w:lang/@w:eastAsia`, else `w:themeFontLang`'s) first
+    /// among the CJK scripts a family gathers across paragraphs, so a stray
+    /// paragraph of another CJK script does not give the document's own Han
+    /// text its glyph forms. A
     /// document that names no CJK language prefers Simplified, the bucket Han
     /// without a language falls to.
     pub fn prefer_east_asian_language(&mut self, language: Option<&str>) {

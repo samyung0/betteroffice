@@ -77,6 +77,29 @@ pub struct AuthoredRegionSettings {
     pub endnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub even_and_odd_headers: Option<bool>,
+    /// `w:settings/w:themeFontLang`: the languages the document's theme fonts
+    /// were chosen for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme_font_lang: Option<ThemeFontLanguage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThemeFontLanguage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub east_asia: Option<String>,
+}
+
+impl AuthoredRegionSettings {
+    /// The East Asian language of the document's theme fonts, which Han text
+    /// with no language of its own and no document default takes (Q751 B).
+    pub fn theme_east_asian_language(&self) -> Option<&str> {
+        self.theme_font_lang
+            .as_ref()?
+            .east_asia
+            .as_deref()
+            .filter(|tag| !tag.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -495,6 +518,31 @@ impl RegionLayoutInput {
         {
             env.entry("compatibilityFlags")
                 .or_insert_with(|| compatibility.clone());
+        }
+        // Han text whose runs and document defaults name no East Asian
+        // language takes the theme fonts' (`w:themeFontLang`, Q751 B): it
+        // stands in for the document default's.
+        if let Some(language) = self
+            .regions
+            .settings
+            .as_ref()
+            .and_then(AuthoredRegionSettings::theme_east_asian_language)
+            && let Some(env) = self.render_env.as_object_mut()
+        {
+            let defaults = env
+                .entry("docDefaultLanguage")
+                .or_insert_with(|| serde_json::json!({}));
+            if defaults.is_null() {
+                *defaults = serde_json::json!({});
+            }
+            if let Some(defaults) = defaults.as_object_mut()
+                && defaults
+                    .get("eastAsia")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                defaults.insert("eastAsia".to_owned(), Value::from(language));
+            }
         }
         (
             Input {
