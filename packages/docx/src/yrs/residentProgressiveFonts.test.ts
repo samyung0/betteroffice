@@ -1,7 +1,8 @@
 import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
-import { glyphsByFont, ResidentProgressiveFonts, sliceFaceOpener, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import { REQUEST_TIMEOUT_MS } from './residentEngineWorkerClient';
+import { glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('manifest.json', assets), 'utf8')) as {
@@ -40,6 +41,8 @@ const spec: ProgressiveFontSpec = {
   slot: 0,
   source: { ref, urls: Object.fromEntries(files.map((file) => [file, new URL(file, server.url).href])), timeoutMs: 5_000 },
 };
+/** A wait no load here outlasts, for tests about what installs rather than when. */
+const UNTIL_INSTALLED = 10_000;
 const decode = async (encoded: ArrayBuffer, maxOutput: number) => (await decodeFontFace(encoded, undefined, { maxOutput })).font;
 
 const skeleton = new DataView(await decode(await Bun.file(new URL(index.skeleton.file, assets)).arrayBuffer(), 64 << 20));
@@ -77,8 +80,8 @@ test('outlines a frame draws install before it paints, one fetch per chunk acros
   const { resident, updates } = fonts();
   const glyph = glyphIn(41);
   const [first, second] = await Promise.all([
-    resident.ensure(new Map([[10, new Set([glyph])]])),
-    resident.ensure(new Map([[11, new Set([glyph])]])),
+    resident.ensure(new Map([[10, new Set([glyph])]]), UNTIL_INSTALLED),
+    resident.ensure(new Map([[11, new Set([glyph])]]), UNTIL_INSTALLED),
   ]);
   expect(new Set([...first, ...second])).toEqual(new Set([10, 11]));
   expect(updates.map((update) => update.fontId)).toEqual([10]);
@@ -88,7 +91,7 @@ test('outlines a frame draws install before it paints, one fetch per chunk acros
 
   expect(await resident.ensure(new Map([[10, new Set([glyph])]]))).toEqual(new Set());
   expect(updates).toHaveLength(1);
-  expect(await resident.ensure(new Map([[10, new Set([glyphIn(0)])]]))).toEqual(new Set([10, 11]));
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(0)])]]), UNTIL_INSTALLED)).toEqual(new Set([10, 11]));
   expect(hits.get(index.core.file)).toBe(1);
   expect(await resident.ensure(new Map([[99, new Set([glyph])]]))).toEqual(new Set());
 });
@@ -120,6 +123,30 @@ test('a frame stops waiting at the guard, logs once, and repaints when the outli
   expect(late[0]).toEqual(new Set([10, 11]));
   expect(resident.lateInstalls).toBe(late.length);
   expect([chunkFile(50), chunkFile(51)].map((file) => hits.get(file))).toEqual([1, 1]);
+});
+
+test('a chunk slower than the wait yields the frame within the wait and repaints once it lands, inside every frame request budget', async () => {
+  const { resident, updates } = fonts();
+  // The skeleton is open before the slow request, as for any later frame.
+  await resident.ensure(new Map([[10, new Set([glyphIn(0)])]]), UNTIL_INSTALLED);
+  let release!: () => void;
+  gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const late: Array<Set<number>> = [];
+  resident.onLateInstall((fontIds) => late.push(fontIds));
+  const started = performance.now();
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(54)])]]))).toEqual(new Set());
+  const waited = performance.now() - started;
+  expect(waited).toBeGreaterThanOrEqual(PROGRESSIVE_OUTLINE_WAIT_MS - 20);
+  expect(waited).toBeLessThan(PROGRESSIVE_OUTLINE_WAIT_MS + 500);
+  for (const type of ['buildFrame', 'applyInput', 'applyDelete'] as const) {
+    expect(PROGRESSIVE_OUTLINE_WAIT_MS * 10).toBeLessThanOrEqual(REQUEST_TIMEOUT_MS[type]);
+  }
+  release();
+  await resident.whenInstalled();
+  expect(updates).toHaveLength(2);
+  expect(late).toEqual([new Set([10, 11])]);
 });
 
 test('a chunk that fails to load is reported once and not fetched again; the face installs nothing more', async () => {

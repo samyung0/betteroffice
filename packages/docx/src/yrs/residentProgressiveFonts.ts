@@ -21,8 +21,13 @@ interface OutlineFace {
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
 }
 
-/** How long a frame waits for missing outlines before it paints without them and repaints later. */
-export const PROGRESSIVE_OUTLINE_WAIT_MS = 10_000;
+/**
+ * How long a page waits for outlines still loading before it paints those
+ * glyphs blank in their space and repaints once they land (Q750 B). The page
+ * raster and the engine worker both use it, so a slow slice holds no request
+ * near the worker's request budgets and no other page longer than this.
+ */
+export const PROGRESSIVE_OUTLINE_WAIT_MS = 300;
 
 interface Owner {
   open: () => Promise<OutlineFace>;

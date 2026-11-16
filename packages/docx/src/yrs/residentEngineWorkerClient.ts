@@ -56,7 +56,7 @@ type AwaitedRequest = Exclude<
  * `started`); time queued behind earlier requests does not count, so a long
  * sync or bootstrap cannot time out the input waiting behind it.
  */
-const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
+export const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   bootstrap: 15_000,
   sync: 15_000,
   // Replaces a sync after remote or structural updates; may be a full region pass.
