@@ -24,3 +24,9 @@ wasm-bindgen = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-alloc.workspace = true
+
+[features]
+test-counters = ["xlsx-parse/test-counters"]
+
+[dev-dependencies]
+betteroffice-xlsx.workspace = true

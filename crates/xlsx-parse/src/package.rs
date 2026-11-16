@@ -752,7 +752,7 @@ impl XmlTemplate {
     }
 
     pub(crate) fn capture(data: &[u8]) -> Result<Self, ParseError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-counters"))]
         TEMPLATE_CAPTURES.set(TEMPLATE_CAPTURES.get() + 1);
         let bom = utf8_bom_len(data);
         Self::capture_from_reader(data, NsReader::from_reader(&data[bom..]), 0)
@@ -1521,10 +1521,17 @@ pub(crate) fn relationships_by_id(relationships: &[Relationship]) -> HashMap<&st
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-counters"))]
 thread_local! {
     /// [`XmlTemplate::capture`] calls on this thread.
     pub(crate) static TEMPLATE_CAPTURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// [`XmlTemplate::capture`] calls on this thread, for the viewer's open tests.
+#[cfg(feature = "test-counters")]
+#[doc(hidden)]
+pub fn template_captures() -> usize {
+    TEMPLATE_CAPTURES.get()
 }
 
 /// The part a `<sheet>` entry names, or its conventional path.

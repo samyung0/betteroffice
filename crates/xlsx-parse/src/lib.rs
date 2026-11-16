@@ -38,6 +38,8 @@ pub use future_functions::{
 pub use inventory::{
     DrawingObject, DrawingObjectKind, InspectionBudget, SheetInventory, SourceObject,
 };
+#[cfg(feature = "test-counters")]
+pub use package::template_captures;
 pub use package::{PreservedPackage, SheetVisibility, SourceSheetKind};
 pub use package_facts::{PackageFacts, PackageFactsView};
 pub use patch::{keeps_source, keeps_source_conditional_formats};

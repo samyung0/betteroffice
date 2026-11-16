@@ -1,0 +1,118 @@
+//! The viewer opens a workbook without the editor's save capture (Q691 C1b,
+//! Q749 A): it reads only what it draws, so a part only a save needs cannot
+//! stop it, while the edit engine still refuses that part.
+
+use xlsx_view_wasm::XlsxViewDocument;
+
+const FIXTURE: &[u8] = include_bytes!("../../../packages/xlsx/test-fixtures/charts.xlsx");
+const CONTENT_TYPES: &str = "[Content_Types].xml";
+
+fn rewrite(parts: &mut [(String, Vec<u8>)], path: &str, edit: impl FnOnce(&str) -> String) {
+    let slot = parts
+        .iter_mut()
+        .find(|(name, _)| name == path)
+        .unwrap_or_else(|| panic!("{path} is not in the fixture"));
+    slot.1 = edit(std::str::from_utf8(&slot.1).unwrap()).into_bytes();
+}
+
+/// `charts.xlsx` (one sheet, four charts) with a second sheet, `Locked`, whose
+/// source names `sheetProtection`.
+fn with_protected_sheet() -> Vec<(String, Vec<u8>)> {
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    parts.push((
+        "xl/worksheets/sheet2.xml".into(),
+        br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Locked</t></is></c></row></sheetData><sheetProtection sheet="1" objects="1"/></worksheet>"#.to_vec(),
+    ));
+    rewrite(&mut parts, "xl/workbook.xml", |text| {
+        text.replace(
+            "</sheets>",
+            r#"<sheet name="Locked" sheetId="2" r:id="rId2"/></sheets>"#,
+        )
+    });
+    rewrite(&mut parts, "xl/_rels/workbook.xml.rels", |text| {
+        text.replace(
+            "</Relationships>",
+            r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+        )
+    });
+    rewrite(&mut parts, CONTENT_TYPES, |text| {
+        text.replace(
+            "</Types>",
+            r#"<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        )
+    });
+    parts
+}
+
+fn open_view(parts: &[(String, Vec<u8>)]) -> XlsxViewDocument {
+    let bytes = ooxml_opc::rezip_parts(parts).unwrap();
+    XlsxViewDocument::open(&bytes).unwrap_or_else(|_| panic!("the view refused the package"))
+}
+
+fn active_sheet_protected(document: &XlsxViewDocument) -> bool {
+    let info = document
+        .sheet_info_json()
+        .unwrap_or_else(|_| panic!("no sheet info"));
+    serde_json::from_str::<serde_json::Value>(&info).unwrap()["protected"]
+        .as_bool()
+        .unwrap()
+}
+
+fn cell_text(document: &XlsxViewDocument, sheet: u32, row: u32, col: u32) -> String {
+    document
+        .cell_text(sheet, row, col)
+        .unwrap_or_else(|_| panic!("no cell {sheet}:{row}:{col}"))
+}
+
+#[cfg(feature = "test-counters")]
+#[test]
+fn a_view_open_captures_only_the_sheet_that_names_sheet_protection() {
+    let parts = with_protected_sheet();
+    let before = xlsx_parse::template_captures();
+    let mut document = open_view(&parts);
+    assert_eq!(xlsx_parse::template_captures() - before, 1);
+    assert!(!active_sheet_protected(&document));
+    document
+        .set_active_sheet(1)
+        .unwrap_or_else(|_| panic!("no second sheet"));
+    assert!(active_sheet_protected(&document));
+}
+
+#[test]
+fn a_package_broken_only_in_a_part_view_never_reads_opens_in_view_not_in_edit() {
+    let whole = with_protected_sheet();
+    let edit = |parts: &[(String, Vec<u8>)]| {
+        betteroffice_xlsx::Workbook::open(&ooxml_opc::rezip_parts(parts).unwrap())
+    };
+    assert!(edit(&whole).is_ok());
+    let mut broken = whole;
+    rewrite(&mut broken, CONTENT_TYPES, |text| {
+        text.replace("</Types>", "<Override PartName=")
+    });
+
+    let mut document = open_view(&broken);
+    assert_eq!(cell_text(&document, 0, 0, 0), "Quarter");
+    assert_eq!(cell_text(&document, 0, 1, 1), "12");
+    assert!(!active_sheet_protected(&document));
+    document
+        .set_active_sheet(1)
+        .unwrap_or_else(|_| panic!("no second sheet"));
+    assert_eq!(cell_text(&document, 1, 0, 0), "Locked");
+    assert!(active_sheet_protected(&document));
+
+    assert!(edit(&broken).is_err());
+}
+
+#[test]
+fn a_view_serves_each_chart_part_as_the_full_package_does() {
+    let parts = with_protected_sheet();
+    let viewed = xlsx_parse::parse_workbook_for_view(parts.clone()).unwrap();
+    let preserved = xlsx_parse::parse_workbook_with_owned_package(parts).unwrap();
+    let charts = &viewed.workbook.sheets[0].charts;
+    assert_eq!(charts.len(), 4);
+    for chart in charts {
+        let bytes = viewed.package.part_bytes(&chart.part);
+        assert!(bytes.is_some_and(|bytes| !bytes.is_empty()));
+        assert_eq!(bytes, preserved.package.part_bytes(&chart.part));
+    }
+}

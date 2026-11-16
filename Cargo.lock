@@ -2776,6 +2776,7 @@ dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
  "betteroffice-wasm-alloc",
+ "betteroffice-xlsx",
  "betteroffice-xlsx-model",
  "betteroffice-xlsx-parse",
  "betteroffice-xlsx-render",
