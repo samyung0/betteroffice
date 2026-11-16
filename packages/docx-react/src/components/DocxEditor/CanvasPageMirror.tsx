@@ -17,9 +17,11 @@
  *
  * Focus never lands here: the hidden input remains the editing surface.
  *
- * `selectable` (read-only viewers) turns the positioned mirror into the page's
- * text layer, as a PDF viewer's: its text stays transparent over the canvas and
- * only the selection shows (styles: `.canvas-page-mirror--selectable`). A page
+ * The positioned mirror joins a line's touching runs, so screen readers read
+ * whole words. `selectable` (read-only viewers) turns it into the page's text
+ * layer instead, as a PDF viewer's: one element per glyph cluster so selection
+ * sits on the painted glyphs, its text transparent over the canvas and only the
+ * selection showing (styles: `.canvas-page-mirror--selectable`). A page
  * holding a selection end keeps its positioned form when it leaves the
  * viewport, until the selection lets go of it, so scrolling away and back
  * keeps the selection.
@@ -111,6 +113,7 @@ export function CanvasPageMirror({
           header: t('a11y.headerLabel'),
           footer: t('a11y.footerLabel'),
         },
+        clusters: selectable,
       });
       // Keep the previous mirror connected until this replacement is ready.
       // Clearing in effect cleanup creates a detached-DOM window on every page
