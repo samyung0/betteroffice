@@ -301,3 +301,59 @@ describe('useRustMeasurement default fonts', () => {
     );
   });
 });
+
+describe('useRustMeasurement sliced faces', () => {
+  test('an engine that takes sliced faces opens a CJK face from its slices, and a face that fails reaches the editor onError', async () => {
+    const whole: string[] = [];
+    const origin = 'http://127.0.0.1:9/';
+    const gothic = Object.assign(
+      async () => {
+        whole.push('MS Gothic');
+        return bytesOf('whole face');
+      },
+      {
+        slices: {
+          ref: { format: 1, index: 'NotoSansJP-Regular/slices.json', indexSha256: '0'.repeat(64) },
+          base: origin,
+          // Offline: no file can be fetched.
+          url: async () => {
+            throw new TypeError('Failed to fetch');
+          },
+          decode: async (encoded: ArrayBuffer) => encoded,
+          timeoutMs: 2_000,
+        },
+      }
+    );
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: (family: string) => (family === 'MS Gothic' ? gothic : () => Promise.resolve(bytesOf(family))),
+          }),
+        }),
+    });
+    let fonts = 0;
+    const engine: RustTextEngine = {
+      registerFont: () => ++fonts,
+      registerSlicedFont() {},
+      clearFonts() {},
+    };
+    const errors: Array<[Error, RustTextEngine | null | undefined]> = [];
+    const requirement: ResidentFontRequirement = { key: 'ms gothic|0|0', family: 'MS Gothic', bold: false, italic: false };
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() =>
+        useRustMeasurement({ document: null, textEngine: engine, onError: (error, textEngine) => errors.push([error, textEngine]) })
+      );
+      await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+      result.current.residentMeasurementConfig([requirement]);
+      await waitFor(() => expect(errors).toHaveLength(1), { timeout: 10_000 });
+      // The face was asked for by its slices (the index failed), never whole.
+      expect(errors[0]![0]).toMatchObject({ file: 'NotoSansJP-Regular/slices.json', reason: 'network' });
+      expect(errors[0]![1]).toBe(engine);
+      expect(whole).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  }, 15_000);
+});

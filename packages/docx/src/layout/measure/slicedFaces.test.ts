@@ -82,3 +82,33 @@ test('a sliced face whose skeleton fails is reported once and not fetched again 
   expect(opens).toBe(1);
   expect(errors).toEqual([failure]);
 });
+
+test('every face of a chain starts loading at once, and the chain keeps its order whatever lands first', async () => {
+  const started: string[] = [];
+  const gates = new Map<string, () => void>();
+  // Each face's bytes differ in length, which names it once registered.
+  const lengths = new Map([['primary', 0], ['last resort', 1], ['coverage', 2]]);
+  const gated = (name: string) => () => {
+    started.push(name);
+    return new Promise<ArrayBuffer>((resolve) => gates.set(name, () => resolve(bytes.slice(0, bytes.byteLength - lengths.get(name)!))));
+  };
+  const registered = new Map<number, string>();
+  let next = 0;
+  const registry = new TextMeasureFontRegistry({
+    registerFont: (data) => {
+      registered.set(next, [...lengths].find(([, cut]) => data.byteLength === bytes.byteLength - cut)![0]);
+      return next++;
+    },
+  }, {
+    bundled: {
+      resolve: () => gated('primary'),
+      resolveLastResort: () => gated('last resort'),
+      resolveGlyphFallback: () => gated('coverage'),
+    },
+  });
+  const chain = registry.getFontIdChain('Calibri', false, false);
+  for (let turn = 0; turn < 50 && started.length < 3; turn += 1) await new Promise((resolve) => setTimeout(resolve, 1));
+  expect(started.sort()).toEqual(['coverage', 'last resort', 'primary']);
+  for (const name of ['coverage', 'last resort', 'primary']) gates.get(name)!();
+  expect((await chain).map((id) => registered.get(id))).toEqual(['primary', 'last resort', 'coverage']);
+});

@@ -345,3 +345,33 @@ for (const [theme, face] of [['ja-JP', 'NotoSansJP'], ['zh-TW', 'NotoSansTC'], [
     }
   }, 60_000);
 }
+
+test('a remote update that brings a character from a chunk not loaded loads it, and its outline installs', async () => {
+  const sliced = await editor(true);
+  const peer = await createYrsSession({ clientId: 71_003 });
+  try {
+    const before = await sliced.display();
+    for (const page of before.pages) await sliced.session.prepareSlicedPaint(page, sliced.chains());
+    const fontId = [...sliced.source.progressiveFaces().keys()].find((id) => glyphsOf(before, id).size > 0)!;
+    const outline = (glyph: number) => (JSON.parse(sliced.session.outlineGlyphJson(fontId, glyph)) as { cmds: unknown[] }).cmds.length;
+    const opened = new Set(sliced.reads);
+
+    // A collaborator types 鰯 (chunk 93); its update arrives here.
+    peer.applyUpdate(sliced.session.encodeStateAsUpdate());
+    const paragraph = peer.paragraphs('body')[0]!;
+    peer.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, '鰯');
+    sliced.session.applyUpdate(peer.encodeStateAsUpdate(sliced.session.encodeStateVector()));
+
+    const after = await sliced.display();
+    const [added] = [...glyphsOf(after, fontId)].filter((glyph) => !glyphsOf(before, fontId).has(glyph));
+    expect(added).toBeDefined();
+    const changed = new Set<number>();
+    for (const page of after.pages) for (const id of (await sliced.session.prepareSlicedPaint(page, sliced.chains())).changed) changed.add(id);
+    expect(changed.has(fontId)).toBe(true);
+    expect(sliced.reads.filter((file) => !opened.has(file))).toEqual(['NotoSansJP-Regular/c093.zst']);
+    expect(outline(added!)).toBeGreaterThan(0);
+  } finally {
+    peer.destroy();
+    sliced.session.destroy();
+  }
+}, 60_000);
