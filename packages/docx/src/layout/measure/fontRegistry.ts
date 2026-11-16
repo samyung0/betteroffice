@@ -263,6 +263,12 @@ export class TextMeasureFontRegistry {
   private chainResults = new Map<string, ChainResolution>();
   /** Bumped on invalidation so stale in-flight resolutions can't repopulate caches. */
   private generation = 0;
+  /**
+   * Bumped only by `clear()`, when the engine's font store is replaced: a
+   * face opened before then must not register into the new store, while one
+   * that outlives a `setEmbeddedFaces` (same store) still must.
+   */
+  private storeGeneration = 0;
 
   /** Sliced faces registered from their skeleton, by font id and measurement view id. */
   private progressiveIds = new Map<number, SlicedFontFace>();
@@ -517,6 +523,7 @@ export class TextMeasureFontRegistry {
     this.baseLatinResults.clear();
     this.baseLatinLoaders = new WeakMap();
     this.generation++;
+    this.storeGeneration++;
     this.bundledPromise = undefined;
     this.faceIds = new WeakMap();
     this.bundledIds = new Map();
@@ -752,7 +759,7 @@ export class TextMeasureFontRegistry {
     let pending = this.loaderIds.get(loader);
     if (!pending) {
       const ids = this.loaderIds;
-      const generation = this.generation;
+      const generation = this.storeGeneration;
       pending = (async () => {
         let face: ProgressiveFontFace;
         try {
@@ -765,7 +772,7 @@ export class TextMeasureFontRegistry {
           : Object.assign(async () => face.bytes(), { coverage: loader.coverage });
         const id = await this.registerBuffer(face.bytes(), undefined, known);
         // Identical skeletons register once; the first face opened keeps the id.
-        if (generation === this.generation && !this.progressiveIds.has(id)) {
+        if (generation === this.storeGeneration && !this.progressiveIds.has(id)) {
           this.progressiveIds.set(id, { face, slices });
           this.sink.registerSlicedFont?.(id, face);
         }
