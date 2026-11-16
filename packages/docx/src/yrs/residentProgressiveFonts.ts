@@ -84,6 +84,9 @@ export class FontSliceUnavailableError extends Error {
  */
 export const PROGRESSIVE_OUTLINE_WAIT_MS = 300;
 
+/** The wait print and thumbnails use: every outline installed, or an explicit failure. */
+export const UNTIL_COMPLETE = Infinity;
+
 interface Owner {
   open: () => Promise<OutlineFace>;
   onError: (error: Error) => void;
@@ -93,6 +96,8 @@ interface Owner {
   installed: number;
   /** The face could not open, or the engine refused its outlines: it installs nothing more. */
   failed: boolean;
+  /** Why it failed, for a print that needs the face. */
+  failure?: unknown;
   /** A slice failed and was reported; reported again only after `retryUnavailable`. */
   unavailable: boolean;
 }
@@ -412,9 +417,11 @@ export class ResidentProgressiveFonts {
    * Installs the outlines of `glyphs` (per font id) before a raster. Resolves
    * with the font ids, views included, whose outlines changed once they are
    * installed, or after `waitMs` with those installed so far; the rest
-   * install later and reach `onLateInstall`.
+   * install later and reach `onLateInstall`. `UNTIL_COMPLETE` (print) waits
+   * for every outline and rejects when a slice or the face fails.
    */
   async ensure(glyphs: Map<number, Set<number>>, waitMs = PROGRESSIVE_OUTLINE_WAIT_MS): Promise<Set<number>> {
+    const complete = waitMs === UNTIL_COMPLETE;
     const wanted = new Map<number, Set<number>>();
     for (const [fontId, ids] of glyphs) {
       const owner = this.ownerOf.get(fontId);
@@ -427,7 +434,10 @@ export class ResidentProgressiveFonts {
     const changed = new Set<number>();
     let waiting = true;
     const work = Promise.all([...wanted].map(async ([owner, ids]) => {
-      if (!(await this.load(owner, ids)) || !this.install(owner)) return;
+      const installed = (await this.load(owner, ids, complete)) && this.install(owner);
+      const state = this.owners.get(owner)!;
+      if (complete && state.failed) throw state.failure;
+      if (!installed) return;
       if (waiting) {
         changed.add(owner);
         return;
@@ -437,6 +447,10 @@ export class ResidentProgressiveFonts {
       for (const listener of [...this.lateListeners]) listener(fontIds);
     }));
     this.track(work);
+    if (complete) {
+      await work;
+      return this.fontIdsOf(changed);
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = await Promise.race([
       work.then(() => false),
@@ -472,12 +486,17 @@ export class ResidentProgressiveFonts {
    */
   private async registerText(owner: number, text: string, waitMs: number, fonts: FontFaceSet): Promise<void> {
     const state = this.owners.get(owner)!;
-    if (state.failed) return;
+    const complete = waitMs === UNTIL_COMPLETE;
+    if (state.failed) {
+      if (complete) throw state.failure;
+      return;
+    }
     let face: OutlineFace;
     try {
       face = state.face = await (state.opening ??= state.open());
     } catch (error) {
       this.fail(state, error);
+      if (complete) throw error;
       return;
     }
     let waiting = true;
@@ -488,13 +507,20 @@ export class ResidentProgressiveFonts {
           for (const listener of [...this.lateListeners]) listener(this.fontIdsOf(new Set([owner])));
         }
       },
-      (error: unknown) => this.chunkFailed(state, error)
+      (error: unknown) => {
+        this.chunkFailed(state, error);
+        if (complete) throw error;
+      }
     );
     this.track(loading);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([loading, new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, waitMs);
-    })]).finally(() => clearTimeout(timer));
+    if (complete) {
+      await loading;
+    } else {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([loading, new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, waitMs);
+      })]).finally(() => clearTimeout(timer));
+    }
     waiting = false;
     const revision = face.revision;
     if (this.disposed || (this.textFaces.get(owner)?.revision ?? 0) >= revision) return;
@@ -504,6 +530,7 @@ export class ResidentProgressiveFonts {
       await fontFace.load();
     } catch (error) {
       this.fail(state, error);
+      if (complete) throw error;
       return;
     }
     // Another page may have registered the same or a newer revision meanwhile.
@@ -548,7 +575,7 @@ export class ResidentProgressiveFonts {
    * Loads the chunks of `ids`; false when the face failed, now or before. A
    * chunk that fails leaves the rest to install.
    */
-  private async load(owner: number, ids: Set<number>): Promise<boolean> {
+  private async load(owner: number, ids: Set<number>, complete = false): Promise<boolean> {
     const state = this.owners.get(owner)!;
     if (state.failed || this.disposed) return false;
     try {
@@ -561,6 +588,7 @@ export class ResidentProgressiveFonts {
       await state.face.ensureGlyphs(ids);
     } catch (error) {
       this.chunkFailed(state, error);
+      if (complete) throw error;
     }
     return !state.failed;
   }
@@ -584,6 +612,7 @@ export class ResidentProgressiveFonts {
   private fail(state: Owner, error: unknown): void {
     if (state.failed) return;
     state.failed = true;
+    state.failure = error;
     state.onError(error instanceof Error ? error : new Error(String(error)));
   }
 }

@@ -24,8 +24,10 @@ import type { ProgressiveFontFace } from '../layout/measure/fontRegistry';
 import {
   glyphsByFont,
   FontSliceUnavailableError,
+  PROGRESSIVE_OUTLINE_WAIT_MS,
   ResidentProgressiveFonts,
   sliceFailures,
+  UNTIL_COMPLETE,
   type ProgressiveFontSource,
   type ProgressiveFontSpec,
   type ResidentFontError,
@@ -845,9 +847,10 @@ export interface YrsSession extends CollaborationReplica {
    * Resolves with the painter's options: the font ids whose outlines changed
    * (the rest reach `onGlyphOutlines` once they land), glyph runs of sliced
    * faces paint outlines only, and those `text` primitives paint with the
-   * registered faces.
+   * registered faces. `complete` (print, thumbnails) waits for every outline
+   * the page draws, with no cut-off, and rejects when a slice failed.
    */
-  prepareSlicedPaint(page: unknown, fontChains: Readonly<Record<string, number[]>>): Promise<SlicedPaint>;
+  prepareSlicedPaint(page: unknown, fontChains: Readonly<Record<string, number[]>>, complete?: boolean): Promise<SlicedPaint>;
   /**
    * Reports sliced faces whose outlines failed in the engine worker (its
    * replies' `fontErrors`, by this session's font id) through the `onError`
@@ -1544,12 +1547,13 @@ function wrapSession(
       progressiveSpecs.push({ slot: id, source, face, onError: report });
       residentFontsRevision += 1;
     },
-    prepareSlicedPaint: async (page, fontChains) => {
+    prepareSlicedPaint: async (page, fontChains, complete = false) => {
       const fonts = progressiveFonts;
       if (!fonts) return { changed: new Set(), outlineOnlyFontIds: new Set(), fontFamilies: new Map() };
+      const waitMs = complete ? UNTIL_COMPLETE : PROGRESSIVE_OUTLINE_WAIT_MS;
       const [changed, fontFamilies] = await Promise.all([
-        fonts.ensure(glyphsByFont(page)),
-        fonts.textFamilies(page, fontChains),
+        fonts.ensure(glyphsByFont(page), waitMs),
+        fonts.textFamilies(page, fontChains, waitMs),
       ]);
       return { changed, outlineOnlyFontIds: fonts.fontIds(), fontFamilies };
     },

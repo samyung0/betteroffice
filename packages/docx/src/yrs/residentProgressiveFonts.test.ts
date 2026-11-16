@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import { REQUEST_TIMEOUT_MS } from './residentEngineWorkerClient';
-import { FontSliceUnavailableError, glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import { FontSliceUnavailableError, glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, UNTIL_COMPLETE, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('manifest.json', assets), 'utf8')) as {
@@ -182,6 +182,35 @@ test('a chunk slower than the wait yields the frame within the wait and repaints
   await resident.whenInstalled();
   expect(updates).toHaveLength(2);
   expect(late).toEqual([new Set([10, 11])]);
+});
+
+test('print waits for a chunk slower than the screen wait and installs it, with no repaint left over', async () => {
+  const { resident, updates } = fonts();
+  let release!: () => void;
+  gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const late: Array<Set<number>> = [];
+  resident.onLateInstall((fontIds) => late.push(fontIds));
+  const slow = setTimeout(() => release(), PROGRESSIVE_OUTLINE_WAIT_MS + 300);
+  const started = performance.now();
+  try {
+    expect(await resident.ensure(new Map([[10, new Set([glyphIn(56)])]]), UNTIL_COMPLETE)).toEqual(new Set([10, 11]));
+  } finally {
+    clearTimeout(slow);
+  }
+  expect(performance.now() - started).toBeGreaterThanOrEqual(PROGRESSIVE_OUTLINE_WAIT_MS + 250);
+  expect(updates).toHaveLength(1);
+  expect(late).toEqual([]);
+});
+
+test('print fails with the slice that failed, fetched or remembered, instead of printing it blank', async () => {
+  const { resident } = fonts();
+  failing.add(chunkFile(57));
+  const glyphs = new Map([[10, new Set([glyphIn(57)])]]);
+  await expect(resident.ensure(glyphs, UNTIL_COMPLETE)).rejects.toMatchObject({ file: chunkFile(57), reason: 'server', status: 503 });
+  await expect(resident.ensure(glyphs, UNTIL_COMPLETE)).rejects.toMatchObject({ file: chunkFile(57) });
+  expect(hits.get(chunkFile(57))).toBe(1);
 });
 
 test('a chunk that fails is reported once per face, not fetched again until a retry, and the rest of the face still installs', async () => {
