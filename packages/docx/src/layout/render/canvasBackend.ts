@@ -36,8 +36,8 @@ export interface DrawPageOptions {
   resolveImage?: ImageResolver;
   /** Glyph cache; unresolved outlines fall back to `fillText`. */
   glyphCache?: GlyphCache;
-  /** The CSS family each document font family paints browser text with, where they differ. */
-  fontFamilies?: ReadonlyMap<string, string>;
+  /** The CSS family (or families, in order) each document font family paints browser text with, where they differ. */
+  fontFamilies?: ReadonlyMap<string, string | readonly string[]>;
   /**
    * Fonts whose glyph runs paint from outlines only (sliced faces): a run the
    * cache cannot resolve draws nothing rather than browser text in another face.
@@ -1655,9 +1655,9 @@ const CSS_FAMILY_ENTRY = /(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^,"'])+/g;
 
 /**
  * `font`, a CSS font shorthand or a bare family list, with each family that
- * `families` maps replaced by the mapped one.
+ * `families` maps replaced by the mapped one (or ones, in order).
  */
-export function withFontFamilies(font: string, families: ReadonlyMap<string, string>): string {
+export function withFontFamilies(font: string, families: ReadonlyMap<string, string | readonly string[]>): string {
   const match = CSS_FONT_FAMILY_LIST.exec(font) ?? ['', '', font];
   let changed = false;
   const list = (match[2].match(CSS_FAMILY_ENTRY) ?? []).map((entry) => {
@@ -1669,14 +1669,16 @@ export function withFontFamilies(font: string, families: ReadonlyMap<string, str
       [...families].find(([family]) => family.toLowerCase() === folded)?.[1];
     if (mapped === undefined || mapped === name) return entry;
     changed = true;
-    return ` "${mapped.replace(/["\\]/g, '\\$&')}"`;
+    return (typeof mapped === 'string' ? [mapped] : mapped)
+      .map((family) => ` "${family.replace(/["\\]/g, '\\$&')}"`)
+      .join(',');
   });
   return changed ? `${match[1]}${list.join(',').trimStart()}` : font;
 }
 
 function textRunWithFamilies(
   run: TextRunPrimitive,
-  families: ReadonlyMap<string, string>
+  families: ReadonlyMap<string, string | readonly string[]>
 ): TextRunPrimitive {
   const font = withFontFamilies(run.font, families);
   const leaderFont = run.leaderGlyphs?.font && withFontFamilies(run.leaderGlyphs.font, families);

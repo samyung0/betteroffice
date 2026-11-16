@@ -305,7 +305,8 @@ test('an editor page paints its list marker and watermark with the sliced face, 
       expect(JSON.stringify(page)).toContain('"text":"齟"');
       const opened = new Set(sliced.reads);
       const paint = await sliced.session.prepareSlicedPaint(page, sliced.chains());
-      const name = paint.fontFamilies.get('MS Gothic');
+      // MS Gothic's chain starts with the sliced face, which takes its place.
+      const name = paint.fontFamilies.get('MS Gothic') as string;
       expect(name).toMatch(/^BetterOffice Sliced \d+$/);
       expect(sliced.source.progressiveFaces().has(Number(name!.split(' ').at(-1)))).toBe(true);
       expect(added.map((face) => face.family)).toEqual([name!]);

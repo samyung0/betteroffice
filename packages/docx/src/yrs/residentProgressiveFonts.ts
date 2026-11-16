@@ -133,25 +133,31 @@ export function drawnByFont(page: unknown, into = new Map<number, DrawnGlyphs>()
  */
 export function textRunsOf(page: unknown): Array<{ font: string; text: string }> {
   const runs: Array<{ font: string; text: string }> = [];
-  const visit = (node: unknown, depth: number): void => {
+  forEachTextPrimitive(page, (value) => {
+    const painted = typeof value.paintText === 'string' ? value.paintText : typeof value.text === 'string' ? value.text : '';
+    const text = value.allCaps === true ? painted.toUpperCase() : painted;
+    if (text) runs.push({ font: value.font, text });
+    const leader = value.leaderGlyphs;
+    if (typeof leader?.font === 'string' && typeof leader.glyph === 'string') runs.push({ font: leader.font, text: leader.glyph });
+  });
+  return runs;
+}
+
+type TextPrimitiveNode = { font: string; text?: unknown; paintText?: unknown; allCaps?: unknown; leaderGlyphs?: { font?: unknown; glyph?: unknown } };
+
+/** Calls `visit` with every `text` primitive of a display page, its regions' and note areas' included. */
+export function forEachTextPrimitive(page: unknown, visit: (primitive: TextPrimitiveNode) => void): void {
+  const walk = (node: unknown, depth: number): void => {
     if (depth > 12 || node === null || typeof node !== 'object') return;
     if (Array.isArray(node)) {
-      for (const child of node) visit(child, depth + 1);
+      for (const child of node) walk(child, depth + 1);
       return;
     }
-    const value = node as { kind?: unknown; font?: unknown; text?: unknown; paintText?: unknown; allCaps?: unknown; leaderGlyphs?: unknown };
-    if (value.kind === 'text' && typeof value.font === 'string') {
-      const painted = typeof value.paintText === 'string' ? value.paintText : typeof value.text === 'string' ? value.text : '';
-      const text = value.allCaps === true ? painted.toUpperCase() : painted;
-      if (text) runs.push({ font: value.font, text });
-      const leader = value.leaderGlyphs as { font?: unknown; glyph?: unknown } | undefined;
-      if (typeof leader?.font === 'string' && typeof leader.glyph === 'string') runs.push({ font: leader.font, text: leader.glyph });
-      return;
-    }
-    for (const child of Object.values(node)) visit(child, depth + 1);
+    const value = node as { kind?: unknown; font?: unknown };
+    if (value.kind === 'text' && typeof value.font === 'string') visit(value as TextPrimitiveNode);
+    else for (const child of Object.values(node)) walk(child, depth + 1);
   };
-  visit(page, 0);
-  return runs;
+  walk(page, 0);
 }
 
 const CSS_FONT = /(?:^|\s)\d+(?:\.\d+)?px(?:\/\S+)?\s+(.+)$/;
@@ -168,31 +174,57 @@ export function cssFontFamilies(font: string): { families: string[]; bold: boole
   };
 }
 
+// Characters no Latin face draws: a Latin-family marker or watermark takes them from a sliced CJK face.
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Bopomofo}①-⓿　-〿＀-￯]/u;
+
+/** By sliced font id: the characters `page`'s `text` primitives draw with it and the families it stands for. */
+export type TextSlicedFaces = Map<number, { characters: Set<string>; replaced: Set<string>; followed: Set<string> }>;
+
 /**
- * The characters `page`'s `text` primitives draw, by the font id that heads
- * the chain (`chains`, by `family|bold|italic` key) of each family their CSS
- * font names, with those families: the face the browser paints them with
- * when it is registered under the family.
+ * The sliced face each `text` primitive of `page` (list markers, watermarks)
+ * paints with, as the engine measured it: the face heading its family's chain
+ * (`chains`, by `family|bold|italic` key), which replaces the family; else,
+ * for CJK characters, the chain's first sliced face after its Latin head or,
+ * for a family no chain names (a watermark in a font no text uses), the
+ * first sliced face of any chain, which follows the family.
  */
-export function textByChainHead(
+export function textSlicedFaces(
   page: unknown,
-  chains: Readonly<Record<string, number[]>>
-): Map<number, { characters: Set<string>; families: Set<string> }> {
-  const heads = new Map<number, { characters: Set<string>; families: Set<string> }>();
+  chains: Readonly<Record<string, number[]>>,
+  isSliced: (fontId: number) => boolean
+): TextSlicedFaces {
+  const faces: TextSlicedFaces = new Map();
+  const anySliced = Object.values(chains).flat().find(isSliced);
   for (const { font, text } of textRunsOf(page)) {
     const css = cssFontFamilies(font);
-    if (!css) continue;
-    for (const family of css.families) {
-      const key = family.toLowerCase();
-      const head = (chains[`${key}|${css.bold ? 1 : 0}|${css.italic ? 1 : 0}`] ?? chains[`${key}|0|0`])?.[0];
-      if (head === undefined) continue;
-      let entry = heads.get(head);
-      if (!entry) heads.set(head, entry = { characters: new Set(), families: new Set() });
-      entry.families.add(family);
-      for (const character of text) entry.characters.add(character);
-    }
+    const family = css?.families[0];
+    if (!css || !family) continue;
+    const key = family.toLowerCase();
+    const chain = chains[`${key}|${css.bold ? 1 : 0}|${css.italic ? 1 : 0}`] ?? chains[`${key}|0|0`];
+    const heads = chain !== undefined && isSliced(chain[0]!);
+    const id = heads ? chain[0] : CJK.test(text) ? (chain?.find(isSliced) ?? anySliced) : undefined;
+    if (id === undefined) continue;
+    let entry = faces.get(id);
+    if (!entry) faces.set(id, entry = { characters: new Set(), replaced: new Set(), followed: new Set() });
+    (heads ? entry.replaced : entry.followed).add(family);
+    for (const character of text) entry.characters.add(character);
   }
-  return heads;
+  return faces;
+}
+
+/** The CSS families `faces` paint with, each face under `nameOf` its id: a heading face replaces its family, another follows it. */
+export function slicedFontFamilies(
+  faces: TextSlicedFaces,
+  nameOf: (fontId: number) => string | undefined,
+  into = new Map<string, string | string[]>()
+): Map<string, string | string[]> {
+  for (const [id, { replaced, followed }] of faces) {
+    const name = nameOf(id);
+    if (name === undefined) continue;
+    for (const family of replaced) into.set(family, name);
+    for (const family of followed) into.set(family, [family, name]);
+  }
+  return into;
 }
 
 /** What a page's painter needs from its sliced faces once they are ready. */
@@ -202,7 +234,7 @@ export interface SlicedPaint {
   /** Font ids drawing with sliced faces: their glyph runs paint outlines only, never browser text. */
   outlineOnlyFontIds: ReadonlySet<number>;
   /** The private family each document family's `text` primitives paint with, where its face is sliced. */
-  fontFamilies: ReadonlyMap<string, string>;
+  fontFamilies: ReadonlyMap<string, string | readonly string[]>;
 }
 
 /** This realm's font set, where sliced faces register for the browser's shaper. */
@@ -316,38 +348,31 @@ export class ResidentProgressiveFonts {
   }
 
   /**
-   * Readies the `text` primitives of `page` (list markers, watermarks) whose
-   * family's chain (`chains`, by `family|bold|italic` key) starts with a
-   * sliced face: loads the chunks of their characters, waiting up to
-   * `waitMs`, and registers the face as a FontFace in this realm under a
-   * private family. Resolves with each such family's private name, so the
-   * painter draws them with the face, never a system one; characters still
-   * loading draw blank and the page repaints once they land.
+   * Readies the `text` primitives of `page` (list markers, watermarks) that
+   * paint with a sliced face (`textSlicedFaces`, by the measurement's
+   * `chains`): loads the chunks of their characters, waiting up to `waitMs`,
+   * and registers the face as a FontFace in this realm under a private
+   * family. Resolves with each family's CSS names (`slicedFontFamilies`), so
+   * the painter draws them with the face, never a system one; characters
+   * still loading draw blank and the page repaints once they land.
    */
   async textFamilies(
     page: unknown,
     chains: Readonly<Record<string, number[]>>,
     waitMs = PROGRESSIVE_OUTLINE_WAIT_MS
-  ): Promise<Map<string, string>> {
-    const families = new Map<string, string>();
+  ): Promise<Map<string, string | string[]>> {
+    const faces = textSlicedFaces(page, chains, (id) => this.ownerOf.has(id));
     const characters = new Map<number, Set<string>>();
-    const owners = new Map<string, number>();
-    for (const [head, entry] of textByChainHead(page, chains)) {
-      const owner = this.ownerOf.get(head);
-      if (owner === undefined) continue;
-      for (const family of entry.families) owners.set(family, owner);
+    for (const [id, entry] of faces) {
+      const owner = this.ownerOf.get(id)!;
       let wanted = characters.get(owner);
       if (!wanted) characters.set(owner, wanted = new Set());
       for (const character of entry.characters) wanted.add(character);
     }
     const fonts = realmFonts();
-    if (characters.size === 0 || !fonts || this.disposed) return families;
+    if (characters.size === 0 || !fonts || this.disposed) return new Map();
     await Promise.all([...characters].map(([owner, wanted]) => this.registerText(owner, [...wanted].join(''), waitMs, fonts)));
-    for (const [family, owner] of owners) {
-      const name = this.textFaces.get(owner)?.name;
-      if (name) families.set(family, name);
-    }
-    return families;
+    return slicedFontFamilies(faces, (id) => this.textFaces.get(this.ownerOf.get(id)!)?.name);
   }
 
   /** Calls `listener` with the font ids whose outlines a frame stopped waiting for, once they install. */

@@ -5,7 +5,8 @@ import {
   type ResidentFontRequirement,
 } from './layout/measure/rustMeasureSource';
 import type { DisplayList } from './layout/render';
-import { drawnByFont, textByChainHead } from './yrs/residentProgressiveFonts';
+import { withFontFamilies } from './layout/render/canvasBackend';
+import { drawnByFont, forEachTextPrimitive, slicedFontFamilies, textSlicedFaces } from './yrs/residentProgressiveFonts';
 
 import { preloadDefaultFontDecoder } from './layout/measure/defaultFontProvider';
 
@@ -15,6 +16,11 @@ export { configureDefaultFonts } from './layout/measure/defaultFontProvider';
 export interface DocxViewerSlicedFace {
   /** The `slices` of the font loader that located the face. */
   slices: SliceLocation;
+  /**
+   * The private family the display list's list markers and watermarks name
+   * the face by: a painter registers `bytes` under it (unique to this open).
+   */
+  family: string;
   bytes: ArrayBuffer;
   /**
    * The decoded slice files behind `bytes`: an editor opening the same face
@@ -148,9 +154,13 @@ function readingRequest(request: ViewRequest, { width, padding }: DocxReadingLay
  * The faces of `faces` with the outline of every glyph `list` draws: chunks by
  * the glyph ids the layout shaped, and by the characters, whose chunks hold
  * every glyph another shaper (the painter's) can draw for them. Text the
- * painter shapes itself (list markers, watermarks) counts for the face that
- * heads the chain (`chains`) of a family it names.
+ * painter shapes itself (list markers, watermarks) counts for the face it
+ * paints with (`textSlicedFaces`, by `chains`), and its CSS font is rewritten
+ * to name that face by its private family.
  */
+// Opens so far: each names its sliced faces' private families apart from another open's.
+let opens = 0;
+
 async function outlineSlicedFaces(
   faces: ReadonlyMap<number, SlicedFontFace>,
   list: DisplayList,
@@ -167,17 +177,29 @@ async function outlineSlicedFaces(
     for (const glyph of used?.glyphs ?? []) entry.glyphs.add(glyph);
     for (const character of used?.characters ?? []) entry.characters.add(character);
   }
-  // List markers and watermarks paint with the face their family's chain starts with.
+  opens += 1;
+  const names = new Map([...wanted.keys()].map((face, index) => [face, `BetterOffice Sliced ${opens}.${index}`]));
+  const families = new Map<string, string | string[]>();
   for (const page of list.pages) {
-    for (const [head, { characters }] of textByChainHead(page, chains)) {
-      const sliced = faces.get(head);
-      const entry = sliced && wanted.get(sliced.face);
-      for (const character of entry ? characters : []) entry!.characters.add(character);
+    const painted = textSlicedFaces(page, chains, (id) => faces.has(id));
+    for (const [id, { characters }] of painted) {
+      const entry = wanted.get(faces.get(id)!.face)!;
+      for (const character of characters) entry.characters.add(character);
+    }
+    slicedFontFamilies(painted, (id) => names.get(faces.get(id)!.face), families);
+  }
+  if (families.size > 0) {
+    for (const page of list.pages) {
+      forEachTextPrimitive(page, (text) => {
+        text.font = withFontFamilies(text.font, families);
+        const leader = text.leaderGlyphs;
+        if (typeof leader?.font === 'string') leader.font = withFontFamilies(leader.font, families);
+      });
     }
   }
   await Promise.all([...wanted].map(([face, { glyphs, characters }]) =>
     Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
-  return [...wanted].map(([face, { slices }]) => ({ slices, bytes: face.bytes(), files: face.files() }));
+  return [...wanted].map(([face, { slices }]) => ({ slices, family: names.get(face)!, bytes: face.bytes(), files: face.files() }));
 }
 
 /**

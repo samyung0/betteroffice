@@ -852,4 +852,16 @@ describe('Sliced faces', () => {
     expect(fonts[0]).toContain('"BetterOffice Sliced 7"');
     expect(fonts[0]).not.toContain('MS Gothic');
   });
+
+  it('paints CJK in a Latin-family marker with the sliced face after the family', async () => {
+    const { ctx } = recordingContext(new Map([['鰯1', { width: 16, ascent: 12, descent: 4 }]]));
+    const fonts: string[] = [];
+    spyOn(ctx, 'fillText').mockImplementation(() => {
+      fonts.push(ctx.font);
+    });
+    await drawPrimitive(ctx, textRun('鰯1', 10, 16, 'Calibri'), {
+      fontFamilies: new Map([['Calibri', ['Calibri', 'BetterOffice Sliced 7']]]),
+    });
+    expect(fonts[0]).toContain('"Calibri", "BetterOffice Sliced 7"');
+  });
 });

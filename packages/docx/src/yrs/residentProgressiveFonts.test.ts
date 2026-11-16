@@ -272,3 +272,39 @@ test('list markers and watermarks on a sliced face load their characters\' chunk
     delete realm.fonts;
   }
 });
+
+test('CJK in a marker of a Latin-headed family, or in a watermark font no text uses, paints with the sliced face after that family', async () => {
+  const realm = globalThis as { FontFace?: unknown; fonts?: unknown };
+  const registered: string[] = [];
+  realm.FontFace = class {
+    constructor(readonly family: string, readonly source: ArrayBuffer) {}
+    async load() {
+      return this;
+    }
+  };
+  realm.fonts = { add: (face: { family: string }) => registered.push(face.family), delete: () => {} };
+  try {
+    const { resident } = fonts();
+    const page = {
+      items: [
+        // Calibri's chain starts with a Latin face (2) and falls back to the sliced face's view (11).
+        { kind: 'text', font: '14px Calibri, sans-serif', text: '鰯1' },
+        // No chain names this watermark font: the first sliced face of any chain draws its CJK.
+        { kind: 'text', font: '700 96px Watermark Only, sans-serif', text: '齟' },
+        // A Latin marker keeps its family.
+        { kind: 'text', font: '11px Arial, sans-serif', text: '1.' },
+      ],
+    };
+    const chains = { 'calibri|0|0': [2, 11], 'arial|0|0': [4], 'ms gothic|0|0': [11] };
+    const families = await resident.textFamilies(page, chains, UNTIL_INSTALLED);
+    expect(families).toEqual(new Map([
+      ['Calibri', ['Calibri', 'BetterOffice Sliced 10']],
+      ['Watermark Only', ['Watermark Only', 'BetterOffice Sliced 10']],
+    ]));
+    expect(registered).toEqual(['BetterOffice Sliced 10']);
+    expect(hits.size).toBeGreaterThan(0);
+  } finally {
+    delete realm.FontFace;
+    delete realm.fonts;
+  }
+});
