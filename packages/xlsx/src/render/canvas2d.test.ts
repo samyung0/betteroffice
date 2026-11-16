@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import fixture from '../../test-fixtures/path-backend-agreement.json';
-import type { DisplayList, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
-import { cellFont, paintDisplayList } from './canvas2d';
+import type { DisplayList, DrawCmd, GeometryPathCommand, PatternType, TextCmd } from '../display-list/types';
+import { cellFill, cellFont, paintDisplayList } from './canvas2d';
 import { PATTERN_MASKS } from './patterns';
 import wrapFixture from '../../../../crates/xlsx-render/tests/fixtures/text-wrap-agreement.json';
 import { wrapLines } from './wrap';
@@ -685,5 +685,29 @@ describe('wrapped text breaker', () => {
     expect(wrapLines(spaced, Number.NaN, measure)).toEqual([spaced]);
     expect(calls).toBeLessThanOrEqual(64);
     expect(measured).toBeLessThanOrEqual(8 * spaced.length);
+  });
+});
+
+describe('cellFill', () => {
+  const cell = { x: 100, y: 20, w: 80, h: 20 };
+  const list = (...commands: DrawCmd[]): DisplayList => ({ width: 800, height: 600, commands });
+  const fill = (color: string, rect = cell): DrawCmd => ({ op: 'fillRect', ...rect, color });
+
+  it('is the opaque fill painted last over the whole cell', () => {
+    expect(cellFill(list(fill('#ffffff', { x: 0, y: 0, w: 800, h: 600 }), fill('#1f3864')), cell)).toBe('#1f3864');
+    expect(cellFill(list(fill('#1f3864'), fill('#c6efce')), cell)).toBe('#c6efce');
+    // a merged cell's fill covers the cell the edit opens in
+    expect(cellFill(list(fill('#fff2cc', { x: 100, y: 20, w: 160, h: 40 })), cell)).toBe('#fff2cc');
+  });
+
+  it('is white without one', () => {
+    const otherCell = fill('#000000', { x: 300, y: 20, w: 80, h: 20 });
+    const dataBar = fill('#638ec6', { x: 101, y: 22, w: 30, h: 16 });
+    const band = fill('rgba(33, 115, 70, 0.12)', { x: 0, y: 0, w: 800, h: 600 });
+    const pattern: DrawCmd = {
+      op: 'patternFill', ...cell, pattern: 'darkGray', fg: '#000000', bg: '#ffffff', originX: 0, originY: 0,
+    };
+    expect(cellFill(list(), cell)).toBe('#ffffff');
+    expect(cellFill(list(otherCell, dataBar, band, pattern), cell)).toBe('#ffffff');
   });
 });

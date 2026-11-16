@@ -66,6 +66,34 @@ export function paintDisplayList(
   ctx.restore();
 }
 
+const OPAQUE_COLOR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{6}ff)$/i;
+
+const covers = (outer: Rect, inner: Rect) =>
+  outer.x <= inner.x + 0.5 &&
+  outer.y <= inner.y + 0.5 &&
+  outer.x + outer.w >= inner.x + inner.w - 0.5 &&
+  outer.y + outer.h >= inner.y + inner.h - 0.5;
+
+/**
+ * The colour {@link paintDisplayList} fills `cell` with: the last opaque fill
+ * painted over the whole cell, else the sheet's white. A pattern fill counts
+ * as none.
+ */
+export function cellFill(dl: DisplayList, cell: Rect): string {
+  let fill = '#ffffff';
+  for (const cmd of dl.commands) {
+    if (
+      cmd.op === 'fillRect' &&
+      OPAQUE_COLOR.test(cmd.color) &&
+      covers(cmd, cell) &&
+      (!cmd.clip || covers(cmd.clip, cell))
+    ) {
+      fill = cmd.color;
+    }
+  }
+  return fill;
+}
+
 function paintCommand(ctx: CanvasRenderingContext2D, cmd: DrawCmd, dpr: number, origin: { x: number; y: number }): void {
   switch (cmd.op) {
     case 'fillRect':

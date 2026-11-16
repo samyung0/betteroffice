@@ -93,7 +93,7 @@ export type {
 } from './a11y/index';
 export { buildA11yGrid } from './a11y/index';
 
-export { cellFont, paintDisplayList } from './render/canvas2d';
+export { cellFill, cellFont, paintDisplayList } from './render/canvas2d';
 export {
   decodeFontFace,
   initWasm,
