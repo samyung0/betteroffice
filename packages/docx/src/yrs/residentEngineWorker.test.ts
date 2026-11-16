@@ -29,7 +29,7 @@ beforeAll(async () => {
     `,
     // Sliced faces: each page draws font 7's glyph numbered by its page index.
     './residentProgressiveFonts': `
-      export const glyphsByFont = (page) => new Map([[7, new Set([page.pageIndex])]]);
+      export const glyphsByFont = (page) => testHarness.drawn(page);
       export const sliceFaceOpener = (source) => source;
       export class ResidentProgressiveFonts {
         constructor() { testHarness.progressive = this; }
@@ -110,6 +110,9 @@ function worker() {
       late(fontIds: Set<number>): void;
     },
     ensure: async (_glyphs: Map<number, Set<number>>) => new Set<number>(),
+    /** The sliced font ids a page draws: font 7, with the page's index as its glyph. */
+    drawn: (page: DisplayPage) => new Map([[7, new Set([page.pageIndex])]]),
+    emitUpdate: null as ((update: Uint8Array) => void) | null,
     session: {
       loadState() {},
       clearFonts() {},
@@ -124,8 +127,14 @@ function worker() {
       setSelection(anchor: unknown, head: unknown) {
         harness.selections.push([anchor, head]);
       },
-      onUpdate() {
+      onUpdate(listener: (update: Uint8Array) => void) {
+        harness.emitUpdate = listener;
         return () => {};
+      },
+      // A keystroke: committed to the replica (its update) before the frame is painted.
+      applyInput() {
+        harness.emitUpdate?.(new Uint8Array([7, 7]));
+        return new Uint8Array([frameEpoch]);
       },
       buildDisplayListFrame() {
         return new Uint8Array([frameEpoch]);
@@ -239,6 +248,21 @@ function worker() {
           selection: null,
           ...fonts,
         },
+      });
+    },
+    type(upserts: number[], caretRect: YrsResidentCaretRect) {
+      delta(upserts, false);
+      harness.caret = caretRect;
+      return send({
+        type: 'applyInput',
+        text: 'a',
+        selection: {
+          anchor: { story: 'body', paraId: 'p1', offset: 1 },
+          head: { story: 'body', paraId: 'p1', offset: 1 },
+        },
+        expectedFrameEpoch: frameEpoch - 1,
+        profile: false,
+        paintCaret: false,
       });
     },
     build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null) {
@@ -466,7 +490,7 @@ describe('resident worker page damage', () => {
 });
 
 describe('resident worker sliced faces', () => {
-  test('a page paints after the outlines it draws install, repaints when late ones land, and a failed face fails the frame', async () => {
+  test('a page paints after the outlines it draws install, repaints when late ones land, and a failed face is reported, not fatal', async () => {
     const w = worker();
     const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
     await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source }] });
@@ -493,7 +517,46 @@ describe('resident worker sliced faces', () => {
     expect(w.harness.rasterized).toEqual([1]);
 
     w.harness.progressive!.onError(new Error('chunk c093 answered 503'));
-    expect(await w.build([1], 120)).toMatchObject({ ok: false, error: 'chunk c093 answered 503' });
+    const built = await w.build([1], 120);
+    expect(built).toMatchObject({ ok: true, fontErrors: [{ slot: 0, message: 'chunk c093 answered 503' }] });
+    expect(w.surfaces.get('1')!.pixels).toBe('1:120');
+  });
+
+  test('a keystroke whose face fails still sends its update, and a later key on a Latin-only page gets its frame', async () => {
+    const w = worker();
+    const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
+    await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source }] });
+    await w.attach([1, 2]);
+    // Page 1 draws the sliced face; page 2 is Latin only.
+    w.harness.drawn = (page) => (page.pageIndex === 0 ? new Map([[7, new Set([1])]]) : new Map());
+    w.harness.ensure = async (glyphs) => {
+      if (glyphs.has(7)) w.harness.progressive!.onError(new Error('chunk c093 answered 503'));
+      return new Set();
+    };
+    const typed = await w.type([1], caret(1));
+    expect(typed).toMatchObject({ ok: true, fontErrors: [{ slot: 0, message: 'chunk c093 answered 503' }] });
+    expect(typed.ok && typed.updates?.map((update) => [...new Uint8Array(update)])).toEqual([[7, 7]]);
+
+    w.resetCalls();
+    const next = await w.type([2], caret(2));
+    expect(next.ok).toBe(true);
+    expect(w.harness.presented).toContain(2);
+  });
+
+  test('a keystroke whose page cannot be painted sends its update and frame with the paint failure', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([1, 2]);
+    w.harness.failRaster = 1;
+    const typed = await w.type([1], caret(1));
+    expect(typed).toMatchObject({ ok: true, paintError: 'raster failed' });
+    expect(typed.ok && typed.frame).toBeInstanceOf(ArrayBuffer);
+    expect(typed.ok && typed.updates?.map((update) => [...new Uint8Array(update)])).toEqual([[7, 7]]);
+
+    // The page that failed is painted again with the next frame; the other page's key works.
+    w.resetCalls();
+    expect((await w.type([2], caret(2))).ok).toBe(true);
+    expect(w.harness.rasterized.sort()).toEqual([1, 2]);
   });
 });
 

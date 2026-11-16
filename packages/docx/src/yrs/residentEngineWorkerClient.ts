@@ -25,6 +25,10 @@ export interface ResidentEngineWorkerFrame {
   replayMs: number;
   replayedPages: number;
   layoutRevision: number;
+  /** Sliced faces whose outlines failed in the worker, by the page's font id. */
+  fontErrors: Array<{ slot: number; message: string }>;
+  /** The worker committed the edit but could not paint its frame. */
+  paintError?: string;
 }
 
 export interface ResidentEngineOffscreenPage {
@@ -413,6 +417,8 @@ function frameResult(
     replayMs: response.replayMs ?? 0,
     replayedPages: response.replayedPages ?? 0,
     layoutRevision: response.layoutRevision ?? 0,
+    fontErrors: response.fontErrors ?? [],
+    ...(response.paintError === undefined ? {} : { paintError: response.paintError }),
   };
 }
 

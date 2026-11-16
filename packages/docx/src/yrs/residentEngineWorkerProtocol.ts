@@ -102,6 +102,12 @@ export type ResidentEngineWorkerResponse =
       /** The worker replica's yrs state vector after this operation, so the
        * next sync can ship a diff instead of the whole document state. */
       stateVector?: ArrayBuffer;
+      /** Sliced faces whose outlines failed in the worker since its last
+       * frame reply, by the page's font id; they draw blank there. */
+      fontErrors?: Array<{ slot: number; message: string }>;
+      /** Painting an edit's frame failed; the edit's frame and updates above
+       * still apply. */
+      paintError?: string;
     }
   | {
       id: number;

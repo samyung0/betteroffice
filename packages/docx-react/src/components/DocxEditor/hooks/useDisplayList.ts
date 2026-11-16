@@ -512,6 +512,14 @@ export function useRustDisplayList(
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
+        if (result.fontErrors.length > 0) worker.engine.reportResidentFontErrors(result.fontErrors);
+        const frameRequest = workerFrameRequestRef.current;
+        if (result.paintError !== undefined && frameRequest) {
+          // The edit is in the main replica now; only the worker's painting
+          // failed, so the main thread takes over painting (no replay).
+          frameRequest.fallback(new Error(`Resident engine worker could not paint: ${result.paintError}`));
+          return { frameEpoch: null, caretSynchronized: false };
+        }
         const previous = snapshotRef.current;
         if (previous.frame && delta.frameEpoch <= previous.frame.frameEpoch) {
           // Superseded: a newer frame's reply owns the painted-caret verdict.
@@ -644,6 +652,7 @@ export function useRustDisplayList(
                 paintCaret
               )
             : await client.sync(snapshot(), extras, expectedFrameEpoch, paintCaret);
+      if (result.fontErrors.length > 0) hostEngine.reportResidentFontErrors(result.fontErrors);
       // Torn down, or the frame this delta builds on was reset meanwhile (the
       // next request then asks for a full frame).
       if (workerRef.current?.client !== client) return;

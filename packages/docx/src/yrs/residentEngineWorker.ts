@@ -58,10 +58,11 @@ let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
 let trap: WebAssembly.RuntimeError | null = null;
 // The fonts registered from sliced faces' skeletons, whose outlines this
-// worker loads and installs before it paints the glyphs; the first face that
-// fails fails the frame, so the host takes over painting.
+// worker loads and installs before it paints the glyphs. A face whose
+// outlines fail draws blank and fails no page; the next frame reply carries
+// the failure, by the page's font id, for the page to report.
 let progressiveFonts: ResidentProgressiveFonts | null = null;
-let outlineFailure: Error | null = null;
+let fontErrors: Array<{ slot: number; message: string }> = [];
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -249,7 +250,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       applied.profile,
       started,
       true,
-      request.paintCaret
+      request.paintCaret,
+      true
     );
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) throw error;
@@ -313,7 +315,7 @@ function openProgressiveFonts(
     (await decodeFontFace(encoded, { codec: 'zstd', maxOutput })).font;
   for (const { slot, source, files } of snapshot.progressiveFonts) {
     fonts.add(ids[slot] ?? slot, sliceFaceOpener(source, decode, files), (error) => {
-      outlineFailure ??= error;
+      fontErrors.push({ slot, message: error.message });
     });
   }
   snapshot.fonts.forEach((font, index) => {
@@ -332,11 +334,9 @@ function openProgressiveFonts(
 /** Installs the outlines `page` draws from sliced faces, or waits for them up to the guard. */
 async function ensureOutlines(page: unknown): Promise<void> {
   const fonts = progressiveFonts;
-  if (fonts) {
-    const changed = await fonts.ensure(glyphsByFont(page));
-    if (changed.size > 0) glyphCache?.invalidateFonts(changed);
-  }
-  if (outlineFailure) throw outlineFailure;
+  if (!fonts) return;
+  const changed = await fonts.ensure(glyphsByFont(page));
+  if (changed.size > 0) glyphCache?.invalidateFonts(changed);
 }
 
 function subscribe(): void {
@@ -354,7 +354,7 @@ function destroySession(): void {
   fontsRevision = -1;
   retainedFrame = null;
   setProgressiveFonts(null);
-  outlineFailure = null;
+  fontErrors = [];
   offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
@@ -382,7 +382,10 @@ async function replyFrame(
   engineProfile?: import('./index').YrsEngineApplyProfile,
   requestStarted = performance.now(),
   requireCaret = false,
-  paintCaret = false
+  paintCaret = false,
+  // An edit request: its edit is committed, so a paint failure travels in the
+  // reply beside the frame and updates instead of discarding them.
+  committed = false
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
   for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
@@ -420,8 +423,18 @@ async function replyFrame(
     }
   }
   const replayStarted = performance.now();
-  const { replayedPages, caretPainted } = await replayOffscreen(false);
+  let replayed = { replayedPages: 0, caretPainted: false };
+  let paintError: string | undefined;
+  try {
+    replayed = await replayOffscreen(false);
+  } catch (error) {
+    if (!committed || error instanceof WebAssembly.RuntimeError) throw error;
+    paintError = error instanceof Error ? error.message : String(error);
+  }
+  const { replayedPages, caretPainted } = replayed;
   const replayMs = performance.now() - replayStarted;
+  const failedFonts = fontErrors;
+  fontErrors = [];
   const frame = exactBuffer(bytes);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
@@ -441,6 +454,8 @@ async function replyFrame(
       replayedPages,
       layoutRevision,
       ...(stateVector ? { stateVector } : {}),
+      ...(failedFonts.length > 0 ? { fontErrors: failedFonts } : {}),
+      ...(paintError === undefined ? {} : { paintError }),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

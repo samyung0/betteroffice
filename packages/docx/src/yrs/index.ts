@@ -838,6 +838,12 @@ export interface YrsSession extends CollaborationReplica {
   ensureGlyphOutlines(page: unknown): Promise<Set<number>>;
   /** Calls `listener` with font ids whose outlines installed after the page that needed them painted. */
   onGlyphOutlines(listener: (fontIds: Set<number>) => void): () => void;
+  /**
+   * Reports sliced faces whose outlines failed in the engine worker (its
+   * replies' `fontErrors`, by this session's font id) through the `onError`
+   * each face was registered with.
+   */
+  reportResidentFontErrors(errors: ReadonlyArray<{ slot: number; message: string }>): void;
   /** Measure one paragraph through the session's resident text engine. */
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
@@ -1335,7 +1341,7 @@ function wrapSession(
   // Fonts registered from sliced faces' skeletons: a page's outlines install
   // before it paints here, and the worker opens the faces from these specs.
   let progressiveFonts: ResidentProgressiveFonts | null = null;
-  let progressiveSpecs: Array<ProgressiveFontSpec & { face: ProgressiveFontFace }> = [];
+  let progressiveSpecs: Array<ProgressiveFontSpec & { face: ProgressiveFontFace; onError: (error: Error) => void }> = [];
   const outlineListeners = new Set<(fontIds: Set<number>) => void>();
   let docxSource: Uint8Array | null = null;
 
@@ -1493,7 +1499,7 @@ function wrapSession(
       // The engine holds the outlines of the revision it registered.
       progressiveFonts.add(id, async () => face, onError, face.revision);
       if (progressiveSpecs.some((spec) => spec.slot === id)) return;
-      progressiveSpecs.push({ slot: id, source, face });
+      progressiveSpecs.push({ slot: id, source, face, onError });
       residentFontsRevision += 1;
     },
     ensureGlyphOutlines: (page) =>
@@ -1503,6 +1509,11 @@ function wrapSession(
       return () => {
         outlineListeners.delete(listener);
       };
+    },
+    reportResidentFontErrors: (errors) => {
+      for (const { slot, message } of errors) {
+        progressiveSpecs.find((spec) => spec.slot === slot)?.onError(new Error(message));
+      }
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);
