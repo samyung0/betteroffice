@@ -488,7 +488,7 @@ export class ResidentProgressiveFonts {
           for (const listener of [...this.lateListeners]) listener(this.fontIdsOf(new Set([owner])));
         }
       },
-      (error: unknown) => this.unavailable(state, error)
+      (error: unknown) => this.chunkFailed(state, error)
     );
     this.track(loading);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -512,6 +512,17 @@ export class ResidentProgressiveFonts {
     if (known) fonts.delete(known.face);
     fonts.add(fontFace);
     this.textFaces.set(owner, { name, revision, face: fontFace });
+  }
+
+  /**
+   * A chunk that could not be fetched (network or server) is reported once
+   * until `retryUnavailable`; any other failure, such as a handed-over chunk
+   * that does not match its index entry, is our bug and fails the face.
+   */
+  private chunkFailed(state: Owner, error: unknown): void {
+    const { file, reason } = (error ?? {}) as { file?: unknown; reason?: unknown };
+    if (typeof file === 'string' && (reason === 'network' || reason === 'server')) this.unavailable(state, error);
+    else this.fail(state, error);
   }
 
   /** Reports a slice that failed for this face, once until `retryUnavailable`. */
@@ -549,9 +560,9 @@ export class ResidentProgressiveFonts {
     try {
       await state.face.ensureGlyphs(ids);
     } catch (error) {
-      this.unavailable(state, error);
+      this.chunkFailed(state, error);
     }
-    return true;
+    return !state.failed;
   }
 
   /** Installs the face's current outlines; true when they changed. */

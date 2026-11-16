@@ -105,6 +105,20 @@ test('an opener handed the files the sender decoded fetches only the index and t
   expect([ref.index, index.skeleton.file, chunkFile(42), chunkFile(43)].map((file) => hits.get(file))).toEqual([1, undefined, undefined, 1]);
 });
 
+test('a handed-over chunk that does not match its index entry fails the face, naming the chunk', async () => {
+  const decoded = async (file: string) => decode(await Bun.file(new URL(file, assets)).arrayBuffer(), 64 << 20);
+  // Our bug: the sender hands chunk 43's bytes over as chunk 42.
+  const files = new Map([[chunkFile(42), await decoded(chunkFile(43))]]);
+  const errors: Error[] = [];
+  const resident = new ResidentProgressiveFonts({ updateFontOutlines() {} });
+  resident.add(10, sliceFaceOpener(spec.source, decode, files), (error) => errors.push(error));
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(42)])]]), UNTIL_INSTALLED)).toEqual(new Set());
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).not.toBeInstanceOf(FontSliceUnavailableError);
+  expect(errors[0]!.message).toContain(chunkFile(42));
+  expect(hits.get(chunkFile(42))).toBeUndefined();
+});
+
 test('a frame stops waiting at the guard, logs once, and repaints when the outlines arrive', async () => {
   const { resident, logs, updates } = fonts();
   let release!: () => void;
