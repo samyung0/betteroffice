@@ -241,6 +241,31 @@ test('a slice the worker could not load is reported once, not fetched here, and 
   }
 }, 60_000);
 
+test('retryFontSlices clears a failure the worker reported for a face no page here painted', async () => {
+  const sliced = await editor(true);
+  try {
+    await sliced.display();
+    sliced.type('鰯');
+    const after = await sliced.display();
+    const fontId = [...sliced.source.progressiveFaces().keys()].find((id) => glyphsOf(after, id).size > 0)!;
+    const outline = (glyph: number) => (JSON.parse(sliced.session.outlineGlyphJson(fontId, glyph)) as { cmds: unknown[] }).cmds.length;
+    // The worker painted and could not reach the slice; nothing painted here.
+    const [{ slot }] = sliced.session.residentWorkerSnapshot()!.progressiveFonts!;
+    const file = 'NotoSansJP-Regular/c093.zst';
+    sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'Failed to fetch', unavailable: { file, reason: 'network' } }]);
+    sliced.session.retryFontSlices();
+    // Back online, this realm's first paint (a fallback or print) asks for it again.
+    for (const page of after.pages) await sliced.session.prepareSlicedPaint(page, sliced.chains());
+    const drawn = [...glyphsOf(after, fontId)];
+    for (let wait = 0; wait < 100 && drawn.some((glyph) => outline(glyph) === 0); wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sliced.reads.filter((read) => read === file)).toHaveLength(1);
+    expect(drawn.length).toBeGreaterThan(0);
+    for (const glyph of drawn) expect(outline(glyph)).toBeGreaterThan(0);
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
 /** A package of `parts` (styles, settings, numbering) when given, and `body`'s paragraphs. */
 function packageOf(parts: { styles?: string; settings?: string; numbering?: string }, body: string): Uint8Array {
   const named = Object.entries(parts).filter((entry): entry is [string, string] => entry[1] !== undefined);

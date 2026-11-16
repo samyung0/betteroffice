@@ -1561,6 +1561,9 @@ function wrapSession(
     },
     retryFontSlices: () => {
       unavailableReported.clear();
+      // Every face forgets its failed chunks, those marked from the worker's
+      // reports included, whether or not a page here painted with it.
+      for (const spec of progressiveSpecs) spec.face.retryFailed();
       progressiveFonts?.retryUnavailable();
       for (const listener of [...retryListeners]) listener();
       // Pages painted here repaint, asking for the missing glyphs again.
