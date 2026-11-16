@@ -125,6 +125,75 @@ export function drawnByFont(page: unknown, into = new Map<number, DrawnGlyphs>()
   return into;
 }
 
+/**
+ * The text a display page paints with the browser's shaper, `text`
+ * primitives (list markers, watermarks) and their leaders: each one's CSS
+ * font and the characters it draws.
+ */
+export function textRunsOf(page: unknown): Array<{ font: string; text: string }> {
+  const runs: Array<{ font: string; text: string }> = [];
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > 12 || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, depth + 1);
+      return;
+    }
+    const value = node as { kind?: unknown; font?: unknown; text?: unknown; paintText?: unknown; allCaps?: unknown; leaderGlyphs?: unknown };
+    if (value.kind === 'text' && typeof value.font === 'string') {
+      const painted = typeof value.paintText === 'string' ? value.paintText : typeof value.text === 'string' ? value.text : '';
+      const text = value.allCaps === true ? painted.toUpperCase() : painted;
+      if (text) runs.push({ font: value.font, text });
+      const leader = value.leaderGlyphs as { font?: unknown; glyph?: unknown } | undefined;
+      if (typeof leader?.font === 'string' && typeof leader.glyph === 'string') runs.push({ font: leader.font, text: leader.glyph });
+      return;
+    }
+    for (const child of Object.values(node)) visit(child, depth + 1);
+  };
+  visit(page, 0);
+  return runs;
+}
+
+const CSS_FONT = /(?:^|\s)\d+(?:\.\d+)?px(?:\/\S+)?\s+(.+)$/;
+
+/** The family list and style of a CSS font shorthand, or null for one it cannot read. */
+export function cssFontFamilies(font: string): { families: string[]; bold: boolean; italic: boolean } | null {
+  const match = CSS_FONT.exec(font);
+  if (!match) return null;
+  const style = font.slice(0, match.index);
+  return {
+    families: match[1]!.split(',').map((family) => family.trim().replace(/^["']|["']$/g, '')).filter(Boolean),
+    bold: /\b(?:bold|[6-9]00)\b/.test(style),
+    italic: /\b(?:italic|oblique)\b/.test(style),
+  };
+}
+
+/**
+ * The characters `page`'s `text` primitives draw, by the font id that heads
+ * the chain (`chains`, by `family|bold|italic` key) of each family their CSS
+ * font names, with those families: the face the browser paints them with
+ * when it is registered under the family.
+ */
+export function textByChainHead(
+  page: unknown,
+  chains: Readonly<Record<string, number[]>>
+): Map<number, { characters: Set<string>; families: Set<string> }> {
+  const heads = new Map<number, { characters: Set<string>; families: Set<string> }>();
+  for (const { font, text } of textRunsOf(page)) {
+    const css = cssFontFamilies(font);
+    if (!css) continue;
+    for (const family of css.families) {
+      const key = family.toLowerCase();
+      const head = (chains[`${key}|${css.bold ? 1 : 0}|${css.italic ? 1 : 0}`] ?? chains[`${key}|0|0`])?.[0];
+      if (head === undefined) continue;
+      let entry = heads.get(head);
+      if (!entry) heads.set(head, entry = { characters: new Set(), families: new Set() });
+      entry.families.add(family);
+      for (const character of text) entry.characters.add(character);
+    }
+  }
+  return heads;
+}
+
 /** Glyph ids per font id drawn by a display page: its own runs and those of its regions and note areas. */
 export function glyphsByFont(page: unknown): Map<number, Set<number>> {
   return new Map([...drawnByFont(page)].map(([fontId, { glyphs }]) => [fontId, glyphs]));

@@ -5,7 +5,7 @@ import {
   type ResidentFontRequirement,
 } from './layout/measure/rustMeasureSource';
 import type { DisplayList } from './layout/render';
-import { drawnByFont } from './yrs/residentProgressiveFonts';
+import { drawnByFont, textByChainHead } from './yrs/residentProgressiveFonts';
 
 import { preloadDefaultFontDecoder } from './layout/measure/defaultFontProvider';
 
@@ -147,11 +147,14 @@ function readingRequest(request: ViewRequest, { width, padding }: DocxReadingLay
 /**
  * The faces of `faces` with the outline of every glyph `list` draws: chunks by
  * the glyph ids the layout shaped, and by the characters, whose chunks hold
- * every glyph another shaper (the painter's) can draw for them.
+ * every glyph another shaper (the painter's) can draw for them. Text the
+ * painter shapes itself (list markers, watermarks) counts for the face that
+ * heads the chain (`chains`) of a family it names.
  */
 async function outlineSlicedFaces(
   faces: ReadonlyMap<number, SlicedFontFace>,
-  list: DisplayList
+  list: DisplayList,
+  chains: Readonly<Record<string, number[]>>
 ): Promise<DocxViewerSlicedFace[]> {
   if (faces.size === 0) return [];
   const drawn = new Map<number, { glyphs: Set<number>; characters: Set<string> }>();
@@ -163,6 +166,14 @@ async function outlineSlicedFaces(
     const used = drawn.get(id);
     for (const glyph of used?.glyphs ?? []) entry.glyphs.add(glyph);
     for (const character of used?.characters ?? []) entry.characters.add(character);
+  }
+  // List markers and watermarks paint with the face their family's chain starts with.
+  for (const page of list.pages) {
+    for (const [head, { characters }] of textByChainHead(page, chains)) {
+      const sliced = faces.get(head);
+      const entry = sliced && wanted.get(sliced.face);
+      for (const character of entry ? characters : []) entry!.characters.add(character);
+    }
   }
   await Promise.all([...wanted].map(([face, { glyphs, characters }]) =>
     Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
@@ -183,6 +194,7 @@ export async function openDocumentViewer(
   const document = module.openViewDocument(bytes);
   let pageGap: number;
   let list: DisplayList | null;
+  let fontChains: Record<string, number[]> = {};
   // A registry per open: its failures and sliced faces are this open's. The
   // engine answers bytes it already holds with their first id.
   const failures: Error[] = [];
@@ -205,6 +217,7 @@ export async function openDocumentViewer(
     source.setCompat(request.regions.settings?.compatibilityFlags);
     const measurement = source.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error('DOCX viewer fonts did not load');
+    fontChains = measurement.fontChains;
     const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
     const displayList = JSON.parse(
       document.displayPagesJson(0, Math.min(PAGE_BATCH, pageCount))
@@ -226,7 +239,7 @@ export async function openDocumentViewer(
   }
   // Every page is built: the engine goes now, not on dispose.
   document.free();
-  let sliced = await outlineSlicedFaces(source.progressiveFaces(), list!);
+  let sliced = await outlineSlicedFaces(source.progressiveFaces(), list!, fontChains);
   return {
     displayList(gap) {
       if (!list) throw new Error('DOCX viewer handle is disposed');

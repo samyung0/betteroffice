@@ -126,6 +126,33 @@ test('a sliced face loads its skeleton and the chunks of exactly the characters 
   expect(sliced!.bytes.byteLength).toBeGreaterThan(skeletonLength);
 });
 
+/**
+ * MS Gothic Japanese with `body` in a list item whose number reads `鰯%1`,
+ * so the marker draws characters no run shapes.
+ */
+function markerPackage(body: string): Uint8Array {
+  return rezipContainer(Object.fromEntries(Object.entries({
+    '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${TYPE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${TYPE}.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="${TYPE}.numbering+xml"/></Types>`,
+    '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId3" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`,
+    'word/styles.xml': `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="MS Gothic" w:hAnsi="MS Gothic" w:eastAsia="MS Gothic"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
+    'word/numbering.xml': `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="鰯%1"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
+    'word/document.xml': `<w:document ${W}><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${body}</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`,
+  }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
+}
+
+test('a list marker loads the chunks of characters only it draws', async () => {
+  const { sliceFiles } = recordingFonts(true);
+  const handle = await openDocumentViewer(markerPackage('本文'));
+  const face = 'NotoSansJP-Regular';
+  expect(JSON.stringify(handle.displayList().pages)).toContain('"text":"鰯1"');
+  const bodyChunks = await chunkFiles(face, '本文');
+  const own = (await chunkFiles(face, '鰯')).filter((file) => !bodyChunks.includes(file));
+  expect(own.length).toBeGreaterThan(0);
+  const loaded = new Set(sliceFiles);
+  for (const file of own) expect(loaded.has(file)).toBe(true);
+});
+
 test('a slice chunk that fails to load fails the open instead of painting without it', async () => {
   recordingFonts(true, { 'NotoSansJP-Regular/c095.zst': 'NotoSansJP-Regular/c094.zst' });
   await expect(openDocumentViewer(japanesePackage(BODY, HEADER))).rejects.toThrow('NotoSansJP-Regular/c095.zst');
