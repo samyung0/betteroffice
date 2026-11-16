@@ -92,7 +92,10 @@ export interface SliceTransport {
   timeoutMs?: number;
   /** Decompresses a zstd file to at most `maxOutput` bytes. */
   decode(encoded: ArrayBuffer, maxOutput: number): Promise<ArrayBuffer>;
-  /** A file's decoded bytes when this realm already holds them. */
+  /**
+   * A file's decoded bytes another of our realms handed over, used instead of
+   * reading it; one that differs from its index entry fails the load.
+   */
   held?(file: string): ArrayBuffer | undefined;
 }
 
@@ -128,7 +131,13 @@ export function sliceSourceOf(face: ProgressiveFontFace): Promise<SliceSource> |
 
 async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Uint8Array> {
   const held = transport.held?.(entry.file);
-  if (held?.byteLength === entry.byteLength && await sha256(held) === entry.sha256) return new Uint8Array(held);
+  if (held !== undefined) {
+    // Only our own realms hand files over, so a mismatch is our bug: fail, don't fetch around it.
+    if (held.byteLength !== entry.byteLength || await sha256(held) !== entry.sha256) {
+      throw new Error(`Font slice ${entry.file} handed over by another realm does not match its index entry`);
+    }
+    return new Uint8Array(held);
+  }
   const encoded = await transport.read(entry.file);
   if (encoded.byteLength !== entry.encodedLength) {
     throw new Error(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);

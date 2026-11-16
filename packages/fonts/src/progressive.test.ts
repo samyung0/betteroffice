@@ -132,7 +132,7 @@ test('a progressive face loads index and skeleton, then only the chunks of the g
   expect(sha(face.bytes())).toBe(index.sha256);
 });
 
-test('an open handed the decoded files of another reads and decodes none of them, and refuses one that changed', async () => {
+test('an open handed the decoded files of another reads and decodes none of them, and fails on one that changed', async () => {
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
   const skeleton = parseSkeleton(await decode(index.skeleton.file));
   let glyph = 0;
@@ -151,8 +151,10 @@ test('an open handed the decoded files of another reads and decodes none of them
   const changed = new Uint8Array(files.get(index.skeleton.file)!.slice(0));
   changed[100] ^= 1;
   const rereads: string[] = [];
-  await openProgressiveFace(jpRef, { ...transport(rereads), held: (file) => file === index.skeleton.file ? changed.buffer : files.get(file) });
-  expect(rereads).toEqual([jpRef.index, index.skeleton.file]);
+  await expect(openProgressiveFace(jpRef, { ...transport(rereads), held: (file) => file === index.skeleton.file ? changed.buffer : files.get(file) }))
+    .rejects.toThrow(`Font slice ${index.skeleton.file} handed over by another realm does not match its index entry`);
+  // Our own realms' bytes are never fetched around.
+  expect(rereads).toEqual([jpRef.index]);
 });
 
 test('a glyph whose chunk loaded during another pending request resolves with a revision that draws it', async () => {
