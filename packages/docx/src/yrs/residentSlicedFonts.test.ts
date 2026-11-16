@@ -372,6 +372,32 @@ test('an editor page paints its list marker and watermark with the sliced face, 
   });
 }, 60_000);
 
+test('an editor page paints a ① bullet in Century and a 社外秘 watermark in Calibri with the sliced face after their families', async () => {
+  const bulletDocument = packageOf({
+    styles: `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="MS Gothic" w:hAnsi="MS Gothic" w:eastAsia="MS Gothic"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
+    numbering: `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="bullet"/><w:lvlText w:val="①"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr><w:rPr><w:rFonts w:ascii="Century" w:hAnsi="Century" w:eastAsia="Century"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
+  }, '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>本文</w:t></w:r></w:p>');
+  await withRealmFonts(async (added) => {
+    const sliced = await editor(true, bulletDocument, (request) => {
+      request.regions.watermark = { kind: 'text', text: '社外秘', font: 'Calibri' } as typeof request.regions.watermark;
+    });
+    try {
+      const [page] = (await sliced.display()).pages;
+      expect(JSON.stringify(page)).toContain('"text":"①"');
+      expect(JSON.stringify(page)).toContain('"text":"社外秘"');
+      const paint = await sliced.session.prepareSlicedPaint(page, sliced.chains());
+      const [name] = added.map((face) => face.family);
+      expect(name).toMatch(/^BetterOffice Sliced \d+$/);
+      expect(paint.fontFamilies.get('Century')).toEqual(['Century', name!]);
+      expect(paint.fontFamilies.get('Calibri')).toEqual(['Calibri', name!]);
+      const reads = new Set(sliced.reads);
+      for (const file of await chunkFilesOf('NotoSansJP-Regular', '①社外秘')) expect(reads.has(file)).toBe(true);
+    } finally {
+      sliced.session.destroy();
+    }
+  });
+}, 60_000);
+
 /**
  * Kanji-only text naming no language, in a family no face stands in for (so
  * its Han draws with the script slot's face), in a document whose theme

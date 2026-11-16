@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import { REQUEST_TIMEOUT_MS } from './residentEngineWorkerClient';
-import { FontSliceUnavailableError, glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, UNTIL_COMPLETE, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import { FontSliceUnavailableError, glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, slicedFontFamilies, textSlicedFaces, UNTIL_COMPLETE, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('manifest.json', assets), 'utf8')) as {
@@ -363,4 +363,19 @@ test('CJK in a marker of a Latin-headed family, or in a watermark font no text u
     delete realm.FontFace;
     delete realm.fonts;
   }
+});
+
+test('View and Edit name the sliced face after a Century bullet and a Calibri watermark, whose chains start with Latin faces', () => {
+  const page = {
+    primitives: [
+      { kind: 'text', font: '400 14px Century, sans-serif', text: '①' },
+      { kind: 'text', font: '700 96px Calibri, sans-serif', text: '社外秘' },
+    ],
+  };
+  const faces = textSlicedFaces(page, { 'century|0|0': [5], 'calibri|1|0': [2, 9] }, (id) => id === 9);
+  expect(slicedFontFamilies(faces, () => 'BetterOffice Sliced 9')).toEqual(new Map([
+    ['Century', ['Century', 'BetterOffice Sliced 9']],
+    ['Calibri', ['Calibri', 'BetterOffice Sliced 9']],
+  ]));
+  expect([...faces.get(9)!.characters].join('')).toBe('①社外秘');
 });

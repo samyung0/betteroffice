@@ -127,17 +127,19 @@ test('a sliced face loads its skeleton and the chunks of exactly the characters 
 });
 
 /**
- * MS Gothic Japanese with `body` in a list item whose number reads `鰯%1`,
- * so the marker draws characters no run shapes.
+ * MS Gothic Japanese with `body` in a list item whose number reads `鰯%1`
+ * (or the bullet `bullet`), in `markerFont` when given, so the marker draws
+ * characters no run shapes.
  */
-function markerPackage(body: string, markerFont?: string): Uint8Array {
+function markerPackage(body: string, markerFont?: string, bullet?: string): Uint8Array {
+  const level = bullet ? `<w:numFmt w:val="bullet"/><w:lvlText w:val="${bullet}"/>` : '<w:numFmt w:val="decimal"/><w:lvlText w:val="鰯%1"/>';
   const markerRun = markerFont ? `<w:rPr><w:rFonts w:ascii="${markerFont}" w:hAnsi="${markerFont}" w:eastAsia="${markerFont}"/></w:rPr>` : '';
   return rezipContainer(Object.fromEntries(Object.entries({
     '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${TYPE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${TYPE}.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="${TYPE}.numbering+xml"/></Types>`,
     '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
     'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId3" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`,
     'word/styles.xml': `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="MS Gothic" w:hAnsi="MS Gothic" w:eastAsia="MS Gothic"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
-    'word/numbering.xml': `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="鰯%1"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr>${markerRun}</w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
+    'word/numbering.xml': `<w:numbering ${W}><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>${level}<w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr>${markerRun}</w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`,
     'word/document.xml': `<w:document ${W}><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${body}</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`,
   }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
 }
@@ -163,6 +165,16 @@ test('a list marker in a Latin family paints its CJK with the sliced face, named
   expect(marker && 'font' in marker && marker.font).toContain(`"Calibri", "${sliced!.family}"`);
   const loaded = new Set(sliceFiles);
   for (const file of await chunkFiles('NotoSansJP-Regular', '鰯')) expect(loaded.has(file)).toBe(true);
+});
+
+test('a ① bullet in Century, a Japanese document Latin font, paints with the sliced face after Century and loads its chunk', async () => {
+  const { sliceFiles } = recordingFonts(true);
+  const handle = await openDocumentViewer(markerPackage('本文', 'Century', '①'));
+  const [sliced] = handle.slicedFaces();
+  const marker = handle.displayList().pages[0]!.primitives.find((primitive) => primitive.kind === 'text' && primitive.text === '①');
+  expect(marker && 'font' in marker && marker.font).toContain(`"Century", "${sliced!.family}"`);
+  const loaded = new Set(sliceFiles);
+  for (const file of await chunkFiles('NotoSansJP-Regular', '①')) expect(loaded.has(file)).toBe(true);
 });
 
 test('a slice chunk that fails to load fails the open instead of painting without it', async () => {
