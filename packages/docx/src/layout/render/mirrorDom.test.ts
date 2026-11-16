@@ -193,11 +193,24 @@ describe('buildMirrorPage joined glyph runs', () => {
   const page = (primitives: unknown[]) =>
     ({ pageIndex: 0, width: 500, height: 500, primitives }) as unknown as DisplayPage;
 
-  test('mirror one element per cluster, as the runs they were joined from', () => {
-    expect(buildMirrorPage(page([joined])).outerHTML).toBe(
-      buildMirrorPage(page(pieces)).outerHTML
+  const clustered = { clusters: true };
+
+  test('mirror one element per cluster in a text layer, as the runs they were joined from', () => {
+    expect(buildMirrorPage(page([joined]), clustered).outerHTML).toBe(
+      buildMirrorPage(page(pieces), clustered).outerHTML
     );
-    expect(buildMirrorPage(page([joined])).querySelectorAll('.layout-run-text')).toHaveLength(5);
+    expect(
+      buildMirrorPage(page([joined]), clustered).querySelectorAll('.layout-run-text')
+    ).toHaveLength(5);
+  });
+
+  test("mirror one element elsewhere, so the paragraph reads as the run's text", () => {
+    const mirror = buildMirrorPage(page([joined]));
+    const runs = mirror.querySelectorAll('.layout-run-text');
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.childNodes).toHaveLength(1);
+    expect(runs[0]?.textContent).toBe(clusters.join(''));
+    expect(mirror.querySelector('.layout-paragraph')?.textContent).toBe(clusters.join(''));
   });
 
   // `count` clusters of `text` joined into one run starting at docStart
@@ -222,30 +235,42 @@ describe('buildMirrorPage joined glyph runs', () => {
       joinedRun('c', count, 2 * count),
     ]);
 
-  test('keep one link per run on a text page, reading the same characters', () => {
+  test('keep one link per run outside a text layer, a text page reading the same characters', () => {
     const full = buildMirrorPage(linked(12));
     const text = buildMirrorTextPage(linked(12));
     expect(characters(text)).toEqual(characters(full));
-    expect(full.querySelectorAll('a')).toHaveLength(12);
+    expect(buildMirrorPage(linked(12), clustered).querySelectorAll('a')).toHaveLength(12);
+    expect(full.querySelectorAll('a')).toHaveLength(1);
     expect(text.querySelectorAll('a')).toHaveLength(1);
     expect(text.querySelector('a')?.textContent).toBe('b'.repeat(12));
   });
 
-  test('hold a text page to a node count that does not grow with its characters', () => {
+  test('hold a page outside a text layer to a node count that does not grow with its characters', () => {
     // the page, its paragraph and the link; the text before, in and after it
     const bound = { elements: 3, texts: 3 };
     expect(nodeCount(buildMirrorTextPage(linked(1)))).toEqual(bound);
     expect(nodeCount(buildMirrorTextPage(linked(400)))).toEqual(bound);
-    expect(nodeCount(buildMirrorPage(linked(400))).elements).toBeGreaterThan(1200);
+    expect(nodeCount(buildMirrorPage(linked(400)))).toEqual(nodeCount(buildMirrorPage(linked(1))));
+    expect(nodeCount(buildMirrorPage(linked(400), clustered)).elements).toBeGreaterThan(1200);
   });
 
-  test('split per cluster on a text page only where the clip hides part of the run', () => {
+  test('split outside a text layer only where the clip hides part of the run', () => {
     const clipped = (clip: object) =>
       page([joinedRun('a', 10, 0, { href: '#cut', clipGroup: { clip } })]);
     // the clip ends between the fifth and sixth glyph centres
     const cut = clipped({ x: 0, y: 0, w: 50 + 5 * 9, h: 500 });
     expect(characters(buildMirrorTextPage(cut))).toEqual(characters(buildMirrorPage(cut)));
-    expect(buildMirrorTextPage(cut).querySelectorAll('[aria-hidden="true"]')).toHaveLength(5);
+    for (const mirror of [buildMirrorPage(cut), buildMirrorTextPage(cut)]) {
+      expect(
+        [...mirror.querySelectorAll('a')].map((link) => [
+          link.textContent,
+          link.getAttribute('aria-hidden'),
+        ])
+      ).toEqual([
+        ['aaaaa', null],
+        ['aaaaa', 'true'],
+      ]);
+    }
     const inside = clipped({ x: 0, y: 0, w: 500, h: 500 });
     expect(characters(buildMirrorTextPage(inside))).toEqual(characters(buildMirrorPage(inside)));
     expect(buildMirrorTextPage(inside).querySelectorAll('a')).toHaveLength(1);
@@ -319,7 +344,7 @@ describe('buildMirrorTextPage on laid-out documents', () => {
     });
   }
 
-  test('keeps the table of contents one link per run', async () => {
+  test('keeps a link one element per line of its text', async () => {
     const list = await laidOut('wordprocessingml-comprehensive.docx');
     // runs and pictures carrying a link (decorations under a link carry it too)
     const links = list.pages.flatMap((page) =>
@@ -332,8 +357,39 @@ describe('buildMirrorTextPage on laid-out documents', () => {
       ...buildMirrorTextPage(page).querySelectorAll('a[data-href]'),
     ]);
     const full = list.pages.flatMap((page) => [...buildMirrorPage(page).querySelectorAll('a[data-href]')]);
-    expect(text).toHaveLength(links.length);
-    expect(full.length).toBeGreaterThan(text.length);
+    const clusteredLinks = list.pages.flatMap((page) => [
+      ...buildMirrorPage(page, { clusters: true }).querySelectorAll('a[data-href]'),
+    ]);
+    // the table of contents entry, and links the line shaped glyph by glyph
+    const read = (links: Element[]) => links.map((link) => link.textContent);
+    expect(read(full)).toEqual(['1. Character formatting', 'betteroffice.dev', 'back to section 1']);
+    expect(read(text)).toEqual(read(full));
+    expect(links.length).toBeGreaterThan(full.length);
+    expect(clusteredLinks.length).toBeGreaterThan(full.length);
+  });
+
+  test('mirrors each laid-out run whole outside a text layer', async () => {
+    let whole = 0;
+    for (const fixture of ['wordprocessingml-comprehensive.docx', 'exchange-plan.docx']) {
+      for (const page of (await laidOut(fixture)).pages) {
+        const runs = [
+          ...buildMirrorPage(page).querySelectorAll<HTMLElement>('.layout-run-text[data-doc-start]'),
+        ];
+        for (const p of page.primitives) {
+          if (p.kind !== 'glyphRun' || !p.clusterRuns || p.clipGroup) continue;
+          // one element holds the run's text, not one per glyph cluster
+          const holder = runs.find(
+            (run) =>
+              Number(run.dataset.docStart) <= p.docStart! &&
+              Number(run.dataset.docEnd) >= p.docEnd! &&
+              run.textContent!.includes(p.text)
+          );
+          expect(holder).toBeDefined();
+          whole += 1;
+        }
+      }
+    }
+    expect(whole).toBeGreaterThan(0);
   });
 
   // every field the owned frame delta moves (applyFrameDeltaOwned)
@@ -546,8 +602,10 @@ describe('patchMirrorPage', () => {
   };
   // `before`'s mirror patched to `after` equals a fresh build, and its position
   // bindings reach the mounted nodes: a later shift moves them in place
+  const textLayer = (page: DisplayPage, options: typeof labels) =>
+    buildMirrorPage(page, { ...options, clusters: true });
   const expectPatched = (before: DisplayPage, after: DisplayPage) => {
-    for (const build of [buildMirrorPage, buildMirrorTextPage]) {
+    for (const build of [buildMirrorPage, buildMirrorTextPage, textLayer]) {
       const mirror = build(before, labels);
       const next = structuredClone(after);
       expect(patchMirrorPage(mirror, build(next, labels))).toBe(true);
@@ -605,6 +663,41 @@ describe('patchMirrorPage', () => {
         [2, 'Second ', 'one']
       );
     expectPatched(page('שלום'), page('שלומי'));
+  });
+
+  test('typing in a line of shaped runs equals a fresh build', () => {
+    // a line as the engine paints it: one glyph run joined from its clusters
+    const shaped = (text: string, docStart: number, blockId: number, baselineY: number) => ({
+      kind: 'glyphRun',
+      fontId: 0,
+      size: 16,
+      color: '#000000',
+      text,
+      glyphs: Array.from(text, (_, index) => ({
+        id: 7,
+        x: 100 + index * 8,
+        y: baselineY,
+        cluster: index,
+        advance: 8,
+      })),
+      docStart,
+      docEnd: docStart + text.length,
+      blockId,
+      lineIndex: 0,
+      clusterRuns: true,
+    });
+    const page = (first: string) =>
+      ({
+        ...twoParagraphs(),
+        primitives: [shaped(first, 10, 1, 100), shaped('Second one', 11 + first.length, 2, 130)],
+      }) as unknown as DisplayPage;
+    expectPatched(page('Marker01 line 1 keeps'), page('Marker01 line 1 keeps the'));
+    const mirror = buildMirrorPage(page('Marker01 line 1 keeps'), labels);
+    const paragraphs = mirror.querySelectorAll('.layout-page-content .layout-paragraph');
+    expect([...paragraphs].map((p) => p.textContent)).toEqual([
+      'Marker01 line 1 keeps',
+      'Second one',
+    ]);
   });
 
   test('leaves a mirror of the other form to be swapped', () => {

@@ -83,7 +83,7 @@ export function textLayerText(
     }
     const page = pages.find((page) => String(page.pageIndex) === pageEl.dataset.pageIndex);
     if (!page) throw new Error(`No display page ${pageEl.dataset.pageIndex} for the text layer`);
-    const full = buildMirrorPage(page, { document: pageEl.ownerDocument });
+    const full = buildMirrorPage(page, { document: pageEl.ownerDocument, clusters: true });
     const fullRange = whole
       ? null
       : rangeAtOffsets(

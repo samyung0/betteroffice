@@ -4419,7 +4419,7 @@ describe('XlsxEditor point mode', () => {
 });
 
 describe('XlsxEditor cell text', () => {
-  // B12 in 20pt bold Georgia, dark red, and nothing else in its row.
+  // B12 in 20pt bold Georgia, dark red on light yellow, and nothing else in its row.
   let styled: Fixture;
   beforeAll(() => {
     const handle = openWorkbook(plain.bytes.slice());
@@ -4429,6 +4429,7 @@ describe('XlsxEditor cell text', () => {
         fontSize: 20,
         bold: true,
         textColor: '#c00000',
+        fillColor: '#fff2cc',
       });
       styled = fixtureFrom(handle.save());
     } finally {
@@ -4472,15 +4473,17 @@ describe('XlsxEditor cell text', () => {
       input.style.fontWeight,
       input.style.fontFamily,
       input.style.color,
-    ]).toEqual(['26.666667px', 'bold', 'Georgia, sans-serif', '#c00000']);
+      input.style.background,
+    ]).toEqual(['26.666667px', 'bold', 'Georgia, sans-serif', '#c00000', '#fff2cc']);
     // the committed text shows over its cell until the worker's frame draws it.
     act(() => {
       fireEvent.keyDown(input, { key: 'Enter' });
     });
     const pending = view.surface.querySelector<HTMLElement>('[data-testid="xlsx-pending-cell"]');
-    expect(pending && [pending.style.fontSize, pending.style.color]).toEqual([
+    expect(pending && [pending.style.fontSize, pending.style.color, pending.style.background]).toEqual([
       '26.666667px',
       '#c00000',
+      '#fff2cc',
     ]);
     await view.idle();
   });

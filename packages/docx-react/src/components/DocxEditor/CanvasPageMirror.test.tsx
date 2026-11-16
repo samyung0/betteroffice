@@ -104,3 +104,31 @@ test('a selection end in a plain-text page does not keep it from turning positio
   expect(mirrorPage(container)?.classList.contains('layout-page-mirror-text')).toBe(false);
   document.getSelection()?.removeAllRanges();
 });
+
+test("the editor's mirror reads a shaped line as one run, a viewer's text layer keeps one per glyph cluster", () => {
+  const text = 'Marker01 keeps';
+  const shaped = {
+    ...page,
+    primitives: [
+      {
+        kind: 'glyphRun',
+        fontId: 0,
+        size: 16,
+        color: '#000000',
+        text,
+        glyphs: Array.from(text, (_, index) => ({ id: 7, x: 100 + index * 8, y: 100, cluster: index, advance: 8 })),
+        docStart: 1,
+        docEnd: 1 + text.length,
+        blockId: 0,
+        lineIndex: 0,
+        clusterRuns: true,
+      },
+    ],
+  } as unknown as DisplayPage;
+  const runs = (container: HTMLElement) =>
+    [...container.querySelectorAll('.layout-run-text')].map((run) => run.textContent);
+  const editor = render(<CanvasPageMirror page={shaped} revision={0} full />);
+  expect(runs(editor.container)).toEqual([text]);
+  const viewer = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  expect(runs(viewer.container)).toEqual(Array.from(text));
+});

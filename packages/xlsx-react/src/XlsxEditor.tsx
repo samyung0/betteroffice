@@ -14,6 +14,7 @@ import {
   buildA11yGrid,
   cellAddress,
   cellAtPoint,
+  cellFill,
   cellFont,
   cellRect,
   CellTextTooLongError,
@@ -348,19 +349,21 @@ interface OptimisticEdit {
   style: CellTextStyle;
 }
 
-/** A cell's text as the canvas paints it: its font at 100% and its colour. */
+/** A cell's text as the canvas paints it: its font at 100%, its colour and its cell's fill. */
 interface CellTextStyle {
   font: Pick<TextCmd, 'fontFamily' | 'fontSize' | 'bold' | 'italic'>;
   color: string;
+  background: string;
 }
 
-// the workbook default (Calibri 11, black) until a frame describes the cell.
+// the workbook default (Calibri 11, black on white) until a frame describes the cell.
 const DEFAULT_CELL_TEXT: CellTextStyle = {
   font: { fontFamily: 'Calibri', fontSize: 11 },
   color: '#000000',
+  background: '#ffffff',
 };
 
-function cellTextStyle(formatting: SelectionFormatting | null): CellTextStyle {
+function cellTextStyle(formatting: SelectionFormatting | null, background: string): CellTextStyle {
   if (!formatting) return DEFAULT_CELL_TEXT;
   return {
     font: {
@@ -370,6 +373,7 @@ function cellTextStyle(formatting: SelectionFormatting | null): CellTextStyle {
       italic: formatting.italic,
     },
     color: formatting.textColor ?? DEFAULT_CELL_TEXT.color,
+    background,
   };
 }
 
@@ -1069,10 +1073,22 @@ function XlsxEditorContent({
   // selection uses) once the frame on screen describes that cell: the open
   // edit and the inputs waiting for their frame use it.
   const shownSelection = shownHere?.view.selection;
-  const activeTextStyle = cellTextStyle(
+  const describedCell =
     selection && shownSelection && sameCell(activeCell(shownSelection), activeCell(selection))
-      ? (shownHere?.activeFormatting ?? null)
-      : null
+      ? activeCell(selection)
+      : null;
+  // the fill the grid paints under that cell, scanned once per frame and cell
+  // rather than on every keystroke of the open edit.
+  const shownList = shownHere?.displayList;
+  const describedRow = describedCell?.row ?? -1;
+  const describedCol = describedCell?.col ?? -1;
+  const describedFill = useMemo(() => {
+    const rect = shownList && describedRow >= 0 ? cellRect(shownList.grid, describedRow, describedCol) : null;
+    return shownList && rect ? cellFill(shownList, rect) : DEFAULT_CELL_TEXT.background;
+  }, [shownList, describedRow, describedCol]);
+  const activeTextStyle = cellTextStyle(
+    describedCell ? (shownHere?.activeFormatting ?? null) : null,
+    describedFill
   );
   const activeTextStyleRef = useRef(activeTextStyle);
   activeTextStyleRef.current = activeTextStyle;
@@ -4079,7 +4095,7 @@ function XlsxEditorContent({
                   textAlign: NUMBER_INPUT.test(entry.text) ? 'right' : 'left',
                   font: cellFont(entry.style.font, paintedZoom),
                   color: entry.style.color,
-                  background: '#ffffff',
+                  background: entry.style.background,
                 }}
               >
                 {entry.text}
@@ -4198,7 +4214,7 @@ function XlsxEditorContent({
                         padding: '0 3px',
                         font: cellFont(activeTextStyle.font, paintedZoom),
                         color: activeTextStyle.color,
-                        background: '#ffffff',
+                        background: activeTextStyle.background,
                         pointerEvents: 'auto',
                         outline: 'none',
                       }

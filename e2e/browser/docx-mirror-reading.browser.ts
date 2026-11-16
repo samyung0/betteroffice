@@ -38,7 +38,6 @@ async function open(browser: Browser) {
 type AXNode = { ignored?: boolean; name?: { value?: string } };
 
 test('docx: the page mirror reads whole words', async ({ browser }, info) => {
-  test.fixme(true, "Capy's page mirror exposes each letter as its own text (M a r k e r); upstream #2268's whole-word mirror is not ported (needs a Capy pin)");
   test.setTimeout(120_000);
   const { context, page } = await open(browser);
   try {
