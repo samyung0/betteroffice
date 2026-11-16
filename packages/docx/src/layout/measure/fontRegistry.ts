@@ -15,6 +15,8 @@ export interface ProgressiveFontFace {
   retryFailed(): void;
   /** `file`, a chunk of this face, failed in another realm: not fetched here either until `retryFailed`. */
   markFailed(file: string, error: Error): void;
+  /** The chunks that failed and are not fetched again until `retryFailed`, by file, with their errors. */
+  failures(): Map<string, unknown>;
 }
 
 /** A sliced face registered from its skeleton, and where it came from. */

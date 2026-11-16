@@ -189,6 +189,19 @@ test('a chunk that fails is reported once per face, not fetched again until a re
   expect(errors).toHaveLength(1);
 });
 
+test('a face opened with the chunks that failed for its sender fetches none of them until a retry', async () => {
+  const errors: Error[] = [];
+  const resident = new ResidentProgressiveFonts({ updateFontOutlines() {} });
+  resident.add(10, sliceFaceOpener(spec.source, decode, undefined, [{ file: chunkFile(62), reason: 'server', status: 503 }]), (error) => errors.push(error));
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(62)])]]), UNTIL_INSTALLED)).toEqual(new Set());
+  expect(hits.get(chunkFile(62))).toBeUndefined();
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toMatchObject({ file: chunkFile(62), reason: 'server', status: 503 });
+  resident.retryUnavailable();
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(62)])]]), UNTIL_INSTALLED)).toEqual(new Set([10]));
+  expect(hits.get(chunkFile(62))).toBe(1);
+});
+
 test('an engine that refuses the outlines is reported once and never sent outlines again', async () => {
   let calls = 0;
   const { resident, errors } = fonts(() => {

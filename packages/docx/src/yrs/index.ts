@@ -25,6 +25,7 @@ import {
   glyphsByFont,
   FontSliceUnavailableError,
   ResidentProgressiveFonts,
+  sliceFailures,
   type ProgressiveFontSource,
   type ProgressiveFontSpec,
   type ResidentFontError,
@@ -1668,7 +1669,12 @@ function wrapSession(
           ? {}
           : {
               // The files this page decoded, so the worker decodes none again.
-              progressiveFonts: progressiveSpecs.map(({ slot, source, face }) => ({ slot, source, files: face.files() })),
+              // The faces' files go along, and the chunks that failed, so a
+              // worker that opens them again fetches those only after a retry.
+              progressiveFonts: progressiveSpecs.map(({ slot, source, face }) => {
+                const failed = sliceFailures(face);
+                return { slot, source, files: face.files(), ...(failed.length > 0 ? { failed } : {}) };
+              }),
             }),
         ...(state ? {} : { media: session.media_json() }),
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({

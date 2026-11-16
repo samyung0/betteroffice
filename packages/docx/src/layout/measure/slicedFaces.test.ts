@@ -15,6 +15,7 @@ function fakeFace(): ProgressiveFontFace {
     files: () => new Map(),
     retryFailed: () => {},
     markFailed: () => {},
+    failures: () => new Map(),
   };
 }
 

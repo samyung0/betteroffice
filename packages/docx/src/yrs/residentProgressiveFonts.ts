@@ -20,6 +20,15 @@ export interface ProgressiveFontSpec {
   source: ProgressiveFontSource;
   /** Decoded files the sender already loaded, by manifest path, which the receiver's open reads instead. */
   files?: ReadonlyMap<string, ArrayBuffer>;
+  /** Chunks that failed for the sender: the receiver's open does not fetch them either until a retry. */
+  failed?: SliceFailure[];
+}
+
+/** A chunk that failed, as `FontSliceUnavailableError` describes it. */
+export interface SliceFailure {
+  file: string;
+  reason: 'network' | 'server';
+  status?: number;
 }
 
 /** What the engines use of a face `@betteroffice/fonts/progressive` opens. */
@@ -29,6 +38,7 @@ interface OutlineFace {
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
   ensureText(text: string): Promise<number>;
   retryFailed(): void;
+  markFailed(file: string, error: Error): void;
 }
 
 /**
@@ -261,23 +271,38 @@ interface ProgressiveModule {
 /**
  * Opens the face `source` names from its files, for a realm that did not open
  * it (an engine worker); `files` the sender decoded are checked and used
- * instead of fetched and decoded again.
+ * instead of fetched and decoded again, and chunks that `failed` for it are
+ * not fetched until a retry.
  */
 export function sliceFaceOpener(
   source: ProgressiveFontSource,
   decode: (encoded: ArrayBuffer, maxOutput: number) => Promise<ArrayBuffer>,
   files?: ReadonlyMap<string, ArrayBuffer>,
+  failed: readonly SliceFailure[] = [],
   loadModule: () => Promise<ProgressiveModule> = () => import('@betteroffice/fonts/progressive'),
 ): () => Promise<OutlineFace> {
-  return () => loadModule().then(({ openProgressiveFace, readFontAsset }) => openProgressiveFace(source.ref, {
-    read: (file) => {
-      const url = source.urls[file];
-      if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
-      return readFontAsset(file, new URL(url), source.timeoutMs);
-    },
-    decode,
-    ...(files && { held: (file: string) => files.get(file) }),
-  }));
+  return async () => {
+    const { openProgressiveFace, readFontAsset } = await loadModule();
+    const face = await openProgressiveFace(source.ref, {
+      read: (file) => {
+        const url = source.urls[file];
+        if (url === undefined) return Promise.reject(new Error(`Font slice ${file} has no URL`));
+        return readFontAsset(file, new URL(url), source.timeoutMs);
+      },
+      decode,
+      ...(files && { held: (file: string) => files.get(file) }),
+    });
+    for (const { file, reason, status } of failed) face.markFailed(file, new FontSliceUnavailableError(file, reason, status));
+    return face;
+  };
+}
+
+/** The chunks `face` remembers as failed, for another realm's open of it (`ProgressiveFontSpec.failed`). */
+export function sliceFailures(face: { failures(): Map<string, unknown> }): SliceFailure[] {
+  return [...face.failures()].map(([file, error]) => {
+    const { reason, status } = FontSliceUnavailableError.from(error);
+    return { file, reason, ...(status === undefined ? {} : { status }) };
+  });
 }
 
 /**

@@ -339,8 +339,8 @@ function openProgressiveFonts(
   });
   const decode = async (encoded: ArrayBuffer, maxOutput: number) =>
     (await decodeFontFace(encoded, { codec: 'zstd', maxOutput })).font;
-  for (const { slot, source, files } of snapshot.progressiveFonts) {
-    fonts.add(ids[slot] ?? slot, sliceFaceOpener(source, decode, files), (error) => {
+  for (const { slot, source, files, failed } of snapshot.progressiveFonts) {
+    fonts.add(ids[slot] ?? slot, sliceFaceOpener(source, decode, files, failed), (error) => {
       fontErrors.push(
         error instanceof FontSliceUnavailableError
           ? { slot, message: error.message, unavailable: { file: error.file, reason: error.reason, ...(error.status === undefined ? {} : { status: error.status }) } }

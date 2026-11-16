@@ -30,7 +30,7 @@ beforeAll(async () => {
     // Sliced faces: each page draws font 7's glyph numbered by its page index.
     './residentProgressiveFonts': `
       export const glyphsByFont = (page) => testHarness.drawn(page);
-      export const sliceFaceOpener = (source) => source;
+      export const sliceFaceOpener = (source, decode, files, failed) => ((testHarness.failed = failed), source);
       export class FontSliceUnavailableError extends Error {
         constructor(file, reason, status) {
           super('Some characters cannot be drawn until the font slice ' + file + ' loads');
@@ -132,6 +132,8 @@ function worker() {
     emitUpdate: null as ((update: Uint8Array) => void) | null,
     Unavailable: null as unknown as new (file: string, reason: string, status?: number) => Error,
     retries: 0,
+    /** The failed chunks the last face opened was handed. */
+    failed: undefined as unknown,
     session: {
       loadState() {},
       clearFonts() {},
@@ -566,6 +568,14 @@ describe('resident worker sliced faces', () => {
     const next = await w.type([2], caret(2));
     expect(next.ok).toBe(true);
     expect(w.harness.presented).toContain(2);
+  });
+
+  test('a worker opened again takes the chunks that failed along, so it does not fetch them', async () => {
+    const w = worker();
+    const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
+    const failed = [{ file: 'jp/c093.zst', reason: 'network' as const }];
+    await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source, failed }] });
+    expect(w.harness.failed).toEqual(failed);
   });
 
   test('a slice that fails travels as unavailable, and a retry asks again and repaints every page', async () => {

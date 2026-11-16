@@ -30,6 +30,8 @@ export interface ProgressiveFontFace {
   retryFailed(): void;
   /** `file`, a chunk of this face, failed in another realm: this one doesn't fetch it either until `retryFailed`. */
   markFailed(file: string, error: Error): void;
+  /** The chunks that failed and are not fetched again until `retryFailed`, by file, with their errors. */
+  failures(): Map<string, unknown>;
   /**
    * Copies of the files loaded so far (the index, the skeleton and each
    * outline chunk, decoded) by manifest path: what another realm's open of this face takes as
@@ -318,6 +320,9 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       for (const [chunk, entry] of files) {
         if (entry.file === file && !loaded.has(chunk)) failed.set(chunk, error);
       }
+    },
+    failures() {
+      return new Map([...failed].map(([chunk, error]) => [files.get(chunk)!.file, error]));
     },
     files() {
       return new Map([...decodedFiles].map(([file, bytes]) => [file, bytes.slice().buffer]));

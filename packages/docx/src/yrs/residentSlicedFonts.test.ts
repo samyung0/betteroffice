@@ -253,7 +253,10 @@ test('retryFontSlices clears a failure the worker reported for a face no page he
     const [{ slot }] = sliced.session.residentWorkerSnapshot()!.progressiveFonts!;
     const file = 'NotoSansJP-Regular/c093.zst';
     sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'Failed to fetch', unavailable: { file, reason: 'network' } }]);
+    // A worker opened again (new fonts) takes the failure along and does not fetch it either.
+    expect(sliced.session.residentWorkerSnapshot()!.progressiveFonts![0]!.failed).toEqual([{ file, reason: 'network' }]);
     sliced.session.retryFontSlices();
+    expect(sliced.session.residentWorkerSnapshot()!.progressiveFonts![0]!.failed).toBeUndefined();
     // Back online, this realm's first paint (a fallback or print) asks for it again.
     for (const page of after.pages) await sliced.session.prepareSlicedPaint(page, sliced.chains());
     const drawn = [...glyphsOf(after, fontId)];
