@@ -377,6 +377,13 @@ export interface DocxEditorRef {
   getEditorRef: () => PagedEditorRef | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput: () => Promise<void>;
+  /**
+   * Asks again for every font slice that failed to load and repaints, so the
+   * characters drawn blank since then appear (Q752 B). Each failure reached
+   * `onError` once per face as a non-fatal `FontSliceUnavailableError`; call
+   * this on the browser's `online` event.
+   */
+  retryFontSlices: () => void;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */

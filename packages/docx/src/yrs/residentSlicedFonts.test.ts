@@ -12,7 +12,7 @@ import { preloadEditWasm } from '../wasm/edit';
 import { preloadOpcWasm, rezipContainer } from '../wasm/opc';
 import { preloadParseWasm } from '../wasm/parse';
 import { createYrsSession } from './index';
-import { drawnByFont } from './residentProgressiveFonts';
+import { drawnByFont, FontSliceUnavailableError } from './residentProgressiveFonts';
 
 beforeAll(() =>
   Promise.all([
@@ -185,6 +185,49 @@ test('a worker snapshot names the sliced faces with their files, for the worker 
     // The page's decoded files go along, so the worker decodes none of them again.
     expect([...snapshot.progressiveFonts![0]!.files!.keys()]).toContain('NotoSansJP-Regular/skeleton.zst');
     expect(sliced.session.residentWorkerSnapshot({ knownFontsRevision: snapshot.fontsRevision })!.progressiveFonts).toBeUndefined();
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
+test('a slice the worker could not load is reported once, not fetched here, and asked for again after retryFontSlices', async () => {
+  const sliced = await editor(true);
+  try {
+    const before = await sliced.display();
+    for (const page of before.pages) await sliced.session.ensureGlyphOutlines(page);
+    const fontId = [...sliced.source.progressiveFaces().keys()].find((id) => glyphsOf(before, id).size > 0)!;
+    const outline = (glyph: number) => (JSON.parse(sliced.session.outlineGlyphJson(fontId, glyph)) as { cmds: unknown[] }).cmds.length;
+    sliced.type('鰯');
+    const after = await sliced.display();
+    const [added] = [...glyphsOf(after, fontId)].filter((glyph) => !glyphsOf(before, fontId).has(glyph));
+    // The engine worker painted first and could not reach the slice (offline).
+    const [{ slot }] = sliced.session.residentWorkerSnapshot()!.progressiveFonts!;
+    const file = 'NotoSansJP-Regular/c093.zst';
+    sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'Failed to fetch', unavailable: { file, reason: 'network' } }]);
+    sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'Failed to fetch', unavailable: { file, reason: 'network' } }]);
+    // This page's own paint neither fetches it nor reports it again.
+    for (const page of after.pages) await sliced.session.ensureGlyphOutlines(page);
+    expect(sliced.reads).not.toContain(file);
+    expect(outline(added!)).toBe(0);
+    expect(sliced.errors).toHaveLength(1);
+    expect(sliced.errors[0]).toBeInstanceOf(FontSliceUnavailableError);
+    expect(sliced.errors[0]).toMatchObject({ file, reason: 'network' });
+
+    // Back online: the worker is told, the pages repaint, and the slice loads.
+    let retried = 0;
+    sliced.session.onFontSlicesRetry(() => {
+      retried += 1;
+    });
+    const repaints: Array<Set<number>> = [];
+    sliced.session.onGlyphOutlines((fontIds) => repaints.push(fontIds));
+    sliced.session.retryFontSlices();
+    expect(retried).toBe(1);
+    expect(repaints).toEqual([new Set([slot!])]);
+    for (const page of after.pages) await sliced.session.ensureGlyphOutlines(page);
+    for (let wait = 0; wait < 100 && outline(added!) === 0; wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sliced.reads.filter((read) => read === file)).toHaveLength(1);
+    expect(outline(added!)).toBeGreaterThan(0);
+    expect(sliced.errors).toHaveLength(1);
   } finally {
     sliced.session.destroy();
   }

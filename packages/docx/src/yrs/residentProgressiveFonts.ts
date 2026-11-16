@@ -6,6 +6,14 @@ export interface ProgressiveFontSource {
   timeoutMs?: number;
 }
 
+/** A sliced face whose outlines failed in the engine worker, by the page's font id. */
+export interface ResidentFontError {
+  slot: number;
+  message: string;
+  /** Set when a slice failed (not fatal): which file, and why. */
+  unavailable?: { file: string; reason: 'network' | 'server'; status?: number };
+}
+
 /** A font id registered from a sliced face's skeleton, and the face's files. */
 export interface ProgressiveFontSpec {
   slot: number;
@@ -19,6 +27,42 @@ interface OutlineFace {
   readonly revision: number;
   bytes(): ArrayBuffer;
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
+  retryFailed(): void;
+}
+
+/**
+ * Some characters cannot be drawn: an outline slice of their face did not
+ * load (Q752 B). Not fatal: the text stays in the document with those glyphs
+ * blank, and nothing asks for the slice again until the host calls
+ * `retryFontSlices()` (on the browser's `online` event). The editor's
+ * `onError` hears it once per face until then. `reason` is `network`
+ * (offline, unreachable, timed out) or `server` (an error `status`, or bytes
+ * that do not match the index).
+ */
+export class FontSliceUnavailableError extends Error {
+  override name = 'FontSliceUnavailableError';
+  constructor(
+    readonly file: string,
+    readonly reason: 'network' | 'server',
+    readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(
+      `Some characters cannot be drawn until the font slice ${file} loads (${reason}${status === undefined ? '' : ` ${status}`})`,
+      options,
+    );
+  }
+
+  /** From the `FontSliceError` a slice load failed with. */
+  static from(error: unknown): FontSliceUnavailableError {
+    const { file, reason, status } = (error ?? {}) as { file?: unknown; reason?: unknown; status?: unknown };
+    return new FontSliceUnavailableError(
+      typeof file === 'string' ? file : 'unknown',
+      reason === 'network' ? 'network' : 'server',
+      typeof status === 'number' ? status : undefined,
+      { cause: error },
+    );
+  }
 }
 
 /**
@@ -36,7 +80,10 @@ interface Owner {
   face?: OutlineFace;
   /** The face revision whose outlines the engine holds. */
   installed: number;
+  /** The face could not open, or the engine refused its outlines: it installs nothing more. */
   failed: boolean;
+  /** A slice failed and was reported; reported again only after `retryUnavailable`. */
+  unavailable: boolean;
 }
 
 interface OutlineEngine {
@@ -118,9 +165,11 @@ export function sliceFaceOpener(
 /**
  * Font ids registered from sliced CJK faces' skeletons. Before a page is
  * rasterized, the outlines of the glyphs it draws are loaded (each chunk
- * once) and installed in the engine; layout never changes. A face whose
- * chunks fail to load is reported once and installs nothing more: its
- * unloaded glyphs stay blank.
+ * once) and installed in the engine; layout never changes. A chunk that
+ * fails is reported once per face as a `FontSliceUnavailableError` and not
+ * fetched again until `retryUnavailable`; its glyphs stay blank while the
+ * face keeps installing the rest. A face that cannot open, or whose outlines
+ * the engine refuses, is reported once and installs nothing more.
  */
 export class ResidentProgressiveFonts {
   private readonly owners = new Map<number, Owner>();
@@ -144,7 +193,7 @@ export class ResidentProgressiveFonts {
    */
   add(id: number, open: () => Promise<OutlineFace>, onError: (error: Error) => void, installed = 1): void {
     if (this.owners.has(id)) return;
-    this.owners.set(id, { open, onError, installed, failed: false });
+    this.owners.set(id, { open, onError, installed, failed: false, unavailable: false });
     this.ownerOf.set(id, id);
   }
 
@@ -221,6 +270,14 @@ export class ResidentProgressiveFonts {
     return this.fontIdsOf(changed);
   }
 
+  /** Asks again, on the next frame, for every slice that failed; a failure is reported again. */
+  retryUnavailable(): void {
+    for (const owner of this.owners.values()) {
+      owner.face?.retryFailed();
+      owner.unavailable = false;
+    }
+  }
+
   /** Settles once every outline requested so far is installed or has failed. */
   async whenInstalled(): Promise<void> {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
@@ -238,18 +295,28 @@ export class ResidentProgressiveFonts {
     void settled.finally(() => this.pending.delete(settled));
   }
 
-  /** Loads the chunks of `ids`; false when the face failed, now or before. */
+  /**
+   * Loads the chunks of `ids`; false when the face failed, now or before. A
+   * chunk that fails leaves the rest to install.
+   */
   private async load(owner: number, ids: Set<number>): Promise<boolean> {
     const state = this.owners.get(owner)!;
     if (state.failed || this.disposed) return false;
     try {
       state.face = await (state.opening ??= state.open());
-      await state.face.ensureGlyphs(ids);
-      return true;
     } catch (error) {
       this.fail(state, error);
       return false;
     }
+    try {
+      await state.face.ensureGlyphs(ids);
+    } catch (error) {
+      if (!state.unavailable && !this.disposed) {
+        state.unavailable = true;
+        state.onError(FontSliceUnavailableError.from(error));
+      }
+    }
+    return true;
   }
 
   /** Installs the face's current outlines; true when they changed. */

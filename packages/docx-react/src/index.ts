@@ -46,6 +46,7 @@ export {
 export type { BundledFontProvider } from '@betteroffice/docx/layout';
 export {
   configureDefaultFonts,
+  FontSliceUnavailableError,
   type BundledFontModule,
   type DefaultFontOptions,
 } from '@betteroffice/docx/layout';

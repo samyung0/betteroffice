@@ -291,6 +291,12 @@ export function useRustDisplayList(
 
   const residentEngine = isWorkerHostEngine(engine) ? engine : null;
 
+  // The host asks again for the font slices that failed: the engine worker does too.
+  useEffect(
+    () => residentEngine?.onFontSlicesRetry(() => workerRef.current?.client.retryFontSlices()),
+    [residentEngine]
+  );
+
   useEffect(() => {
     if (!residentEngine) return;
     return residentEngine.onUpdate((update) => {

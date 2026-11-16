@@ -140,12 +140,13 @@ test('an open handed the decoded files of another reads and decodes none of them
   const first = await openProgressiveFace(jpRef, transport([]));
   await first.ensureGlyphs([glyph]);
   const files = first.files();
-  expect([...files.keys()].sort()).toEqual([index.chunks[39]!.file, index.skeleton.file].sort());
+  expect([...files.keys()].sort()).toEqual([jpRef.index, index.chunks[39]!.file, index.skeleton.file].sort());
 
+  // The index goes along too, so the other realm's open needs no network at all.
   const reads: string[] = [];
   const second = await openProgressiveFace(jpRef, { ...transport(reads), held: (file) => files.get(file) });
   await second.ensureGlyphs([glyph]);
-  expect(reads).toEqual([jpRef.index]);
+  expect(reads).toEqual([]);
   expect(new Uint8Array(second.bytes())).toEqual(new Uint8Array(first.bytes()));
 
   const changed = new Uint8Array(files.get(index.skeleton.file)!.slice(0));
@@ -154,7 +155,7 @@ test('an open handed the decoded files of another reads and decodes none of them
   await expect(openProgressiveFace(jpRef, { ...transport(rereads), held: (file) => file === index.skeleton.file ? changed.buffer : files.get(file) }))
     .rejects.toThrow(`Font slice ${index.skeleton.file} handed over by another realm does not match its index entry`);
   // Our own realms' bytes are never fetched around.
-  expect(rereads).toEqual([jpRef.index]);
+  expect(rereads).toEqual([]);
 });
 
 test('a glyph whose chunk loaded during another pending request resolves with a revision that draws it', async () => {
@@ -208,7 +209,7 @@ test('a listener that throws neither stops the others nor rejects the load', asy
   expect(seen).toEqual([2]);
 });
 
-test('a chunk that fails its checks rejects and loads on a later request', async () => {
+test('a chunk that fails is remembered, fetched again only after retryFailed, and says the server failed', async () => {
   const reads: string[] = [];
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
   const broken = index.chunks[9]!.file;
@@ -217,11 +218,43 @@ test('a chunk that fails its checks rejects and loads on a later request', async
   const skeleton = parseSkeleton(await decode(index.skeleton.file));
   let glyph = 0;
   while (skeleton.chunkOfGlyph(glyph) !== 10) glyph += 1;
-  await expect(face.ensureGlyphs([glyph])).rejects.toThrow('encoded bytes');
+  const failure = await face.ensureGlyphs([glyph]).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ name: 'FontSliceError', file: broken, reason: 'server' });
   expect(face.revision).toBe(1);
   tampering = false;
+  // No second fetch until the host asks again.
+  await expect(face.ensureGlyphs([glyph])).rejects.toBe(failure);
+  expect(reads.filter((file) => file === broken)).toHaveLength(1);
+  face.retryFailed();
   expect(await face.ensureGlyphs([glyph])).toBe(2);
   expect(reads.filter((file) => file === broken)).toHaveLength(2);
+});
+
+test('a slice the network cannot reach or the server refuses says which, and a failure in another realm stops the fetch here', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  const glyphIn = (chunk: number) => {
+    let glyph = 0;
+    while (skeleton.chunkOfGlyph(glyph) !== chunk) glyph += 1;
+    return glyph;
+  };
+  const reads: string[] = [];
+  const base = transport(reads);
+  const face = await openProgressiveFace(jpRef, {
+    ...base,
+    read: async (file) => {
+      if (file === index.chunks[19]!.file) throw new TypeError('Failed to fetch');
+      if (file === index.chunks[20]!.file) throw Object.assign(new Error('HTTP 503'), { status: 503 });
+      return base.read(file);
+    },
+  });
+  expect(await face.ensureGlyphs([glyphIn(20)]).catch((error: unknown) => error)).toMatchObject({ reason: 'network', file: index.chunks[19]!.file });
+  expect(await face.ensureGlyphs([glyphIn(21)]).catch((error: unknown) => error)).toMatchObject({ reason: 'server', status: 503 });
+
+  const elsewhere = new Error('HTTP 503 in the engine worker');
+  face.markFailed(index.chunks[21]!.file, elsewhere);
+  await expect(face.ensureGlyphs([glyphIn(22)])).rejects.toBe(elsewhere);
+  expect(reads).not.toContain(index.chunks[21]!.file);
 });
 
 test('opening rejects an index whose SHA-256 differs from the manifest pointer', async () => {

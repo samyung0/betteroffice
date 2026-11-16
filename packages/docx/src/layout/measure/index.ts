@@ -19,6 +19,7 @@ export type {
   EmbeddedFaceInput,
   FontScript,
 } from './fontRegistry';
+export { FontSliceUnavailableError } from '../../yrs/residentProgressiveFonts';
 export {
   configureDefaultFonts,
   hasConfiguredFontSource,

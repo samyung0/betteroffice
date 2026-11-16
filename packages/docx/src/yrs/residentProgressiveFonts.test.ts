@@ -2,7 +2,7 @@ import { afterAll, beforeEach, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { decodeFontFace } from '../../../fonts/src/decode';
 import { REQUEST_TIMEOUT_MS } from './residentEngineWorkerClient';
-import { glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, type ProgressiveFontSpec } from './residentProgressiveFonts';
+import { FontSliceUnavailableError, glyphsByFont, PROGRESSIVE_OUTLINE_WAIT_MS, ResidentProgressiveFonts, sliceFaceOpener, type ProgressiveFontSpec } from './residentProgressiveFonts';
 
 const assets = new URL('../../../fonts-cjk/assets/', import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL('manifest.json', assets), 'utf8')) as {
@@ -149,16 +149,23 @@ test('a chunk slower than the wait yields the frame within the wait and repaints
   expect(late).toEqual([new Set([10, 11])]);
 });
 
-test('a chunk that fails to load is reported once and not fetched again; the face installs nothing more', async () => {
+test('a chunk that fails is reported once per face, not fetched again until a retry, and the rest of the face still installs', async () => {
   const { resident, updates, errors } = fonts();
   failing.add(chunkFile(60));
-  expect(await resident.ensure(new Map([[10, new Set([glyphIn(60)])]]))).toEqual(new Set());
-  expect(await resident.ensure(new Map([[11, new Set([glyphIn(60), glyphIn(61)])]]))).toEqual(new Set());
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(60)])]]), UNTIL_INSTALLED)).toEqual(new Set());
+  expect(await resident.ensure(new Map([[11, new Set([glyphIn(60), glyphIn(61)])]]), UNTIL_INSTALLED)).toEqual(new Set([10, 11]));
   expect(errors).toHaveLength(1);
-  expect(errors[0]!.message).toContain('503');
+  expect(errors[0]).toBeInstanceOf(FontSliceUnavailableError);
+  expect(errors[0]).toMatchObject({ file: chunkFile(60), reason: 'server', status: 503 });
   expect(hits.get(chunkFile(60))).toBe(1);
-  expect(hits.get(chunkFile(61))).toBeUndefined();
-  expect(updates).toEqual([]);
+  expect(hits.get(chunkFile(61))).toBe(1);
+  expect(updates).toHaveLength(1);
+
+  // Back online: asked for again on the next frame, and it installs.
+  resident.retryUnavailable();
+  expect(await resident.ensure(new Map([[10, new Set([glyphIn(60)])]]), UNTIL_INSTALLED)).toEqual(new Set([10, 11]));
+  expect(hits.get(chunkFile(60))).toBe(2);
+  expect(errors).toHaveLength(1);
 });
 
 test('an engine that refuses the outlines is reported once and never sent outlines again', async () => {

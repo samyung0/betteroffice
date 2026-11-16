@@ -31,12 +31,22 @@ beforeAll(async () => {
     './residentProgressiveFonts': `
       export const glyphsByFont = (page) => testHarness.drawn(page);
       export const sliceFaceOpener = (source) => source;
+      export class FontSliceUnavailableError extends Error {
+        constructor(file, reason, status) {
+          super('Some characters cannot be drawn until the font slice ' + file + ' loads');
+          this.file = file;
+          this.reason = reason;
+          this.status = status;
+        }
+      }
+      testHarness.Unavailable = FontSliceUnavailableError;
       export class ResidentProgressiveFonts {
         constructor() { testHarness.progressive = this; }
         add(id, source, onError) { this.added = [id, source]; this.onError = onError; }
         addView() {}
         onLateInstall(listener) { this.late = listener; }
         ensure(glyphs) { return testHarness.ensure(glyphs); }
+        retryUnavailable() { testHarness.retries += 1; }
         dispose() {}
       }
     `,
@@ -113,6 +123,8 @@ function worker() {
     /** The sliced font ids a page draws: font 7, with the page's index as its glyph. */
     drawn: (page: DisplayPage) => new Map([[7, new Set([page.pageIndex])]]),
     emitUpdate: null as ((update: Uint8Array) => void) | null,
+    Unavailable: null as unknown as new (file: string, reason: string, status?: number) => Error,
+    retries: 0,
     session: {
       loadState() {},
       clearFonts() {},
@@ -189,6 +201,10 @@ function worker() {
     },
   };
   startWorker(scope, Surface, harness);
+  /** A request with no reply. */
+  function post(request: ResidentEngineWorkerRequestWithoutId) {
+    scope.onmessage({ data: { ...request, id: ++nextId } as ResidentEngineWorkerRequest });
+  }
   function send(request: ResidentEngineWorkerRequestWithoutId) {
     const id = ++nextId;
     return new Promise<ResidentEngineWorkerResponse>((resolve) => {
@@ -224,6 +240,7 @@ function worker() {
     harness,
     surfaces,
     send,
+    post,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
@@ -541,6 +558,27 @@ describe('resident worker sliced faces', () => {
     const next = await w.type([2], caret(2));
     expect(next.ok).toBe(true);
     expect(w.harness.presented).toContain(2);
+  });
+
+  test('a slice that fails travels as unavailable, and a retry asks again and repaints every page', async () => {
+    const w = worker();
+    const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
+    await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source }] });
+    await w.attach([1, 2]);
+    w.harness.ensure = async () => {
+      w.harness.progressive!.onError(new w.harness.Unavailable('NotoSansJP-Regular/c093.zst', 'network'));
+      return new Set();
+    };
+    expect(await w.build([1], 120)).toMatchObject({
+      ok: true,
+      fontErrors: [{ slot: 0, unavailable: { file: 'NotoSansJP-Regular/c093.zst', reason: 'network' } }],
+    });
+    w.harness.ensure = async () => new Set();
+    w.resetCalls();
+    w.post({ type: 'retryFontSlices' });
+    await w.send({ type: 'eraseCaret' });
+    expect(w.harness.retries).toBe(1);
+    expect(w.harness.rasterized.sort()).toEqual([1, 2]);
   });
 
   test('a keystroke whose page cannot be painted sends its update and frame with the paint failure', async () => {

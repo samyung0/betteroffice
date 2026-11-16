@@ -5,6 +5,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
+import type { ResidentFontError } from './residentProgressiveFonts';
 import type {
   ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
@@ -26,7 +27,7 @@ export interface ResidentEngineWorkerFrame {
   replayedPages: number;
   layoutRevision: number;
   /** Sliced faces whose outlines failed in the worker, by the page's font id. */
-  fontErrors: Array<{ slot: number; message: string }>;
+  fontErrors: ResidentFontError[];
   /** The worker committed the edit but could not paint its frame. */
   paintError?: string;
 }
@@ -52,7 +53,7 @@ type PendingRequest = {
 
 type AwaitedRequest = Exclude<
   ResidentEngineWorkerRequestWithoutId,
-  { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
+  { type: 'applyUpdate' | 'eraseCaret' | 'retryFontSlices' | 'destroy' }
 >;
 
 /**
@@ -283,6 +284,13 @@ export class ResidentEngineWorkerClient {
     if (this.terminalError) return;
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
+    this.worker.postMessage(message);
+  }
+
+  /** Ask the worker again for the font slices that failed, repainting its pages. Fire-and-forget. */
+  retryFontSlices(): void {
+    if (this.terminalError) return;
+    const message: ResidentEngineWorkerRequest = { id: this.nextId++, type: 'retryFontSlices' };
     this.worker.postMessage(message);
   }
 

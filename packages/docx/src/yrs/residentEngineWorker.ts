@@ -25,7 +25,13 @@ import {
   residentCaretSnapshotForFrame,
   type ResidentCaretPaintStyle,
 } from './residentCaret';
-import { glyphsByFont, ResidentProgressiveFonts, sliceFaceOpener } from './residentProgressiveFonts';
+import {
+  FontSliceUnavailableError,
+  glyphsByFont,
+  ResidentProgressiveFonts,
+  sliceFaceOpener,
+  type ResidentFontError,
+} from './residentProgressiveFonts';
 import { decodeFontFace } from '../wasm/fontDecoder';
 
 const scope = self as unknown as DedicatedWorkerGlobalScope;
@@ -62,7 +68,7 @@ let trap: WebAssembly.RuntimeError | null = null;
 // outlines fail draws blank and fails no page; the next frame reply carries
 // the failure, by the page's font id, for the page to report.
 let progressiveFonts: ResidentProgressiveFonts | null = null;
-let fontErrors: Array<{ slot: number; message: string }> = [];
+let fontErrors: ResidentFontError[] = [];
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -120,6 +126,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       undefined,
       started
     );
+    return;
+  }
+  if (request.type === 'retryFontSlices') {
+    // The host is back online: ask again for the slices that failed, repainting every page.
+    progressiveFonts?.retryUnavailable();
+    glyphCache = null;
+    intactBackBuffers.clear();
+    await replayOffscreen(true);
     return;
   }
   if (request.type === 'eraseCaret') {
@@ -315,7 +329,11 @@ function openProgressiveFonts(
     (await decodeFontFace(encoded, { codec: 'zstd', maxOutput })).font;
   for (const { slot, source, files } of snapshot.progressiveFonts) {
     fonts.add(ids[slot] ?? slot, sliceFaceOpener(source, decode, files), (error) => {
-      fontErrors.push({ slot, message: error.message });
+      fontErrors.push(
+        error instanceof FontSliceUnavailableError
+          ? { slot, message: error.message, unavailable: { file: error.file, reason: error.reason, ...(error.status === undefined ? {} : { status: error.status }) } }
+          : { slot, message: error.message }
+      );
     });
   }
   snapshot.fonts.forEach((font, index) => {

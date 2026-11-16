@@ -190,6 +190,7 @@ export function useDocxEditorRefApi({
           throw new Error('The document changed while flushing input');
         }
       },
+      retryFontSlices: () => pagedEditorRef.current?.getYrsSession()?.retryFontSlices(),
       save: handleSave,
       setZoom,
       getZoom: () => zoom,

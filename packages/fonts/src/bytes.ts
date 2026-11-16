@@ -49,6 +49,14 @@ function validateByteLength(
   return bytes;
 }
 
+/** A font file the server answered with an error status. */
+export class FontHttpError extends Error {
+  override name = 'FontHttpError';
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 /** Reads one bundled font file from disk (Node) or over the network. */
 export async function readFontBytes(
   file: string,
@@ -68,7 +76,7 @@ export async function readFontBytes(
         },
   );
   if (!response.ok) {
-    throw new Error(`Failed to fetch bundled font ${file}: HTTP ${response.status}`);
+    throw new FontHttpError(`Failed to fetch bundled font ${file}: HTTP ${response.status}`, response.status);
   }
   return response.arrayBuffer();
 }

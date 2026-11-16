@@ -4,6 +4,7 @@ import { openProgressiveFace, type ProgressiveFontFace, type SliceLocation } fro
 
 export { readFontAsset } from './asset';
 export {
+  FontSliceError,
   openProgressiveFace,
   sliceSourceOf,
   type ProgressiveFontFace,

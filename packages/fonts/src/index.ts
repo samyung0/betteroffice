@@ -2,7 +2,7 @@ export * from './manifest';
 export type { FontDecoder } from './decode';
 import type { FontDecoder } from './decode';
 export type { BundledFontLoader, BundledFontSource } from './provider';
-export type { ProgressiveFontFace, SliceLocation } from './progressive';
+export type { FontSliceError, ProgressiveFontFace, SliceLocation } from './progressive';
 import { BUNDLED_FONTS, resolveMetricCompatFace, type BundledFontFace } from './manifest';
 import { fontProvider, type BundledFontSource } from './provider';
 import { loadFontBytes } from './bytes';

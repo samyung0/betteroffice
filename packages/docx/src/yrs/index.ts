@@ -23,9 +23,11 @@ import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade
 import type { ProgressiveFontFace } from '../layout/measure/fontRegistry';
 import {
   glyphsByFont,
+  FontSliceUnavailableError,
   ResidentProgressiveFonts,
   type ProgressiveFontSource,
   type ProgressiveFontSpec,
+  type ResidentFontError,
 } from './residentProgressiveFonts';
 import type {
   CollaborationCursor,
@@ -841,9 +843,17 @@ export interface YrsSession extends CollaborationReplica {
   /**
    * Reports sliced faces whose outlines failed in the engine worker (its
    * replies' `fontErrors`, by this session's font id) through the `onError`
-   * each face was registered with.
+   * each face was registered with; a failed slice is not fetched here either.
    */
-  reportResidentFontErrors(errors: ReadonlyArray<{ slot: number; message: string }>): void;
+  reportResidentFontErrors(errors: ReadonlyArray<ResidentFontError>): void;
+  /**
+   * Asks again for every font slice that failed (Q752 B), here and in the
+   * engine worker, and repaints so the missing glyphs load. The host calls it
+   * through `DocxEditorRef.retryFontSlices()` when the browser is back online.
+   */
+  retryFontSlices(): void;
+  /** Calls `listener` on `retryFontSlices`, for the engine worker to ask again too. */
+  onFontSlicesRetry(listener: () => void): () => void;
   /** Measure one paragraph through the session's resident text engine. */
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
@@ -1343,6 +1353,10 @@ function wrapSession(
   let progressiveFonts: ResidentProgressiveFonts | null = null;
   let progressiveSpecs: Array<ProgressiveFontSpec & { face: ProgressiveFontFace; onError: (error: Error) => void }> = [];
   const outlineListeners = new Set<(fontIds: Set<number>) => void>();
+  const retryListeners = new Set<() => void>();
+  // Faces whose missing slice was reported: once per face across this page and
+  // its engine worker, until retryFontSlices.
+  const unavailableReported = new Set<ProgressiveFontFace>();
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1485,6 +1499,7 @@ function wrapSession(
       progressiveFonts?.dispose();
       progressiveFonts = null;
       progressiveSpecs = [];
+      unavailableReported.clear();
     },
     registerSlicedFont: (id, face, source, onError) => {
       if (!progressiveFonts) {
@@ -1496,10 +1511,17 @@ function wrapSession(
         });
         progressiveFonts = fonts;
       }
+      const report = (error: Error) => {
+        if (error instanceof FontSliceUnavailableError) {
+          if (unavailableReported.has(face)) return;
+          unavailableReported.add(face);
+        }
+        onError(error);
+      };
       // The engine holds the outlines of the revision it registered.
-      progressiveFonts.add(id, async () => face, onError, face.revision);
+      progressiveFonts.add(id, async () => face, report, face.revision);
       if (progressiveSpecs.some((spec) => spec.slot === id)) return;
-      progressiveSpecs.push({ slot: id, source, face, onError });
+      progressiveSpecs.push({ slot: id, source, face, onError: report });
       residentFontsRevision += 1;
     },
     ensureGlyphOutlines: (page) =>
@@ -1511,9 +1533,31 @@ function wrapSession(
       };
     },
     reportResidentFontErrors: (errors) => {
-      for (const { slot, message } of errors) {
-        progressiveSpecs.find((spec) => spec.slot === slot)?.onError(new Error(message));
+      for (const { slot, message, unavailable } of errors) {
+        const spec = progressiveSpecs.find((candidate) => candidate.slot === slot);
+        if (!spec) continue;
+        if (!unavailable) {
+          spec.onError(new Error(message));
+          continue;
+        }
+        const error = new FontSliceUnavailableError(unavailable.file, unavailable.reason, unavailable.status);
+        spec.face.markFailed(unavailable.file, error);
+        spec.onError(error);
       }
+    },
+    retryFontSlices: () => {
+      unavailableReported.clear();
+      progressiveFonts?.retryUnavailable();
+      for (const listener of [...retryListeners]) listener();
+      // Pages painted here repaint, asking for the missing glyphs again.
+      const fontIds = new Set(progressiveSpecs.map((spec) => spec.slot));
+      if (fontIds.size > 0) for (const listener of [...outlineListeners]) listener(fontIds);
+    },
+    onFontSlicesRetry: (listener) => {
+      retryListeners.add(listener);
+      return () => {
+        retryListeners.delete(listener);
+      };
     },
     measureParagraphJson: (input) => {
       const output = session.measure_paragraph_json(input);

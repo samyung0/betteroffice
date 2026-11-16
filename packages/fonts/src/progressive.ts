@@ -24,8 +24,15 @@ export interface ProgressiveFontFace {
   /** Whether every outline is loaded. */
   complete(): boolean;
   /**
-   * Copies of the decoded files loaded so far (the skeleton and each outline
-   * chunk) by manifest path: what another realm's open of this face takes as
+   * A chunk that failed to load fails again at once, without a fetch, until
+   * this is called; then the next request for it asks for it again.
+   */
+  retryFailed(): void;
+  /** `file`, a chunk of this face, failed in another realm: this one doesn't fetch it either until `retryFailed`. */
+  markFailed(file: string, error: Error): void;
+  /**
+   * Copies of the files loaded so far (the index, the skeleton and each
+   * outline chunk, decoded) by manifest path: what another realm's open of this face takes as
    * `SliceLocation.files` instead of reading and decoding them again.
    */
   files(): Map<string, ArrayBuffer>;
@@ -50,11 +57,43 @@ export interface SliceLocation {
   /** @internal Drop the opened face from the shared cache once it settles, as `retain: false` does for whole faces. */
   retain?: boolean;
   /**
-   * Decoded files of this face another open loaded (its `files()`), used in
-   * place of reading and decoding them when their length and SHA-256 match
-   * the index.
+   * Decoded files of this face another of our realms loaded (its `files()`),
+   * used in place of reading and decoding them; one that differs from its
+   * index entry fails the load.
    */
   files?: ReadonlyMap<string, ArrayBuffer>;
+}
+
+/**
+ * A slice file that could not be loaded: unreachable or timed out
+ * (`network`), or answered with an error status or the wrong bytes
+ * (`server`, with the HTTP `status` when there was one).
+ * @public
+ */
+export class FontSliceError extends Error {
+  override name = 'FontSliceError';
+  constructor(
+    message: string,
+    readonly file: string,
+    readonly reason: 'network' | 'server',
+    readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
+/** Reads `file`; a failure says whether the network or the server failed. */
+async function fetchSlice(transport: SliceTransport, file: string): Promise<ArrayBuffer> {
+  try {
+    return await transport.read(file);
+  } catch (error) {
+    const status = (error as { status?: unknown } | null)?.status;
+    const message = error instanceof Error ? error.message : String(error);
+    throw typeof status === 'number'
+      ? new FontSliceError(message, file, 'server', status, { cause: error })
+      : new FontSliceError(message, file, 'network', undefined, { cause: error });
+  }
 }
 
 /** @internal A face row's pointer to its slice index. */
@@ -138,15 +177,21 @@ async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Ui
     }
     return new Uint8Array(held);
   }
-  const encoded = await transport.read(entry.file);
+  const encoded = await fetchSlice(transport, entry.file);
+  const served = (message: string) => new FontSliceError(message, entry.file, 'server');
   if (encoded.byteLength !== entry.encodedLength) {
-    throw new Error(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
+    throw served(`Font slice ${entry.file} has ${encoded.byteLength} encoded bytes; expected ${entry.encodedLength}`);
   }
-  const decoded = await transport.decode(encoded, entry.byteLength);
+  let decoded: ArrayBuffer;
+  try {
+    decoded = await transport.decode(encoded, entry.byteLength);
+  } catch (error) {
+    throw new FontSliceError(`Font slice ${entry.file} does not decode: ${error instanceof Error ? error.message : String(error)}`, entry.file, 'server', undefined, { cause: error });
+  }
   if (decoded.byteLength !== entry.byteLength) {
-    throw new Error(`Font slice ${entry.file} has ${decoded.byteLength} bytes; expected ${entry.byteLength}`);
+    throw served(`Font slice ${entry.file} has ${decoded.byteLength} bytes; expected ${entry.byteLength}`);
   }
-  if (await sha256(decoded) !== entry.sha256) throw new Error(`Font slice ${entry.file} SHA-256 mismatch`);
+  if (await sha256(decoded) !== entry.sha256) throw served(`Font slice ${entry.file} SHA-256 mismatch`);
   return new Uint8Array(decoded);
 }
 
@@ -156,17 +201,24 @@ async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Ui
  */
 export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
-  const indexBytes = await transport.read(ref.index);
-  if (await sha256(indexBytes) !== ref.indexSha256) throw new Error(`Font slice index ${ref.index} SHA-256 mismatch`);
+  const heldIndex = transport.held?.(ref.index);
+  const indexBytes = heldIndex ?? await fetchSlice(transport, ref.index);
+  if (await sha256(indexBytes) !== ref.indexSha256) {
+    throw heldIndex
+      ? new Error(`Font slice index ${ref.index} handed over by another realm does not match its pointer`)
+      : new FontSliceError(`Font slice index ${ref.index} SHA-256 mismatch`, ref.index, 'server');
+  }
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
   if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
-  const decodedFiles = new Map<string, Uint8Array>();
+  const decodedFiles = new Map<string, Uint8Array>([[ref.index, new Uint8Array(indexBytes)]]);
   const skeletonBytes = await readFile(transport, index.skeleton);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   decodedFiles.set(index.skeleton.file, skeletonBytes);
   const files = new Map<number, SliceFile>([[0, index.core], ...index.chunks.map((chunk): [number, SliceFile] => [chunk.id!, chunk])]);
   const outlines = new Map<number, Uint8Array>();
   const loaded = new Set<number>();
+  // Chunks that failed: remembered, so nothing fetches them again until retryFailed().
+  const failed = new Map<number, unknown>();
   const pending = new Map<number, Promise<void>>();
   const listeners = new Set<(revision: number) => void>();
   let revision = 1;
@@ -177,6 +229,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
 
   const load = (chunk: number): Promise<void> => {
     if (loaded.has(chunk)) return Promise.resolve();
+    if (failed.has(chunk)) return Promise.reject(failed.get(chunk));
     let promise = pending.get(chunk);
     if (promise === undefined) {
       const entry = files.get(chunk);
@@ -189,6 +242,7 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
         dirty = true;
       }, (error: unknown) => {
         pending.delete(chunk);
+        failed.set(chunk, error);
         throw error;
       });
       pending.set(chunk, promise);
@@ -256,6 +310,14 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
     },
     complete() {
       return loaded.size === files.size;
+    },
+    retryFailed() {
+      failed.clear();
+    },
+    markFailed(file, error) {
+      for (const [chunk, entry] of files) {
+        if (entry.file === file && !loaded.has(chunk)) failed.set(chunk, error);
+      }
     },
     files() {
       return new Map([...decodedFiles].map(([file, bytes]) => [file, bytes.slice().buffer]));

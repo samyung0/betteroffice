@@ -5,6 +5,7 @@ import type {
   YrsSelection,
 } from './index';
 import type { ResidentCaretPaintStyle } from './residentCaret';
+import type { ResidentFontError } from './residentProgressiveFonts';
 
 export type ResidentEngineWorkerRequest =
   | {
@@ -75,6 +76,8 @@ export type ResidentEngineWorkerRequest =
       caretStyle: ResidentCaretPaintStyle;
     }
   | { id: number; type: 'eraseCaret' }
+  /** Ask again for the font slices that failed and repaint; no reply. */
+  | { id: number; type: 'retryFontSlices' }
   | { id: number; type: 'destroy' };
 
 export type ResidentEngineWorkerRequestWithoutId = ResidentEngineWorkerRequest extends infer Request
@@ -104,7 +107,7 @@ export type ResidentEngineWorkerResponse =
       stateVector?: ArrayBuffer;
       /** Sliced faces whose outlines failed in the worker since its last
        * frame reply, by the page's font id; they draw blank there. */
-      fontErrors?: Array<{ slot: number; message: string }>;
+      fontErrors?: ResidentFontError[];
       /** Painting an edit's frame failed; the edit's frame and updates above
        * still apply. */
       paintError?: string;

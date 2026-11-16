@@ -11,6 +11,10 @@ export interface ProgressiveFontFace {
   ensureText(text: string): Promise<number>;
   /** Copies of the decoded files loaded so far, which another realm's open of the face can take. */
   files(): Map<string, ArrayBuffer>;
+  /** Asks again for the chunks that failed; until then they fail without a fetch. */
+  retryFailed(): void;
+  /** `file`, a chunk of this face, failed in another realm: not fetched here either until `retryFailed`. */
+  markFailed(file: string, error: Error): void;
 }
 
 /** A sliced face registered from its skeleton, and where it came from. */
@@ -272,6 +276,14 @@ export class TextMeasureFontRegistry {
 
   /** Sliced faces registered from their skeleton, by font id and measurement view id. */
   private progressiveIds = new Map<number, SlicedFontFace>();
+  /**
+   * Sliced faces whose index or skeleton failed, by slice index: layout
+   * needs them, so the failure stands (reported once, not fetched again on
+   * later passes) until `clear()`.
+   */
+  private failedSlices = new Map<string, unknown>();
+  /** Failures already reported, so a remembered one reaches `onError` once. */
+  private reported = new WeakSet<object>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
   private readonly onError?: (error: Error) => void;
 
@@ -303,6 +315,10 @@ export class TextMeasureFontRegistry {
   private failed(message: string, error: unknown): void {
     this.warnFailure(`${message}: ${error instanceof Error ? error.message : String(error)}`);
     if (error instanceof ImplicitFontAbsentError) return;
+    if (typeof error === 'object' && error !== null) {
+      if (this.reported.has(error)) return;
+      this.reported.add(error);
+    }
     this.onError?.(error instanceof Error ? error : new Error(String(error)));
   }
 
@@ -531,6 +547,7 @@ export class TextMeasureFontRegistry {
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
     this.progressiveIds = new Map();
+    this.failedSlices = new Map();
     this.scriptIds = new Map();
     this.scriptResults = new Map();
     this.chains = new Map();
@@ -760,12 +777,19 @@ export class TextMeasureFontRegistry {
     if (!pending) {
       const ids = this.loaderIds;
       const generation = this.storeGeneration;
+      const failures = this.failedSlices;
+      // Every slice location names its index (`SliceLocation` is opaque here).
+      const key = (slices as { ref: { index: string } }).ref.index;
       pending = (async () => {
+        if (failures.has(key)) throw failures.get(key);
         let face: ProgressiveFontFace;
         try {
           face = await open(slices);
         } catch (error) {
-          if ((error as { name?: unknown } | null)?.name !== 'MissingCjkAddonError') throw error;
+          if ((error as { name?: unknown } | null)?.name !== 'MissingCjkAddonError') {
+            failures.set(key, error);
+            throw error;
+          }
           return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);
         }
         const known = loader.coverage === undefined ? undefined

@@ -85,6 +85,7 @@ function host() {
   };
   const engine = {
     residentWorkerProbe: () => ({ ...probe }),
+    onFontSlicesRetry: () => () => {},
     residentWorkerSnapshot: () => ({
       clientId: 1, state: new Uint8Array(), selection: null, fonts: [], fontsRevision: 0,
       renderInputs: [], measureInputs: [], layoutInput: probe.regionLayoutInput,
@@ -230,6 +231,7 @@ test('a relayout delta shifts later pages in place, so their objects and query-s
   const listeners = new Set<(update: Uint8Array, origin: 'local' | 'remote') => void>();
   const engine = {
     residentWorkerProbe: () => ({ ...probe }),
+    onFontSlicesRetry: () => () => {},
     residentWorkerSnapshot: () => ({
       clientId: 1, state: new Uint8Array(), selection: null, fonts: [], fontsRevision: 0,
       renderInputs: [], measureInputs: [], layoutInput: request, layoutWithRegions: true, layoutRevision: 1,

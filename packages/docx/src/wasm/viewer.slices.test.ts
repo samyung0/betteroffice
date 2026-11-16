@@ -120,7 +120,7 @@ test('a sliced face loads its skeleton and the chunks of exactly the characters 
   expect(handle.slicedFaces()).toHaveLength(1);
   expect((sliced!.slices as Location).ref.index).toBe(`${face}/slices.json`);
   // An editor opening the face takes these decoded files instead of fetching them again.
-  expect([...sliced!.files.keys()].sort()).toEqual([...chunks, `${face}/skeleton.zst`].sort());
+  expect([...sliced!.files.keys()].sort()).toEqual([...chunks, `${face}/skeleton.zst`, `${face}/slices.json`].sort());
   // The painted face holds those outlines: it is larger than the skeleton's.
   const skeletonLength = (JSON.parse(await readFile(resolve(assets, `${face}/slices.json`), 'utf8')) as { skeleton: { byteLength: number } }).skeleton.byteLength;
   expect(sliced!.bytes.byteLength).toBeGreaterThan(skeletonLength);
