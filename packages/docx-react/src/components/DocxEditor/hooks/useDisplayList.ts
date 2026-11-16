@@ -21,6 +21,7 @@ import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
+  ResidentCommittedEditError,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
   sameYrsSelection,
@@ -497,6 +498,19 @@ export function useRustDisplayList(
             }
           }
         } catch (error) {
+          if (error instanceof ResidentCommittedEditError) {
+            // The worker committed the edit, then failed: the edit comes back
+            // into the main replica (never replayed), and the main thread paints.
+            const frameRequest = workerFrameRequestRef.current;
+            if (frameRequest) suppressWorkerInvalidationRef.current += 1;
+            try {
+              for (const update of error.updates) worker.engine.applyLocalUpdate(update);
+            } finally {
+              if (frameRequest) suppressWorkerInvalidationRef.current -= 1;
+            }
+            frameRequest?.fallback(error);
+            return { frameEpoch: null, caretSynchronized: false };
+          }
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',

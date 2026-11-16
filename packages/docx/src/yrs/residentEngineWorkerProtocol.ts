@@ -117,6 +117,9 @@ export type ResidentEngineWorkerResponse =
       ok: false;
       error: string;
       residentUnavailable?: boolean;
+      /** An edit request that committed before it failed: the edit's updates,
+       * which the main replica still takes. */
+      updates?: ArrayBuffer[];
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
     };

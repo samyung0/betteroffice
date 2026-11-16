@@ -109,6 +109,8 @@ function worker() {
     started: [] as number[],
     delta: null as DecodedFrameDelta | null,
     caret: null as YrsResidentCaretRect | null,
+    /** Added to the caret snapshot's frame epoch: non-zero, it no longer matches the frame. */
+    caretEpochSkew: 0,
     rasterized: [] as number[],
     presented: [] as number[],
     failRaster: null as number | null,
@@ -157,7 +159,7 @@ function worker() {
         return new Uint8Array([frameEpoch]);
       },
       residentCaretSnapshot() {
-        return { frameEpoch, caretRect: harness.caret };
+        return { frameEpoch: frameEpoch + harness.caretEpochSkew, caretRect: harness.caret };
       },
       selection() {
         return null;
@@ -601,6 +603,16 @@ describe('resident worker sliced faces', () => {
     w.resetCalls();
     expect((await w.type([2], caret(2))).ok).toBe(true);
     expect(w.harness.rasterized.sort()).toEqual([1, 2]);
+  });
+
+  test('a keystroke whose caret snapshot does not match its frame still sends its update', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([1]);
+    w.harness.caretEpochSkew = 1;
+    const typed = await w.type([1], caret(1));
+    expect(typed).toMatchObject({ ok: false, error: 'Resident caret snapshot does not match the produced frame' });
+    expect(!typed.ok && typed.updates?.map((update) => [...new Uint8Array(update)])).toEqual([[7, 7]]);
   });
 
   test('a page paints its list markers and watermarks in the sliced face their family\'s chain starts with, and its glyph runs from outlines only', async () => {

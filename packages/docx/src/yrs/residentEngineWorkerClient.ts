@@ -124,7 +124,9 @@ export class ResidentEngineWorkerClient {
       clearTimeout(pending.queued);
       clearTimeout(pending.timeout);
       if (response.ok) pending.resolve(response);
-      else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
+      else if (response.updates) {
+        pending.reject(new ResidentCommittedEditError(response.error, response.updates.map((update) => new Uint8Array(update))));
+      } else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
     };
     this.worker.onerror = (event) => {
       this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
@@ -389,6 +391,16 @@ class ResidentWorkerUnavailableError extends Error {}
 
 /** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
 export class ResidentWorkerFailureError extends Error {}
+
+/** The worker committed an edit, then failed: `updates` carry the edit, which must not be replayed. */
+export class ResidentCommittedEditError extends Error {
+  constructor(
+    message: string,
+    readonly updates: Uint8Array[]
+  ) {
+    super(message);
+  }
+}
 
 function residentWorkerError(message: string, unavailable = false): Error {
   return unavailable ? new ResidentWorkerUnavailableError(message) : new Error(message);

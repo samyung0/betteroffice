@@ -39,6 +39,7 @@ import type {
 
 export * from './inputPositionMap';
 export {
+  ResidentCommittedEditError,
   ResidentEngineWorkerClient,
   ResidentWorkerFailureError,
   canUseResidentEngineWorker,

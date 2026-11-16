@@ -275,12 +275,19 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   } catch (error) {
     if (error instanceof WebAssembly.RuntimeError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    reply({
-      id: request.id,
-      ok: false,
-      error: message,
-      residentUnavailable: message.includes('resident input state is not ready'),
-    });
+    // An edit the replica committed before the failure (a caret snapshot that
+    // does not match its frame, say) still goes back, or it would be lost.
+    const updates = pendingUpdates.map(exactBuffer);
+    reply(
+      {
+        id: request.id,
+        ok: false,
+        error: message,
+        residentUnavailable: message.includes('resident input state is not ready'),
+        ...(updates.length > 0 ? { updates } : {}),
+      },
+      updates
+    );
   } finally {
     pendingUpdates = [];
   }
