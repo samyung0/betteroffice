@@ -28,6 +28,7 @@ import {
   type ProgressiveFontSource,
   type ProgressiveFontSpec,
   type ResidentFontError,
+  type SlicedPaint,
 } from './residentProgressiveFonts';
 import type {
   CollaborationCursor,
@@ -61,6 +62,7 @@ export {
   type ParagraphStyleValues,
 } from './paragraphSeed';
 export { yrsToDocument } from './yrsToDocument';
+export type { SlicedPaint } from './residentProgressiveFonts';
 export { cellParagraphFormatting } from './tableParagraphFormatting';
 export { projectYrsComments, commentSharedId, commentNumericId } from './comments';
 
@@ -821,7 +823,7 @@ export interface YrsSession extends CollaborationReplica {
   clearFonts(): void;
   /**
    * Font `id` was registered from a sliced face's skeleton: the outlines of
-   * the glyphs a page draws with it install (`ensureGlyphOutlines`) before
+   * the glyphs a page draws with it install (`prepareSlicedPaint`) before
    * the page paints, and an engine worker opens the face from `source`.
    * `onError` hears once that its outlines failed to load or install.
    */
@@ -831,15 +833,19 @@ export interface YrsSession extends CollaborationReplica {
     source: ProgressiveFontSource,
     onError: (error: Error) => void
   ): void;
-  /**
-   * Installs the outlines of the glyphs `page` (a display page) draws from
-   * sliced faces. Resolves with the font ids whose outlines changed once they
-   * are installed, or, after a wait, with those installed so far; the rest
-   * reach `onGlyphOutlines`.
-   */
-  ensureGlyphOutlines(page: unknown): Promise<Set<number>>;
   /** Calls `listener` with font ids whose outlines installed after the page that needed them painted. */
   onGlyphOutlines(listener: (fontIds: Set<number>) => void): () => void;
+  /**
+   * Readies a display page's sliced faces before it paints in this realm:
+   * installs the outlines its glyph runs draw and registers the faces its
+   * `text` primitives (list markers, watermarks) name, by the measurement's
+   * `fontChains`, as FontFaces, waiting up to `PROGRESSIVE_OUTLINE_WAIT_MS`.
+   * Resolves with the painter's options: the font ids whose outlines changed
+   * (the rest reach `onGlyphOutlines` once they land), glyph runs of sliced
+   * faces paint outlines only, and those `text` primitives paint with the
+   * registered faces.
+   */
+  prepareSlicedPaint(page: unknown, fontChains: Readonly<Record<string, number[]>>): Promise<SlicedPaint>;
   /**
    * Reports sliced faces whose outlines failed in the engine worker (its
    * replies' `fontErrors`, by this session's font id) through the `onError`
@@ -1524,8 +1530,15 @@ function wrapSession(
       progressiveSpecs.push({ slot: id, source, face, onError: report });
       residentFontsRevision += 1;
     },
-    ensureGlyphOutlines: (page) =>
-      progressiveFonts ? progressiveFonts.ensure(glyphsByFont(page)) : Promise.resolve(new Set<number>()),
+    prepareSlicedPaint: async (page, fontChains) => {
+      const fonts = progressiveFonts;
+      if (!fonts) return { changed: new Set(), outlineOnlyFontIds: new Set(), fontFamilies: new Map() };
+      const [changed, fontFamilies] = await Promise.all([
+        fonts.ensure(glyphsByFont(page)),
+        fonts.textFamilies(page, fontChains),
+      ]);
+      return { changed, outlineOnlyFontIds: fonts.fontIds(), fontFamilies };
+    },
     onGlyphOutlines: (listener) => {
       outlineListeners.add(listener);
       return () => {

@@ -38,6 +38,11 @@ export interface DrawPageOptions {
   glyphCache?: GlyphCache;
   /** The CSS family each document font family paints browser text with, where they differ. */
   fontFamilies?: ReadonlyMap<string, string>;
+  /**
+   * Fonts whose glyph runs paint from outlines only (sliced faces): a run the
+   * cache cannot resolve draws nothing rather than browser text in another face.
+   */
+  outlineOnlyFontIds?: ReadonlySet<number>;
 }
 
 /**
@@ -369,7 +374,8 @@ export function drawGlyphRunPrimitive(
     families?.size && primitive.fallbackFont
       ? { ...primitive, fallbackFont: withFontFamilies(primitive.fallbackFont, families) }
       : primitive,
-    options.glyphCache
+    options.glyphCache,
+    options.outlineOnlyFontIds?.has(primitive.fontId) ?? false
   );
 }
 
@@ -471,7 +477,8 @@ function warnSyntheticPaintClipOnce(): void {
 function drawGlyphRun(
   ctx: CanvasRenderingContext2D,
   run: GlyphRunPrimitive,
-  cache: GlyphCache | undefined
+  cache: GlyphCache | undefined,
+  outlineOnly: boolean
 ): void {
   const rect = glyphRunRect(run);
   let wrapped = beginTextVisualState(
@@ -542,7 +549,7 @@ function drawGlyphRun(
       // fall through to the fillText safety net below
     }
   }
-  drawGlyphRunFallback(ctx, run);
+  if (!outlineOnly) drawGlyphRunFallback(ctx, run);
   if (wrapped) ctx.restore();
 }
 

@@ -9,6 +9,7 @@ import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
   rasterizeDisplayPageToBackBuffer,
+  type DrawPageOptions,
 } from '../layout/render/canvasBackend';
 import {
   applyFrameDeltaOwned,
@@ -69,6 +70,9 @@ let trap: WebAssembly.RuntimeError | null = null;
 // the failure, by the page's font id, for the page to report.
 let progressiveFonts: ResidentProgressiveFonts | null = null;
 let fontErrors: ResidentFontError[] = [];
+// The measurement's font chains from the latest frame request, by which list
+// markers and watermarks name their sliced faces.
+let fontChains: Record<string, number[]> = {};
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -99,6 +103,7 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
 };
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  if ('extras' in request) fontChains = chainsOf(request.extras);
   if (request.type === 'destroy') {
     destroySession();
     return;
@@ -349,12 +354,24 @@ function openProgressiveFonts(
   return fonts;
 }
 
-/** Installs the outlines `page` draws from sliced faces, or waits for them up to the guard. */
-async function ensureOutlines(page: unknown): Promise<void> {
+/**
+ * Readies `page`'s sliced faces, waiting for them up to the guard: installs
+ * the outlines its glyph runs draw and registers the faces its list markers
+ * and watermarks name. Resolves with the painter's options for them.
+ */
+async function slicedPaint(page: unknown): Promise<Pick<DrawPageOptions, 'outlineOnlyFontIds' | 'fontFamilies'>> {
   const fonts = progressiveFonts;
-  if (!fonts) return;
-  const changed = await fonts.ensure(glyphsByFont(page));
+  if (!fonts) return {};
+  const [changed, fontFamilies] = await Promise.all([
+    fonts.ensure(glyphsByFont(page)),
+    fonts.textFamilies(page, fontChains),
+  ]);
   if (changed.size > 0) glyphCache?.invalidateFonts(changed);
+  return { outlineOnlyFontIds: fonts.fontIds(), fontFamilies };
+}
+
+function chainsOf(extras: string): Record<string, number[]> {
+  return extras ? (JSON.parse(extras) as { fontChains?: Record<string, number[]> }).fontChains ?? {} : {};
 }
 
 function subscribe(): void {
@@ -540,12 +557,12 @@ async function replayOffscreen(
       continue;
     }
     preparations.push(
-      ensureOutlines(page)
-        .then(() =>
+      slicedPaint(page)
+        .then((sliced) =>
           rasterizeDisplayPageToBackBuffer(
             resolvedBuffer,
             page,
-            { glyphCache: glyphCache ?? undefined },
+            { glyphCache: glyphCache ?? undefined, ...sliced },
             offscreenDpr,
             offscreenZoom
           )

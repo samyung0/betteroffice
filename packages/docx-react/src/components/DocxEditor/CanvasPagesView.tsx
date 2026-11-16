@@ -70,7 +70,7 @@ export function CanvasPagedArea({
           zoom={zoom}
           interactive={interactive}
           glyphOutlineProvider={renderer.glyphOutlineProvider}
-          ensureGlyphOutlines={renderer.ensureGlyphOutlines}
+          prepareSlicedPaint={renderer.prepareSlicedPaint}
           onGlyphOutlines={renderer.onGlyphOutlines}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
@@ -262,7 +262,7 @@ export function CanvasPagesView({
   selectableText = false,
   flush = false,
   glyphOutlineProvider,
-  ensureGlyphOutlines,
+  prepareSlicedPaint,
   onGlyphOutlines,
   offscreenReplay,
   onWorkerPresentationChange,
@@ -296,8 +296,8 @@ export function CanvasPagesView({
   /** Outline source sharing the display engine's resident font store. */
   /** False disables the separate outline WASM for display lists that contain browser text runs. */
   glyphOutlineProvider?: GlyphOutlineProvider | null | false;
-  /** Installs the outlines a page draws from sliced faces before it rasters; resolves with the font ids that changed. */
-  ensureGlyphOutlines?: ((page: unknown) => Promise<Set<number>>) | null;
+  /** Readies the sliced faces a page draws before it rasters (outlines, and FontFaces for its markers). */
+  prepareSlicedPaint?: UseCanvasRendererResult['prepareSlicedPaint'];
   /** Font ids whose outlines installed after the page that needed them painted: every page repaints. */
   onGlyphOutlines?: ((listener: (fontIds: Set<number>) => void) => () => void) | null;
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
@@ -634,12 +634,17 @@ export function CanvasPagesView({
       const buffer = document.createElement('canvas');
       preparations.push({
         buffer,
-        // Sliced faces' outlines this page draws install first (the frame
-        // waits for them up to a guard, then paints and repaints later).
-        ready: (ensureGlyphOutlines ? ensureGlyphOutlines(page) : Promise.resolve(new Set<number>()))
-          .then((changed) => {
-            if (changed.size > 0) glyphCache?.invalidateFonts(changed);
-            return rasterizeDisplayPageToBackBuffer(buffer, page, { resolveImage, glyphCache }, dpr, zoom);
+        // Sliced faces this page draws are readied first (the frame waits
+        // for them up to a guard, then paints and repaints later): their
+        // glyph runs paint outlines only, their markers the registered face.
+        ready: (prepareSlicedPaint ? prepareSlicedPaint(page) : Promise.resolve(null))
+          .then((sliced) => {
+            if (sliced && sliced.changed.size > 0) glyphCache?.invalidateFonts(sliced.changed);
+            return rasterizeDisplayPageToBackBuffer(buffer, page, {
+              resolveImage,
+              glyphCache,
+              ...(sliced && { outlineOnlyFontIds: sliced.outlineOnlyFontIds, fontFamilies: sliced.fontFamilies }),
+            }, dpr, zoom);
           }),
         present() {
           presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
@@ -675,7 +680,7 @@ export function CanvasPagesView({
     resolveImage,
     glyphCacheReady,
     lateOutlines,
-    ensureGlyphOutlines,
+    prepareSlicedPaint,
     offscreenEligible,
     offscreenFailed,
     offscreenReplay,

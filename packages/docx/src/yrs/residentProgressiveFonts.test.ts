@@ -200,3 +200,54 @@ test('fonts that were replaced never install outlines that arrive later', async 
   expect(await resident.ensure(new Map([[10, new Set([glyphIn(53)])]]))).toEqual(new Set());
   expect(hits.get(chunkFile(53))).toBeUndefined();
 });
+
+test('list markers and watermarks on a sliced face load their characters\' chunks and paint with it under a private family, blank until the chunks land', async () => {
+  const realm = globalThis as { FontFace?: unknown; fonts?: unknown };
+  class RealmFontFace {
+    constructor(readonly family: string, readonly source: ArrayBuffer) {}
+    async load() {
+      return this;
+    }
+  }
+  const registered: RealmFontFace[] = [];
+  const removed: RealmFontFace[] = [];
+  realm.FontFace = RealmFontFace;
+  realm.fonts = { add: (face: RealmFontFace) => registered.push(face), delete: (face: RealmFontFace) => removed.push(face) };
+  try {
+    const { resident } = fonts();
+    const late: Array<Set<number>> = [];
+    resident.onLateInstall((fontIds) => late.push(fontIds));
+    // A circled-number marker and a watermark in MS Mincho, whose chain starts with font 11 (a view of the sliced face 10), and a Latin marker.
+    const page = {
+      items: [
+        { kind: 'text', font: '14px "MS Mincho", serif', text: '①' },
+        { kind: 'text', font: 'bold 48px "MS Mincho"', text: '社外秘' },
+        { kind: 'text', font: '11px Calibri', text: '1.' },
+      ],
+    };
+    const chains = { 'ms mincho|0|0': [11, 3], 'calibri|0|0': [2] };
+    let release!: () => void;
+    gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const families = await resident.textFamilies(page, chains, 30);
+    expect(families).toEqual(new Map([['MS Mincho', 'BetterOffice Sliced 10']]));
+    expect(registered.map((face) => face.family)).toEqual(['BetterOffice Sliced 10']);
+    const chunkHits = () => index.chunks.filter((chunk) => hits.has(chunk.file)).length;
+    expect(chunkHits()).toBeGreaterThan(0);
+
+    release();
+    await resident.whenInstalled();
+    expect(late).toEqual([new Set([10, 11])]);
+    // The repaint registers the face with the landed outlines in place of the blank one.
+    expect(await resident.textFamilies(page, chains, 30)).toEqual(families);
+    expect(registered).toHaveLength(2);
+    expect(registered[1]!.source.byteLength).toBeGreaterThan(registered[0]!.source.byteLength);
+    expect(removed).toEqual([registered[0]!]);
+    resident.dispose();
+    expect(removed).toEqual([registered[0]!, registered[1]!]);
+  } finally {
+    delete realm.FontFace;
+    delete realm.fonts;
+  }
+});

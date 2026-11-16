@@ -818,3 +818,38 @@ describe('Offscreen page canvas release', () => {
     expect(bitmaps).toEqual([null]);
   });
 });
+
+describe('Sliced faces', () => {
+  it('paints a sliced font glyph run without outlines blank, never as browser text in another face', async () => {
+    const { ctx } = recordingContext(new Map([['鰯', { width: 16, ascent: 12, descent: 4 }]]));
+    const fillText = spyOn(ctx, 'fillText');
+    const run: GlyphRunPrimitive = {
+      kind: 'glyphRun',
+      fontId: 7,
+      size: 16,
+      color: '#000000',
+      text: '鰯',
+      fallbackFont: '16px "MS Gothic"',
+      glyphs: [{ id: 3000, x: 10, y: 20, cluster: 0 }],
+    };
+    await drawPrimitive(ctx, run, { outlineOnlyFontIds: new Set([7]) });
+    expect(fillText).not.toHaveBeenCalled();
+    // Another font's run keeps its browser-text stand-in.
+    await drawPrimitive(ctx, { ...run, fontId: 2 }, { outlineOnlyFontIds: new Set([7]) });
+    expect(fillText).toHaveBeenCalledTimes(1);
+  });
+
+  it('paints a list marker in a sliced family with the face registered for it', async () => {
+    const { ctx } = recordingContext(new Map([['①', { width: 16, ascent: 12, descent: 4 }]]));
+    const fonts: string[] = [];
+    const fillText = spyOn(ctx, 'fillText').mockImplementation(() => {
+      fonts.push(ctx.font);
+    });
+    await drawPrimitive(ctx, textRun('①', 10, 16, 'MS Gothic'), {
+      fontFamilies: new Map([['MS Gothic', 'BetterOffice Sliced 7']]),
+    });
+    expect(fillText).toHaveBeenCalledTimes(1);
+    expect(fonts[0]).toContain('"BetterOffice Sliced 7"');
+    expect(fonts[0]).not.toContain('MS Gothic');
+  });
+});

@@ -27,6 +27,7 @@ import {
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
+  type SlicedPaint,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
   type YrsSession,
@@ -999,7 +1000,7 @@ export function useDisplayListQueries(
 /** The engine a canvas renderer builds with: its outlines, and the sliced faces' outline installs. */
 type CanvasDisplayEngine = RustDisplayListEngine & {
   outlineGlyphJson?: GlyphOutlineProvider;
-  ensureGlyphOutlines?: (page: unknown) => Promise<Set<number>>;
+  prepareSlicedPaint?: (page: unknown, fontChains: Readonly<Record<string, number[]>>) => Promise<SlicedPaint>;
   onGlyphOutlines?: (listener: (fontIds: Set<number>) => void) => () => void;
 };
 
@@ -1031,8 +1032,8 @@ export interface UseCanvasRendererResult {
   canvasHostRef: React.RefObject<HTMLDivElement | null>;
   /** Glyph outlines sourced from the same resident font store as measurement. */
   glyphOutlineProvider: GlyphOutlineProvider | null;
-  /** Installs the outlines a page draws from sliced faces before it paints (see YrsSession). */
-  ensureGlyphOutlines: ((page: unknown) => Promise<Set<number>>) | null;
+  /** Readies a page's sliced faces before it paints: outlines, and FontFaces for its markers (see YrsSession). */
+  prepareSlicedPaint: ((page: unknown) => Promise<SlicedPaint>) | null;
   /** Font ids whose outlines installed after the page that needed them painted. */
   onGlyphOutlines: ((listener: (fontIds: Set<number>) => void) => () => void) | null;
   /** One-call ordinary text insertion; false until resident state is ready. */
@@ -1167,6 +1168,11 @@ export function useCanvasRenderer(
       caret?.caretRect &&
       !displayListNeedsHostImages(displayList)
   );
+  // Markers and watermarks name their faces by family, through the measurement's chains.
+  const prepareSlicedPaint = useMemo(() => {
+    const prepare = engine?.prepareSlicedPaint;
+    return prepare ? (page: unknown) => prepare(page, fontChainsProviderRef?.current?.() ?? {}) : null;
+  }, [engine, fontChainsProviderRef]);
   return {
     displayList,
     frame,
@@ -1184,7 +1190,7 @@ export function useCanvasRenderer(
     authoritativeCaretActive,
     canvasHostRef,
     glyphOutlineProvider: engine?.outlineGlyphJson ?? null,
-    ensureGlyphOutlines: engine?.ensureGlyphOutlines ?? null,
+    prepareSlicedPaint,
     onGlyphOutlines: engine?.onGlyphOutlines ?? null,
     applyInput,
     applyDelete,

@@ -22,10 +22,12 @@ import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
   extractTrackedChangesFromYrs,
+  GlyphCache,
   rasterizeDisplayPage,
   yrsIdToNumericId,
   type TrackedChangesResult,
 } from '@betteroffice/docx/layout/render';
+import { printPageOptions } from './DocxEditor/printPaint';
 
 import { cn } from '../lib/utils';
 import { type SelectionFormatting, type ToolbarProps } from './Toolbar';
@@ -1529,7 +1531,12 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return null;
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
-  const { displayList: printList, resolveImage: printImages } = canvasRenderer;
+  const {
+    displayList: printList,
+    resolveImage: printImages,
+    glyphOutlineProvider: printOutlines,
+    prepareSlicedPaint: preparePrintPaint,
+  } = canvasRenderer;
   const pagedList = usePagedList(printList);
   const renderPages = useCallback(
     async <T,>(
@@ -1537,8 +1544,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     ) => {
       const list = await pagedList();
       const results: T[] = [];
+      const glyphCache = printOutlines ? new GlyphCache({ provider: printOutlines }) : undefined;
       for (const page of list.pages) {
-        const canvas = await rasterizeDisplayPage(page, { resolveImage: printImages });
+        const options = await printPageOptions(page, {
+          resolveImage: printImages,
+          glyphCache,
+          prepareSlicedPaint: preparePrintPaint,
+        });
+        const canvas = await rasterizeDisplayPage(page, options);
         try {
           results.push(await each({ canvas, width: page.width, height: page.height }));
         } finally {
@@ -1549,7 +1562,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       }
       return results;
     },
-    [pagedList, printImages]
+    [pagedList, printImages, printOutlines, preparePrintPaint]
   );
 
   // Expose ref methods

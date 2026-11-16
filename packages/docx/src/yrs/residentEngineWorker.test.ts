@@ -46,6 +46,8 @@ beforeAll(async () => {
         addView() {}
         onLateInstall(listener) { this.late = listener; }
         ensure(glyphs) { return testHarness.ensure(glyphs); }
+        textFamilies(page, chains) { return testHarness.textFamilies(page, chains); }
+        fontIds() { return new Set([7]); }
         retryUnavailable() { testHarness.retries += 1; }
         dispose() {}
       }
@@ -120,6 +122,9 @@ function worker() {
       late(fontIds: Set<number>): void;
     },
     ensure: async (_glyphs: Map<number, Set<number>>) => new Set<number>(),
+    textFamilies: async (_page: DisplayPage, _chains: Record<string, number[]>) => new Map<string, string>(),
+    /** The painter options of each page rasterized. */
+    options: [] as unknown[],
     /** The sliced font ids a page draws: font 7, with the page's index as its glyph. */
     drawn: (page: DisplayPage) => new Map([[7, new Set([page.pageIndex])]]),
     emitUpdate: null as ((update: Uint8Array) => void) | null,
@@ -165,12 +170,13 @@ function worker() {
     async rasterize(
       buffer: Surface,
       page: DisplayPage,
-      _options: unknown,
+      options: unknown,
       dpr: number,
       zoom: number
     ) {
       const id = page.pageIndex + 1;
       harness.rasterized.push(id);
+      harness.options.push(options);
       if (harness.failRaster === id) {
         harness.failRaster = null;
         throw new Error('raster failed');
@@ -282,12 +288,12 @@ function worker() {
         paintCaret: false,
       });
     },
-    build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null) {
+    build(upserts: number[], width = 100, caret: YrsResidentCaretRect | null = null, extras = '') {
       delta(upserts, false, width);
       harness.caret = caret;
       return send({
         type: 'buildFrame',
-        extras: '',
+        extras,
         expectedFrameEpoch: frameEpoch - 1,
         paintCaret: !!caret,
       });
@@ -595,6 +601,25 @@ describe('resident worker sliced faces', () => {
     w.resetCalls();
     expect((await w.type([2], caret(2))).ok).toBe(true);
     expect(w.harness.rasterized.sort()).toEqual([1, 2]);
+  });
+
+  test('a page paints its list markers and watermarks in the sliced face their family\'s chain starts with, and its glyph runs from outlines only', async () => {
+    const w = worker();
+    const source = { ref: { format: 1, index: 'jp/slices.json', indexSha256: '' }, urls: {} };
+    await w.bootstrap(3, undefined, { fonts: [new Uint8Array([1])], progressiveFonts: [{ slot: 0, source }] });
+    const asked: Array<Record<string, number[]>> = [];
+    w.harness.textFamilies = async (_page, chains) => {
+      asked.push(chains);
+      return new Map([['MS Mincho', 'BetterOffice Sliced 7']]);
+    };
+    await w.attach([1]);
+    w.harness.options = [];
+    const chains = { 'ms mincho|0|0': [7] };
+    expect((await w.build([1], 120, null, JSON.stringify({ fontChains: chains }))).ok).toBe(true);
+    expect(asked.at(-1)).toEqual(chains);
+    const [options] = w.harness.options as Array<{ fontFamilies?: Map<string, string>; outlineOnlyFontIds?: Set<number> }>;
+    expect(options?.fontFamilies).toEqual(new Map([['MS Mincho', 'BetterOffice Sliced 7']]));
+    expect(options?.outlineOnlyFontIds).toEqual(new Set([7]));
   });
 });
 

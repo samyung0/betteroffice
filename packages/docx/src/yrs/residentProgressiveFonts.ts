@@ -27,6 +27,7 @@ interface OutlineFace {
   readonly revision: number;
   bytes(): ArrayBuffer;
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
+  ensureText(text: string): Promise<number>;
   retryFailed(): void;
 }
 
@@ -194,6 +195,22 @@ export function textByChainHead(
   return heads;
 }
 
+/** What a page's painter needs from its sliced faces once they are ready. */
+export interface SlicedPaint {
+  /** Font ids whose outlines changed, for the glyph cache to drop. */
+  changed: Set<number>;
+  /** Font ids drawing with sliced faces: their glyph runs paint outlines only, never browser text. */
+  outlineOnlyFontIds: ReadonlySet<number>;
+  /** The private family each document family's `text` primitives paint with, where its face is sliced. */
+  fontFamilies: ReadonlyMap<string, string>;
+}
+
+/** This realm's font set, where sliced faces register for the browser's shaper. */
+function realmFonts(): FontFaceSet | undefined {
+  if (typeof FontFace !== 'function') return undefined;
+  return typeof document !== 'undefined' ? document.fonts : (globalThis as { fonts?: FontFaceSet }).fonts;
+}
+
 /** Glyph ids per font id drawn by a display page: its own runs and those of its regions and note areas. */
 export function glyphsByFont(page: unknown): Map<number, Set<number>> {
   return new Map([...drawnByFont(page)].map(([fontId, { glyphs }]) => [fontId, glyphs]));
@@ -246,6 +263,8 @@ export class ResidentProgressiveFonts {
   private readonly ownerOf = new Map<number, number>();
   private readonly pending = new Set<Promise<unknown>>();
   private readonly lateListeners = new Set<(fontIds: Set<number>) => void>();
+  /** Sliced faces registered as FontFaces for `text` primitives, by owner, at the revision registered. */
+  private readonly textFaces = new Map<number, { name: string; revision: number; face: FontFace }>();
   private warned = false;
   private late = 0;
   private disposed = false;
@@ -285,6 +304,49 @@ export class ResidentProgressiveFonts {
   dispose(): void {
     this.disposed = true;
     this.lateListeners.clear();
+    const fonts = realmFonts();
+    for (const { face } of this.textFaces.values()) fonts?.delete(face);
+    this.textFaces.clear();
+  }
+
+  /** Every font id drawing with a sliced face, measurement views included. */
+  fontIds(): Set<number> {
+    return new Set(this.ownerOf.keys());
+  }
+
+  /**
+   * Readies the `text` primitives of `page` (list markers, watermarks) whose
+   * family's chain (`chains`, by `family|bold|italic` key) starts with a
+   * sliced face: loads the chunks of their characters, waiting up to
+   * `waitMs`, and registers the face as a FontFace in this realm under a
+   * private family. Resolves with each such family's private name, so the
+   * painter draws them with the face, never a system one; characters still
+   * loading draw blank and the page repaints once they land.
+   */
+  async textFamilies(
+    page: unknown,
+    chains: Readonly<Record<string, number[]>>,
+    waitMs = PROGRESSIVE_OUTLINE_WAIT_MS
+  ): Promise<Map<string, string>> {
+    const families = new Map<string, string>();
+    const characters = new Map<number, Set<string>>();
+    const owners = new Map<string, number>();
+    for (const [head, entry] of textByChainHead(page, chains)) {
+      const owner = this.ownerOf.get(head);
+      if (owner === undefined) continue;
+      for (const family of entry.families) owners.set(family, owner);
+      let wanted = characters.get(owner);
+      if (!wanted) characters.set(owner, wanted = new Set());
+      for (const character of entry.characters) wanted.add(character);
+    }
+    const fonts = realmFonts();
+    if (characters.size === 0 || !fonts || this.disposed) return families;
+    await Promise.all([...characters].map(([owner, wanted]) => this.registerText(owner, [...wanted].join(''), waitMs, fonts)));
+    for (const [family, owner] of owners) {
+      const name = this.textFaces.get(owner)?.name;
+      if (name) families.set(family, name);
+    }
+    return families;
   }
 
   /** Calls `listener` with the font ids whose outlines a frame stopped waiting for, once they install. */
@@ -352,6 +414,62 @@ export class ResidentProgressiveFonts {
     while (this.pending.size) await Promise.allSettled([...this.pending]);
   }
 
+  /**
+   * Waits for the owner's face to open (its skeleton is held from
+   * measurement), loads `text`'s chunks of it up to `waitMs`, and registers
+   * the face as it stands; a face the browser cannot load is reported once.
+   */
+  private async registerText(owner: number, text: string, waitMs: number, fonts: FontFaceSet): Promise<void> {
+    const state = this.owners.get(owner)!;
+    if (state.failed) return;
+    let face: OutlineFace;
+    try {
+      face = state.face = await (state.opening ??= state.open());
+    } catch (error) {
+      this.fail(state, error);
+      return;
+    }
+    let waiting = true;
+    const loading = face.ensureText(text).then(
+      (revision) => {
+        // Characters a page stopped waiting for repaint once they land.
+        if (!waiting && !this.disposed && revision > (this.textFaces.get(owner)?.revision ?? 0)) {
+          for (const listener of [...this.lateListeners]) listener(this.fontIdsOf(new Set([owner])));
+        }
+      },
+      (error: unknown) => this.unavailable(state, error)
+    );
+    this.track(loading);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([loading, new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, waitMs);
+    })]).finally(() => clearTimeout(timer));
+    waiting = false;
+    const revision = face.revision;
+    if (this.disposed || (this.textFaces.get(owner)?.revision ?? 0) >= revision) return;
+    const name = `BetterOffice Sliced ${owner}`;
+    const fontFace = new FontFace(name, face.bytes());
+    try {
+      await fontFace.load();
+    } catch (error) {
+      this.fail(state, error);
+      return;
+    }
+    // Another page may have registered the same or a newer revision meanwhile.
+    const known = this.textFaces.get(owner);
+    if (this.disposed || (known?.revision ?? 0) >= revision) return;
+    if (known) fonts.delete(known.face);
+    fonts.add(fontFace);
+    this.textFaces.set(owner, { name, revision, face: fontFace });
+  }
+
+  /** Reports a slice that failed for this face, once until `retryUnavailable`. */
+  private unavailable(state: Owner, error: unknown): void {
+    if (state.unavailable || this.disposed) return;
+    state.unavailable = true;
+    state.onError(FontSliceUnavailableError.from(error));
+  }
+
   private fontIdsOf(owners: ReadonlySet<number>): Set<number> {
     const ids = new Set<number>();
     for (const [id, owner] of this.ownerOf) if (owners.has(owner)) ids.add(id);
@@ -380,10 +498,7 @@ export class ResidentProgressiveFonts {
     try {
       await state.face.ensureGlyphs(ids);
     } catch (error) {
-      if (!state.unavailable && !this.disposed) {
-        state.unavailable = true;
-        state.onError(FontSliceUnavailableError.from(error));
-      }
+      this.unavailable(state, error);
     }
     return true;
   }
