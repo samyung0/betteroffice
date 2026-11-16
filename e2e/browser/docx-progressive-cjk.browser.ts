@@ -57,7 +57,8 @@ async function open(page: Page) {
   });
   page.on('pageerror', (error) => errors.push(error.message));
   page.on('console', (message) => {
-    if (/font.*(fail|still loading)|fontRegistry.*falling back|outlines failed/i.test(message.text())) warnings.push(message.text());
+    // A page that paints before its outlines land (300 ms, Q750 B) and repaints is expected; failures are not.
+    if (/font.*fail|fontRegistry.*falling back|outlines failed/i.test(message.text())) warnings.push(message.text());
   });
   await page.goto('/?format=docx');
   await page.locator('input[type=file]').last().setInputFiles({
