@@ -77,7 +77,7 @@ import { DocxEditorDialogs } from './DocxEditor/DocxEditorDialogs';
 import { DocxEditorToolbar } from './DocxEditor/DocxEditorToolbar';
 import { DocxEditorPagedArea } from './DocxEditor/DocxEditorPagedArea';
 import { ContentControlWidgets } from './DocxEditor/ContentControlWidgets';
-import { CanvasPagedArea } from './DocxEditor/CanvasPagesView';
+import { CanvasPagedArea, DOCX_PAGES_PRESENTED_EVENT } from './DocxEditor/CanvasPagesView';
 import { useCanvasRenderer } from './DocxEditor/hooks/useDisplayList';
 import type { RustFontChainsProvider } from './DocxEditor/hooks/useRustMeasurement';
 import { useResetEditorState } from './DocxEditor/hooks/useResetEditorState';
@@ -381,9 +381,10 @@ export interface DocxEditorRef {
   flushPendingInput: () => Promise<void>;
   /**
    * Asks again for every font slice that failed to load and repaints, so the
-   * characters drawn blank since then appear (Q752 B). Each failure reached
-   * `onError` once per face as a non-fatal `FontSliceUnavailableError`; call
-   * this on the browser's `online` event.
+   * characters drawn blank since then appear (Q752 B). Each failure after the
+   * first pages were presented reached `onError` once per face as a
+   * non-fatal `FontSliceUnavailableError` (one while the document opened is a
+   * plain `Error`: the open failed); call this on the browser's `online` event.
    */
   retryFontSlices: () => void;
   /** Save the document to a buffer. */
@@ -989,6 +990,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       onError: failHostDocument,
     }
   );
+
+  // A font slice that fails before the first pages are presented fails the
+  // open; after, it is a notice (Q752 B scoping).
+  useEffect(() => {
+    const host = containerRef.current;
+    const session = yrsCore.session;
+    if (!host || !session) return;
+    const presented = () => session.markPagesPresented();
+    host.addEventListener(DOCX_PAGES_PRESENTED_EVENT, presented);
+    return () => host.removeEventListener(DOCX_PAGES_PRESENTED_EVENT, presented);
+  }, [yrsCore.session]);
 
   useEffect(() => {
     const session = yrsCore.session;

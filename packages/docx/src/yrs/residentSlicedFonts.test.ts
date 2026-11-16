@@ -208,7 +208,8 @@ test('a slice the worker could not load is reported once, not fetched here, and 
     sliced.type('鰯');
     const after = await sliced.display();
     const [added] = [...glyphsOf(after, fontId)].filter((glyph) => !glyphsOf(before, fontId).has(glyph));
-    // The engine worker painted first and could not reach the slice (offline).
+    // The pages were presented; then the engine worker could not reach the slice (offline).
+    sliced.session.markPagesPresented();
     const [{ slot }] = sliced.session.residentWorkerSnapshot()!.progressiveFonts!;
     const file = 'NotoSansJP-Regular/c093.zst';
     sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'Failed to fetch', unavailable: { file, reason: 'network' } }]);
@@ -236,6 +237,27 @@ test('a slice the worker could not load is reported once, not fetched here, and 
     expect(sliced.reads.filter((read) => read === file)).toHaveLength(1);
     expect(outline(added!)).toBeGreaterThan(0);
     expect(sliced.errors).toHaveLength(1);
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
+test('a slice that fails while the document opens fails the open; after its pages are presented it is a notice', async () => {
+  const sliced = await editor(true);
+  try {
+    await sliced.display();
+    const [{ slot }] = sliced.session.residentWorkerSnapshot()!.progressiveFonts!;
+    const file = 'NotoSansJP-Regular/c093.zst';
+    const fail = () => sliced.session.reportResidentFontErrors([{ slot: slot!, message: 'HTTP 503', unavailable: { file, reason: 'server', status: 503 } }]);
+    fail();
+    expect(sliced.errors).toHaveLength(1);
+    expect(sliced.errors[0]).not.toBeInstanceOf(FontSliceUnavailableError);
+    expect(sliced.errors[0]!.message).toContain(file);
+    sliced.session.markPagesPresented();
+    fail();
+    expect(sliced.errors).toHaveLength(2);
+    expect(sliced.errors[1]).toBeInstanceOf(FontSliceUnavailableError);
+    expect(sliced.errors[1]).toMatchObject({ file, reason: 'server', status: 503 });
   } finally {
     sliced.session.destroy();
   }

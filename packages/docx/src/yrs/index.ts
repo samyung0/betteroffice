@@ -862,6 +862,12 @@ export interface YrsSession extends CollaborationReplica {
   retryFontSlices(): void;
   /** Calls `listener` on `retryFontSlices`, for the engine worker to ask again too. */
   onFontSlicesRetry(listener: () => void): () => void;
+  /**
+   * The document's pages have been presented. Until then a slice that fails
+   * is part of the document opening and reaches `onError` as a plain
+   * (fatal) `Error`; from then on it is the non-fatal `FontSliceUnavailableError`.
+   */
+  markPagesPresented(): void;
   /** Measure one paragraph through the session's resident text engine. */
   measureParagraphJson(input: string): string;
   /** Paginate and retain the measured input and Layout in the session. */
@@ -1365,6 +1371,7 @@ function wrapSession(
   // Faces whose missing slice was reported: once per face across this page and
   // its engine worker, until retryFontSlices.
   const unavailableReported = new Set<ProgressiveFontFace>();
+  let pagesPresented = false;
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1521,6 +1528,11 @@ function wrapSession(
       }
       const report = (error: Error) => {
         if (error instanceof FontSliceUnavailableError) {
+          // A slice that fails while the document opens fails the open.
+          if (!pagesPresented) {
+            onError(new Error(`A font slice failed while the document opened: ${error.message}`, { cause: error }));
+            return;
+          }
           if (unavailableReported.has(face)) return;
           unavailableReported.add(face);
         }
@@ -1570,6 +1582,9 @@ function wrapSession(
       // Pages painted here repaint, asking for the missing glyphs again.
       const fontIds = new Set(progressiveSpecs.map((spec) => spec.slot));
       if (fontIds.size > 0) for (const listener of [...outlineListeners]) listener(fontIds);
+    },
+    markPagesPresented: () => {
+      pagesPresented = true;
     },
     onFontSlicesRetry: (listener) => {
       retryListeners.add(listener);
