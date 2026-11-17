@@ -438,6 +438,8 @@ fn autofit_rows(
     }
     let spanned = merge_anchors(sheet, true);
     let anchors = merge_anchors(sheet, false);
+    // cells come row by row: the tallest of a row is written once
+    let mut tallest: Option<(RowId, f64)> = None;
     for (at, cell) in sheet.iter_cells() {
         xlsx_model::open_timing! {
             xlsx_model::open_timing::count("style_autofit_cells", 1);
@@ -456,13 +458,34 @@ fn autofit_rows(
             autofit_height(styles, style, default_pt, cached_default, normal, fit),
             wrapped,
         ) {
-            let entry = fitted.entry(at.row).or_insert(height);
-            if height > *entry {
-                *entry = height;
+            match &mut tallest {
+                Some((row, tallest)) if *row == at.row => {
+                    if height > *tallest {
+                        *tallest = height;
+                    }
+                }
+                _ => {
+                    if let Some((row, height)) = tallest.replace((at.row, height)) {
+                        fit_row(&mut fitted, row, height);
+                    }
+                }
             }
         }
     }
+    if let Some((row, height)) = tallest {
+        fit_row(&mut fitted, row, height);
+    }
     fitted
+}
+
+fn fit_row(fitted: &mut BTreeMap<RowId, f64>, row: RowId, height: f64) {
+    xlsx_model::open_timing! {
+        xlsx_model::open_timing::count("style_autofit_row_writes", 1);
+    }
+    let entry = fitted.entry(row).or_insert(height);
+    if height > *entry {
+        *entry = height;
+    }
 }
 
 /// the anchors of the sheet's merges, only those spanning rows when `spanning`.
@@ -1300,6 +1323,52 @@ mod tests {
                 < 0.001
         );
         assert_eq!(grid.row_y(1), row_pt_to_px(DEFAULT_ROW_HEIGHT_PT));
+    }
+
+    #[cfg(feature = "test-counters")]
+    #[test]
+    fn row_fit_writes_each_rows_tallest_height_once() {
+        let sizes = [11.0, 20.0, 14.0, 24.0, 30.0, 16.0, 18.0, 40.0];
+        let mut styles = Stylesheet::default();
+        styles.fonts = sizes
+            .iter()
+            .map(|&size| Font {
+                size_pt: Some(size),
+                ..Default::default()
+            })
+            .collect();
+        styles.cell_xfs = (0..sizes.len() as u32)
+            .map(|font| Xf {
+                font: Some(font),
+                ..Default::default()
+            })
+            .collect();
+        let mut sheet = Sheet::new("Fit");
+        for (row, fonts) in [[0, 1, 2, 0], [3, 0, 4, 0], [0, 0, 5, 0]]
+            .iter()
+            .enumerate()
+        {
+            for (col, &font) in fonts.iter().enumerate() {
+                sheet.set_cell(
+                    CellRef::new(row as u32, col as u32),
+                    xlsx_model::workbook::Cell {
+                        value: CellValue::Number { value: 1.0 },
+                        style: Some(font),
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        sheet.row_styles.insert(1, 6);
+        sheet.row_styles.insert(2, 7);
+        xlsx_model::open_timing::begin();
+        let grid = GridGeometry::new(&sheet, &styles);
+        let sample = xlsx_model::open_timing::finish();
+        assert_eq!(sample.counts.get("style_autofit_row_writes"), Some(&3));
+        for (row, size) in [(0, 20.0), (1, 30.0), (2, 40.0)] {
+            let height = grid.row_y(row + 1) - grid.row_y(row);
+            assert!((height - row_pt_to_px(autofit_row_height_pt(size))).abs() < 0.001);
+        }
     }
 
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {
