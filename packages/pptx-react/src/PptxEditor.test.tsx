@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
-import type { HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { DeckSnapshot, HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { storyClipboard } from './clipboard';
@@ -591,6 +591,51 @@ describe('PptxEditor host integration', () => {
       painting.mockRestore();
       context.mockRestore();
     }
+  }, 30000);
+
+  it('reads and lays out only the slide a key edits', async () => {
+    const changes: DeckSnapshot[] = [];
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        file={fixture}
+        fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        onReady={(ready) => { api = ready; }}
+        onChange={(snapshot) => changes.push(snapshot)}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    const slides = api!.handle.snapshot().slides;
+    const target = slides.length - 1;
+    expect(target).toBeGreaterThan(1);
+    const shape = slides[target].shapes.find((item) => item.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    await act(async () => {
+      api!.selectText({ slide: target + 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+    });
+    const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+    const before = api!.handle.snapshot();
+    const decks = spyOn(api!.handle, 'snapshot');
+    const keyed = spyOn(api!.handle, 'snapshotWithLayoutKeys');
+    const read = spyOn(api!.handle, 'slideSnapshot');
+    const layouts = spyOn(api!.handle, 'layoutSlide');
+    try {
+      fireEvent.input(input, { target: { value: 'ab' } });
+      fireEvent.keyDown(input, { key: 'Backspace' });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(decks).not.toHaveBeenCalled();
+      expect(keyed).not.toHaveBeenCalled();
+      expect(read.mock.calls).toEqual([[target], [target], [target]]);
+      expect(layouts.mock.calls.map(([index]) => index)).toEqual([target, target, target]);
+    } finally {
+      decks.mockRestore();
+      keyed.mockRestore();
+      read.mockRestore();
+      layouts.mockRestore();
+    }
+    expect(changes).toHaveLength(3);
+    expect(changes[2]).not.toEqual(before);
+    expect(changes[2]).toEqual(api!.handle.snapshot());
   }, 30000);
 
   it('keeps viewing mode navigable without exposing user mutations', async () => {

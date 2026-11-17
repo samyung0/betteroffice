@@ -80,6 +80,7 @@ export const pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) 
 export const pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setTextAnchorJson: (a: number, b: number, c: number) => [number, number];
 export const pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];
+export const pptxdocument_slideSnapshotJson: (a: number, b: number) => [number, number, number, number];
 export const pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
 export const pptxdocument_startUpdateObservation: (a: number) => [number, number];
 export const pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];

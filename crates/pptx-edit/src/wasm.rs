@@ -425,6 +425,17 @@ impl PptxDocument {
         json(self.session.snapshot().map_err(js_error)?)
     }
 
+    /// `snapshotJson`'s slide at `slide_index`, read without the rest of the deck.
+    #[wasm_bindgen(js_name = slideSnapshotJson)]
+    pub fn slide_snapshot_json(&self, slide_index: u32) -> Result<String, JsValue> {
+        json(
+            self.session
+                .slide_scope(slide_index as usize)
+                .map_err(js_error)?
+                .slide,
+        )
+    }
+
     #[wasm_bindgen(js_name = searchTextJson)]
     pub fn search_text_json(&self, args: &str) -> Result<String, JsValue> {
         let args: SearchTextArgs = parse_args(args)?;

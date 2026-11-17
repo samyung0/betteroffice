@@ -80,6 +80,10 @@ export class PptxDocument {
     setSlideNotesJson(args: string): string;
     setTextAnchorJson(args: string): void;
     setUndoCaptureMode(mode: string): void;
+    /**
+     * `snapshotJson`'s slide at `slide_index`, read without the rest of the deck.
+     */
+    slideSnapshotJson(slide_index: number): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
     storyJson(args: string): string;
@@ -243,6 +247,7 @@ export interface InitOutput {
     readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setTextAnchorJson: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];
+    readonly pptxdocument_slideSnapshotJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];
