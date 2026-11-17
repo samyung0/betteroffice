@@ -87,6 +87,8 @@ interface MirrorBuildCtx {
    * line's touching runs join (all but a viewer's text layer).
    */
   joinedRuns: boolean;
+  /** A text page ({@link buildMirrorTextPage}): elements that carry no meaning unwrap into their text. */
+  plain: boolean;
   /** Elements stamped with document positions, for {@link syncMirrorPositions}. */
   positions: BuildBinding[];
   /** A glyph cluster piece's joined source run. */
@@ -163,7 +165,7 @@ export function buildMirrorPage(
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
   const positions: BuildBinding[] = [];
-  const pageEl = buildPage(page, options, !options.clusters, positions);
+  const pageEl = buildPage(page, options, !options.clusters, false, positions);
   registerPositions(pageEl, positions);
   return pageEl;
 }
@@ -172,6 +174,7 @@ function buildPage(
   page: DisplayPage,
   options: BuildMirrorPageOptions,
   joinedRuns: boolean,
+  plain: boolean,
   positions: BuildBinding[]
 ): HTMLElement {
   const doc = options.document ?? document;
@@ -180,6 +183,7 @@ function buildPage(
     labels,
     noteRefIds: new Set(),
     joinedRuns,
+    plain,
     positions,
     sourceOf: new Map(),
   };
@@ -248,7 +252,7 @@ export function buildMirrorTextPage(
   options: BuildMirrorPageOptions = {}
 ): HTMLElement {
   const positions: BuildBinding[] = [];
-  const pageEl = buildPage(page, options, true, positions);
+  const pageEl = buildPage(page, options, true, true, positions);
   pageEl.classList.add(MIRROR_TEXT_PAGE_CLASS);
   pageEl.style.overflow = 'hidden';
   pageEl.style.setProperty('contain', 'strict');
@@ -808,11 +812,12 @@ function populateParagraphBlock(
     : MIRROR_CLASS_NAMES.block;
   el.setAttribute('role', chart ? 'img' : 'paragraph');
   if (chart?.label) el.setAttribute('aria-label', chart.label);
+  const container = containerLanguageAndDirection(prims);
   let open: HTMLElement | null = null;
   for (const p of inLogicalOrder(prims)) {
     const child = renderMirrorPrimitive(p, doc, offsetY, ctx);
     const textRun = ctx.joinedRuns && (p.kind === 'glyphRun' || p.kind === 'text');
-    if (textRun && open && joinTextRunElement(open, child)) {
+    if (textRun && open && joinTextRunElement(open, child, ctx.plain ? container : undefined)) {
       joinPositions(ctx, open);
       continue;
     }
@@ -847,9 +852,15 @@ function coversItsText(run: HTMLElement, text: Text): boolean {
  * Appends text run `next` to the touching run `open` on the same line when
  * nothing else tells them apart, so a line shaped cluster by cluster reads as
  * one text node: screen readers otherwise hear each positioned cluster as its
- * own word. Returns false, touching nothing, when they differ.
+ * own word. Returns false, touching nothing, when they differ. On a text page
+ * (`plain`: the language and direction of their paragraph) runs that carry no
+ * meaning unwrap into their text, styles and all, so their styles need not match.
  */
-function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
+function joinTextRunElement(
+  open: HTMLElement,
+  next: HTMLElement,
+  plain?: { lang?: string; dir?: string }
+): boolean {
   if (open.tagName !== next.tagName || open.id || next.id) return false;
   const openText = open.firstChild;
   const nextText = next.firstChild;
@@ -865,16 +876,19 @@ function joinTextRunElement(open: HTMLElement, next: HTMLElement): boolean {
   if (![openLeft, openRight, nextLeft, nextRight].every(Number.isFinite)) return false;
   const rtl = open.getAttribute('dir') === 'rtl';
   if (Math.abs(rtl ? nextRight - openLeft : nextLeft - openRight) > 0.5) return false;
-  if (open.attributes.length !== next.attributes.length) return false;
-  for (const attribute of Array.from(open.attributes)) {
-    if (JOIN_IGNORED_ATTRIBUTES.has(attribute.name)) continue;
-    if (next.getAttribute(attribute.name) !== attribute.value) return false;
+  const names = open.getAttributeNames();
+  if (names.length !== next.getAttributeNames().length) return false;
+  for (const name of names) {
+    if (JOIN_IGNORED_ATTRIBUTES.has(name)) continue;
+    if (next.getAttribute(name) !== open.getAttribute(name)) return false;
   }
-  if (open.style.length !== next.style.length) return false;
-  for (let index = 0; index < open.style.length; index++) {
-    const name = open.style.item(index);
-    if (!JOIN_IGNORED_STYLES.has(name) && open.style.getPropertyValue(name) !== next.style.getPropertyValue(name)) {
-      return false;
+  if (!plain || keptOnTextPage(open, names, plain)) {
+    if (open.style.length !== next.style.length) return false;
+    for (let index = 0; index < open.style.length; index++) {
+      const name = open.style.item(index);
+      if (!JOIN_IGNORED_STYLES.has(name) && open.style.getPropertyValue(name) !== next.style.getPropertyValue(name)) {
+        return false;
+      }
     }
   }
   const left = Math.min(openLeft, nextLeft);
@@ -1064,18 +1078,40 @@ function inLogicalOrder<T extends BlockGroup['prims']>(prims: T): T {
   return prims.map((p) => (p.logicalOrder === undefined ? p : ordered[index++])) as T;
 }
 
-function applyContainerLanguageAndDirection(el: HTMLElement, prims: BlockGroup['prims']): void {
+function containerLanguageAndDirection(prims: BlockGroup['prims']): { lang?: string; dir?: 'rtl' | 'ltr' } {
   const lang = prims.find((p) => p.lang)?.lang;
-  if (lang) el.lang = lang;
   const directional = prims.find((p) => p.bidiLevel !== undefined || 'rtl' in p);
-  if (!directional) return;
+  if (!directional) return { lang };
   const rtl =
     directional.bidiLevel !== undefined
       ? directional.bidiLevel % 2 === 1
       : 'rtl' in directional
         ? directional.rtl
         : false;
-  el.dir = rtl ? 'rtl' : 'ltr';
+  return { lang, dir: rtl ? 'rtl' : 'ltr' };
+}
+
+function applyContainerLanguageAndDirection(el: HTMLElement, prims: BlockGroup['prims']): void {
+  const { lang, dir } = containerLanguageAndDirection(prims);
+  if (lang) el.lang = lang;
+  if (dir) el.dir = dir;
+}
+
+/**
+ * Whether a text page keeps `run`, with attributes `names`, in a paragraph of
+ * `container`'s language and direction as an element ({@link carriesMeaning}).
+ */
+function keptOnTextPage(
+  run: HTMLElement,
+  names: readonly string[],
+  container: { lang?: string; dir?: string }
+): boolean {
+  if (run.tagName === 'A') return true;
+  for (const name of names) {
+    if (name === 'role' || name === 'tabindex' || name.startsWith('aria-')) return true;
+    if ((name === 'lang' || name === 'dir') && run.getAttribute(name) !== container[name]) return true;
+  }
+  return false;
 }
 
 function applyBlockObjectA11y(el: HTMLElement, prims: BlockGroup['prims']): void {

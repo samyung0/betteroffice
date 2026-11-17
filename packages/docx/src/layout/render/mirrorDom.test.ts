@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -127,6 +127,37 @@ describe('buildMirrorTextPage', () => {
       expect(text.querySelectorAll('*').length).toBeLessThan(full.querySelectorAll('*').length);
     });
   }
+
+  // one line of touching runs: English, two in Traditional Chinese, English
+  const line = (lang: (index: number) => string | undefined) => ({
+    pageIndex: 0,
+    width: 500,
+    height: 500,
+    primitives: ['Read ', 'the ', '交換', '學生', ' now.'].map((text, index, all) => {
+      const docStart = all.slice(0, index).join('').length;
+      const extra = lang(index) ? { lang: lang(index) } : {};
+      return run(text, docStart, extra);
+    }),
+  }) as unknown as DisplayPage;
+
+  test('compares the styles only of runs it keeps as elements', () => {
+    const reads = spyOn(CSSStyleDeclaration.prototype, 'getPropertyValue');
+    // Where a run sits (left, width) decides whether it touches the next one.
+    const compared = () => reads.mock.calls.filter(([name]) => name !== 'left' && name !== 'width');
+    try {
+      const plain = buildMirrorTextPage(line(() => undefined));
+      expect(compared()).toEqual([]);
+      expect(plain.querySelector('[role="paragraph"]')?.innerHTML).toBe('Read the 交換學生 now.');
+      // Runs in another language than their paragraph stay elements, joined.
+      const mixed = buildMirrorTextPage(line((index) => (index === 2 || index === 3 ? 'zh-TW' : 'en-US')));
+      expect(compared().length).toBeGreaterThan(0);
+      expect(mixed.querySelector('[role="paragraph"]')?.innerHTML).toBe(
+        'Read the <span class="layout-run layout-run-text" lang="zh-TW" data-doc-start="9" data-doc-end="13">交換學生</span> now.'
+      );
+    } finally {
+      reads.mockRestore();
+    }
+  });
 });
 
 describe('buildMirrorPage text runs', () => {
