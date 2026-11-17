@@ -241,6 +241,11 @@ impl SheetInfoCache {
             CellRef::new(bounds.start.row.min(at.row), bounds.start.col.min(at.col)),
             CellRef::new(bounds.end.row.max(at.row), bounds.end.col.max(at.col)),
         );
+        self.refresh_content(freeze_pane);
+    }
+
+    /// Re-derive the fields the used range and the geometry drive.
+    fn refresh_content(&mut self, freeze_pane: Option<FreezePane>) {
         let content = sheet_content(self.bounds, freeze_pane, &self.geometry);
         self.info.content_width = content.width;
         self.info.content_height = content.height;
@@ -3198,7 +3203,8 @@ impl Workbook {
 
     /// Fold a committed op batch into the `sheet_info` memo. A `SetCell` that
     /// keeps its target's style and can't contribute to row autofit only moves
-    /// the used range outward, which `extend_bounds` folds in without a rescan;
+    /// the used range outward, which `extend_bounds` folds in without a rescan,
+    /// and a value change in a wrapped cell refits just that cell's row;
     /// a cell leaving the used-range edge, a style change (fonts feed autofit),
     /// or an op touching sheets, names, geometry or the freeze drops the memo
     /// for the next `sheet_info` to rebuild.
@@ -3210,6 +3216,7 @@ impl Workbook {
         let Some(cache) = slot.as_mut() else {
             return;
         };
+        let mut refit = BTreeSet::new();
         for op in ops {
             match op {
                 Op::AddSheet { .. }
@@ -3275,6 +3282,13 @@ impl Workbook {
                         *slot = None;
                         return;
                     }
+                    // a wrapped cell's text sizes its row (Q759 A)
+                    if prior.is_some()
+                        && *cell != CellState::default()
+                        && self.cell_wraps(cell.style)
+                    {
+                        refit.insert(at.row);
+                    }
                     cache.extend_bounds(*at, self.active_sheet_freeze_pane());
                 }
                 Op::SetCharts { .. }
@@ -3284,6 +3298,18 @@ impl Workbook {
                 | Op::SetDefinedNames { .. } => {}
             }
         }
+        if let (false, Some(sheet)) = (refit.is_empty(), self.model.sheet(self.active_sheet)) {
+            Arc::make_mut(&mut cache.geometry).update_rows(sheet, &self.model.styles, refit);
+            cache.refresh_content(sheet.freeze_pane);
+        }
+    }
+
+    /// Whether a present cell carrying `style` wraps its text, as row fit reads it.
+    fn cell_wraps(&self, style: Option<u32>) -> bool {
+        self.model
+            .styles
+            .alignment_for(style.unwrap_or(0))
+            .is_some_and(xlsx_render::wrap::wraps)
     }
 
     /// Whether a cell carrying `style` at `at` participates in the active
