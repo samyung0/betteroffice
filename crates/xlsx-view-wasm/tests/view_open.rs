@@ -78,6 +78,36 @@ fn a_view_open_captures_only_the_sheet_that_names_sheet_protection() {
     assert!(active_sheet_protected(&document));
 }
 
+#[cfg(feature = "test-counters")]
+#[test]
+fn a_view_builds_each_sheets_grid_geometry_once() {
+    use xlsx_render::geometry::{geometry_counters, reset_geometry_counters};
+    let mut document = open_view(&with_protected_sheet());
+    reset_geometry_counters();
+    let viewport = r#"{"x":0,"y":0,"width":1600,"height":1000}"#;
+    let scrolled = r#"{"x":0,"y":400,"width":1600,"height":1000}"#;
+    for sheet in 0..2 {
+        document
+            .set_active_sheet(sheet)
+            .unwrap_or_else(|_| panic!("no sheet {sheet}"));
+        for viewport in [viewport, scrolled] {
+            document
+                .sheet_info_json()
+                .unwrap_or_else(|_| panic!("no sheet info"));
+            document
+                .display_list_json(viewport)
+                .unwrap_or_else(|_| panic!("no display list"));
+            document
+                .chart_at_point_json(&format!(r#"{{"viewport":{viewport},"x":200,"y":100}}"#))
+                .unwrap_or_else(|_| panic!("no chart hit"));
+            document
+                .cell_position_json(r#"{"sheet":0,"row":5,"col":3}"#)
+                .unwrap_or_else(|_| panic!("no cell position"));
+        }
+        assert_eq!(geometry_counters().0, u64::from(sheet) + 1);
+    }
+}
+
 #[test]
 fn a_package_broken_only_in_a_part_view_never_reads_opens_in_view_not_in_edit() {
     let whole = with_protected_sheet();
