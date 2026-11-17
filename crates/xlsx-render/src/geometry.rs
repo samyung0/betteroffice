@@ -1371,6 +1371,184 @@ mod tests {
         }
     }
 
+    /// `autofit_rows` as it was before writing once per row: every contributing
+    /// cell writes the fitted-heights map.
+    fn per_cell_autofit_rows(
+        sheet: &Sheet,
+        styles: &Stylesheet,
+        default_pt: f64,
+        normal: NormalFace<'_>,
+        column_px: impl Fn(ColId) -> f32,
+        inset: TextInset,
+        fit: RowFit,
+    ) -> BTreeMap<RowId, f64> {
+        let mut fitted = BTreeMap::new();
+        if sheet.format.custom_height {
+            return fitted;
+        }
+        let cached_default = fit == RowFit::Screen && sheet.format.default_row_height_pt.is_some();
+        for &row in sheet.row_styles.keys() {
+            if !sheet.row_heights.contains_key(&row)
+                && let Some(style) = missing_row_style(sheet, row)
+                && let Some(height) =
+                    autofit_height(styles, Some(style), default_pt, cached_default, normal, fit)
+            {
+                fitted.insert(row, height);
+            }
+        }
+        let spanned = merge_anchors(sheet, true);
+        let anchors = merge_anchors(sheet, false);
+        for (at, cell) in sheet.iter_cells() {
+            if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
+                continue;
+            }
+            let style = cell.style;
+            let wrapped =
+                wrapped_height(styles, style, cell, column_px(at.col), inset, normal, fit)
+                    .filter(|height| cached_default || *height > default_pt)
+                    .filter(|_| !anchors.contains(&(at.row, at.col)));
+            if let Some(height) = taller(
+                autofit_height(styles, style, default_pt, cached_default, normal, fit),
+                wrapped,
+            ) {
+                let entry = fitted.entry(at.row).or_insert(height);
+                if height > *entry {
+                    *entry = height;
+                }
+            }
+        }
+        fitted
+    }
+
+    #[test]
+    fn row_fit_matches_per_cell_writes_for_wraps_merges_custom_heights_and_row_styles() {
+        use xlsx_model::styles::Alignment;
+        // font sizes 11 (normal), 20, 9, 28, 14; xfs: 0 plain, 1 wrap 11, 2 wrap 9,
+        // 3 plain 20, 4 plain 28, 5 wrap 14, 6 plain 9
+        let mut styles = Stylesheet::default();
+        styles.fonts = [11.0, 20.0, 9.0, 28.0, 14.0]
+            .iter()
+            .map(|&size| Font {
+                size_pt: Some(size),
+                ..Default::default()
+            })
+            .collect();
+        let wrap = Some(Alignment {
+            wrap_text: true,
+            ..Default::default()
+        });
+        styles.cell_xfs = [
+            (0, None),
+            (0, wrap.clone()),
+            (2, wrap.clone()),
+            (1, None),
+            (3, None),
+            (4, wrap),
+            (2, None),
+        ]
+        .into_iter()
+        .map(|(font, alignment)| Xf {
+            font: Some(font),
+            alignment,
+            ..Default::default()
+        })
+        .collect();
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        let cells: &[(u32, u32, &str, u32)] = &[
+            // taller to the right: a one-line wrap, a 20pt font, a wrap in a
+            // hidden column, then a long wrap
+            (0, 0, "x y", 2),
+            (0, 1, "", 3),
+            (0, 2, long, 5),
+            (0, 3, long, 1),
+            // shorter to the right: a long small-font wrap, then a large font
+            (1, 0, long, 2),
+            (1, 1, "", 4),
+            (1, 3, "short", 1),
+            // a custom-height row
+            (2, 0, long, 5),
+            (2, 1, "", 4),
+            // a merge spanning rows 3-4: its anchor is skipped
+            (3, 0, long, 5),
+            (3, 2, "", 3),
+            (4, 2, long, 1),
+            // a one-row merge: its anchor's wrap is skipped, its font is not
+            (5, 0, long, 5),
+            (5, 3, "", 6),
+            (5, 4, "", 3),
+            // row styles: taller than the cells, then shorter
+            (6, 0, "", 3),
+            (6, 1, "", 6),
+            (7, 0, "", 6),
+            (7, 1, long, 5),
+            // a custom-height row with a row style
+            (9, 0, "", 3),
+            (10, 0, long, 0),
+        ];
+        let mut sheet = Sheet::new("Fit");
+        for &(row, col, text, style) in cells {
+            sheet.set_cell(
+                CellRef::new(row, col),
+                xlsx_model::workbook::Cell {
+                    value: if text.is_empty() {
+                        CellValue::Number { value: 1.0 }
+                    } else {
+                        CellValue::Text { value: text.into() }
+                    },
+                    style: Some(style),
+                    ..Default::default()
+                },
+            );
+        }
+        sheet.row_heights.insert(2, 30.0);
+        sheet.row_heights.insert(9, 12.0);
+        sheet.merges = vec![
+            xlsx_model::CellRange::new(CellRef::new(3, 0), CellRef::new(4, 1)),
+            xlsx_model::CellRange::new(CellRef::new(5, 0), CellRef::new(5, 2)),
+        ];
+        for (row, style) in [(6, 4), (7, 6), (8, 3), (9, 4)] {
+            sheet.row_styles.insert(row, style);
+        }
+        let column_px = |col: ColId| match col {
+            0 => 40.0,
+            2 => 0.0,
+            _ => 64.0,
+        };
+        let normal = NormalFace::from_styles(&styles);
+        for declared in [None, Some(14.4)] {
+            sheet.format.default_row_height_pt = declared;
+            for fit in [RowFit::Screen, RowFit::Print { dpi: 72.0 }] {
+                let default_pt = declared.unwrap_or(DEFAULT_ROW_HEIGHT_PT);
+                let inset = TextInset::of(fit, normal);
+                let rows = autofit_rows(&sheet, &styles, default_pt, normal, column_px, inset, fit);
+                assert_eq!(
+                    rows,
+                    per_cell_autofit_rows(
+                        &sheet, &styles, default_pt, normal, column_px, inset, fit
+                    ),
+                    "declared {declared:?}, {fit:?}"
+                );
+                assert!(!rows.contains_key(&2) && !rows.contains_key(&9));
+                assert!(rows[&8] > 0.0);
+            }
+        }
+        sheet.format.default_row_height_pt = None;
+        let rows = autofit_rows(
+            &sheet,
+            &styles,
+            DEFAULT_ROW_HEIGHT_PT,
+            normal,
+            column_px,
+            TextInset::of(RowFit::Screen, normal),
+            RowFit::Screen,
+        );
+        // a wrapped 11pt cell over several lines outgrows the 20pt font before it
+        assert!(rows[&0] > autofit_row_height_pt(20.0));
+        assert_eq!(rows[&5], autofit_row_height_pt(20.0));
+        assert_eq!(rows[&6], autofit_row_height_pt(28.0));
+        assert!(rows[&7] > autofit_row_height_pt(9.0));
+    }
+
     fn sheet_with(cols: &[(ColId, f64)], rows: &[(RowId, f64)]) -> Sheet {
         let mut s = Sheet::new("S");
         s.col_widths = cols.iter().copied().collect::<BTreeMap<_, _>>();
