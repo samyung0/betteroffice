@@ -704,10 +704,26 @@ describe('cellFill', () => {
     const otherCell = fill('#000000', { x: 300, y: 20, w: 80, h: 20 });
     const dataBar = fill('#638ec6', { x: 101, y: 22, w: 30, h: 16 });
     const band = fill('rgba(33, 115, 70, 0.12)', { x: 0, y: 0, w: 800, h: 600 });
-    const pattern: DrawCmd = {
-      op: 'patternFill', ...cell, pattern: 'darkGray', fg: '#000000', bg: '#ffffff', originX: 0, originY: 0,
-    };
     expect(cellFill(list(), cell)).toBe('#ffffff');
-    expect(cellFill(list(otherCell, dataBar, band, pattern), cell)).toBe('#ffffff');
+    expect(cellFill(list(otherCell, dataBar, band), cell)).toBe('#ffffff');
+  });
+
+  const pattern = (kind: PatternType, fg: string, bg: string): DrawCmd => ({
+    op: 'patternFill', ...cell, pattern: kind, fg, bg, originX: 0, originY: 0,
+  });
+
+  it('mixes a pattern from its two colours by how much of the cell each covers', () => {
+    // gray125 inks 8 of 64 pixels: 255 * 7 / 8 = 223.125
+    expect(cellFill(list(pattern('gray125', '#000000', '#ffffff')), cell)).toBe('#dfdfdf');
+    expect(cellFill(list(pattern('mediumGray', '#000000', '#ffffff')), cell)).toBe('#808080');
+    // lightGray inks a quarter, over a column's solid fill
+    const column = fill('#ff0000', { x: 100, y: 0, w: 80, h: 600 });
+    expect(cellFill(list(column, pattern('lightGray', '#0000ff', '#ffff00')), cell)).toBe('#bfbf40');
+  });
+
+  it("is the cell's own fill under a chart", () => {
+    const grid: DrawCmd = { op: 'line', x1: 0, y1: 40, x2: 800, y2: 40, width: 1, color: '#e2e2e2' };
+    const chartArea = fill('#ffffff', { x: 40, y: 0, w: 400, h: 300 });
+    expect(cellFill(list(fill('#c6efce'), grid, chartArea), cell)).toBe('#c6efce');
   });
 });
