@@ -158,6 +158,74 @@ describe('buildMirrorTextPage', () => {
       reads.mockRestore();
     }
   });
+
+  // Touching runs that differ only in their styles: plain ones of other weights,
+  // sizes, colours and case; ones in another language than their paragraph, in
+  // a paragraph and in table cells; right-to-left ones in a right-to-left and in
+  // a left-to-right paragraph.
+  const bold = { font: '700 16px Calibri' };
+  const zh = { lang: 'zh-TW' };
+  const en = { lang: 'en-US' };
+  const line2 = { blockId: 2, baselineY: 140 };
+  const cell = (col: number, blockId: number) => ({ blockId, baselineY: 180, cell: { row: 0, col }, table: { tableId: 't1' } });
+  // drawn leftward from `right`
+  const rtl = (text: string, docStart: number, right: number, extra: Record<string, unknown>) =>
+    run(text, docStart, { x: right - text.length * 8, bidiLevel: 1, ...extra });
+  const styledPage = {
+    pageIndex: 0,
+    width: 800,
+    height: 800,
+    primitives: [
+      run('Bold', 0, bold),
+      run(' plain', 4),
+      run(' big', 10, { font: '400 24px Calibri' }),
+      run(' red', 14, { color: '#c00000' }),
+      run(' caps', 18, { allCaps: true }),
+      run('See ', 30, { ...en, ...line2 }),
+      run('交換', 34, { ...zh, ...bold, ...line2 }),
+      run('學生', 36, { ...zh, ...line2 }),
+      run('學期', 38, { ...zh, ...line2 }),
+      run('.', 40, { ...en, ...line2 }),
+      run('Bold', 50, { ...bold, ...cell(0, 3) }),
+      run(' cell', 54, cell(0, 3)),
+      run('A ', 60, { ...en, ...cell(1, 4) }),
+      run('粗', 62, { ...zh, ...bold, ...cell(1, 4) }),
+      run('體', 63, { ...zh, ...cell(1, 4) }),
+      run('字', 64, { ...zh, ...cell(1, 4) }),
+      rtl('שלום', 70, 600, { ...bold, blockId: 5, baselineY: 220 }),
+      rtl(' עולם', 74, 568, { blockId: 5, baselineY: 220 }),
+      run('Say ', 80, { bidiLevel: 0, blockId: 6, baselineY: 260 }),
+      rtl('שלום', 84, 500, { ...bold, blockId: 6, baselineY: 260 }),
+      rtl(' עולם', 88, 468, { blockId: 6, baselineY: 260 }),
+      rtl(' טוב', 93, 428, { blockId: 6, baselineY: 260 }),
+    ],
+  } as unknown as DisplayPage;
+
+  test('joins runs that differ only in their styles as it did when it compared every run\'s styles', () => {
+    // As f1848de46 built it, which compared the styles of every pair of runs.
+    const span = (attributes: string, text: string) => `<span class="layout-run layout-run-text" ${attributes}>${text}</span>`;
+    const paragraph = (attributes: string, content: string) =>
+      `<div data-block-id=${attributes} class="layout-paragraph" role="paragraph" ${content}</div>`;
+    expect(buildMirrorTextPage(styledPage).innerHTML).toBe([
+      paragraph('"1"', 'data-doc-start="0" data-doc-end="23">Bold plain big red caps'),
+      paragraph('"2"', `data-doc-start="30" data-doc-end="41" lang="en-US">See ${
+        span('lang="zh-TW" data-doc-start="34" data-doc-end="36"', '交換')}${
+        span('lang="zh-TW" data-doc-start="36" data-doc-end="40"', '學生學期')}.`),
+      '<div data-block-id="t1" class="layout-table" role="table" data-table-id="t1" aria-rowcount="1" aria-colcount="2" data-doc-start="50" data-doc-end="65">',
+      '<div class="layout-table-row" role="row" aria-rowindex="1">',
+      '<div class="layout-table-cell" role="cell" aria-colindex="1" data-doc-start="50" data-doc-end="59">',
+      paragraph('"3"', 'data-doc-start="50" data-doc-end="59">Bold cell'),
+      '</div><div class="layout-table-cell" role="cell" aria-colindex="2" data-doc-start="60" data-doc-end="65" lang="en-US">',
+      paragraph('"4"', `data-doc-start="60" data-doc-end="65" lang="en-US">A ${
+        span('lang="zh-TW" data-doc-start="62" data-doc-end="63"', '粗')}${
+        span('lang="zh-TW" data-doc-start="63" data-doc-end="65"', '體字')}`),
+      '</div></div></div>',
+      paragraph('"5"', 'data-doc-start="70" data-doc-end="79" dir="rtl">שלום עולם'),
+      paragraph('"6"', `data-doc-start="80" data-doc-end="97" dir="ltr">Say ${
+        span('dir="rtl" data-doc-start="84" data-doc-end="88" data-bidi-level="1"', 'שלום')}${
+        span('dir="rtl" data-doc-start="88" data-doc-end="97" data-bidi-level="1"', ' עולם טוב')}`),
+    ].join(''));
+  });
 });
 
 describe('buildMirrorPage text runs', () => {
