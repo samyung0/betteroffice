@@ -869,8 +869,9 @@ export interface YrsSession extends CollaborationReplica {
    * Reports a sliced face that failed to open (its index, its skeleton or the
    * module that opens it) as its slices' failures are reported (Q755 B): a
    * plain (fatal) `Error` until the pages are presented, a
-   * `FontSliceUnavailableError` after. Until `retryFontSlices`, print and
-   * thumbnails (`prepareSlicedPaint` with `complete`) fail with it.
+   * `FontSliceUnavailableError` after. Print and thumbnails
+   * (`prepareSlicedPaint` with `complete`) fail with it until the face
+   * registers, or with its new failure once it fails again (Q773 A).
    */
   reportSlicedFaceError(error: Error, onError: (error: Error) => void): void;
   /**
@@ -1382,8 +1383,9 @@ function wrapSession(
   // Faces whose missing slice was reported: once per face across this page and
   // its engine worker, until retryFontSlices.
   const unavailableReported = new Set<ProgressiveFontFace>();
-  // Sliced faces that failed to open after the pages were presented, until retryFontSlices.
-  const unopenedFaces = new Set<FontSliceUnavailableError>();
+  // Sliced faces that failed to open after the pages were presented, by
+  // index, until each registers; text that needed one may be gone (Q774 A).
+  const unopenedFaces = new Map<string, FontSliceUnavailableError>();
   let pagesPresented = false;
   // A slice or face that fails while the document opens fails the open.
   const openFailure = (error: Error) =>
@@ -1534,6 +1536,7 @@ function wrapSession(
       unopenedFaces.clear();
     },
     registerSlicedFont: (id, face, source, onError) => {
+      unopenedFaces.delete(source.ref.index);
       if (!progressiveFonts) {
         const fonts = new ResidentProgressiveFonts({
           updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
@@ -1562,7 +1565,7 @@ function wrapSession(
     },
     prepareSlicedPaint: async (page, fontChains, complete = false) => {
       // Its characters would print as missing-glyph boxes (Q763 A).
-      const [unopened] = unopenedFaces;
+      const [unopened] = unopenedFaces.values();
       if (complete && unopened) throw unopened;
       const fonts = progressiveFonts;
       if (!fonts) return { changed: new Set(), outlineOnlyFontIds: new Set(), fontFamilies: new Map() };
@@ -1594,7 +1597,6 @@ function wrapSession(
     },
     retryFontSlices: () => {
       unavailableReported.clear();
-      unopenedFaces.clear();
       // Every face forgets its failed chunks, those marked from the worker's
       // reports included, whether or not a page here painted with it.
       for (const spec of progressiveSpecs) spec.face.retryFailed();
@@ -1613,7 +1615,7 @@ function wrapSession(
         return;
       }
       const unavailable = error instanceof FontSliceUnavailableError ? error : FontSliceUnavailableError.from(error);
-      unopenedFaces.add(unavailable);
+      unopenedFaces.set(unavailable.file, unavailable);
       onError(unavailable);
     },
     onFontSlicesRetry: (listener) => {

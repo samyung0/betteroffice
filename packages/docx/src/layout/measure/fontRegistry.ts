@@ -281,11 +281,11 @@ export class TextMeasureFontRegistry {
   /** Sliced faces registered from their skeleton, by font id and measurement view id. */
   private progressiveIds = new Map<number, SlicedFontFace>();
   /**
-   * Sliced faces whose index or skeleton failed, by slice index: layout
-   * needs them, so the failure stands (reported once, not fetched again on
-   * later passes) until `retryFailedSlices()` or `clear()`.
+   * Sliced faces whose index or skeleton failed, by slice index, with their
+   * loader: layout needs them, so the failure stands (reported once, not
+   * fetched again on later passes) until `retryFailedSlices()` or `clear()`.
    */
-  private failedSlices = new Map<string, unknown>();
+  private failedSlices = new Map<string, { error: unknown; loader: BundledFontLoader }>();
   /** Failures already reported, so a remembered one reaches `onError` once. */
   private reported = new WeakSet<object>();
   private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
@@ -315,9 +315,18 @@ export class TextMeasureFontRegistry {
     return this.progressiveIds;
   }
 
-  /** Forgets the sliced faces that failed to open, so the next layout opens them again. */
+  /**
+   * Opens again each sliced face that failed to, whether or not text still
+   * needs it: one that loads registers (and the next layout takes it), one
+   * that fails again is reported anew (Q755 B, Q773 A).
+   */
   retryFailedSlices(): void {
+    const failed = [...this.failedSlices.values()];
     this.failedSlices.clear();
+    for (const { loader } of failed) {
+      this.registerFaceLoader(loader).catch((error: unknown) =>
+        this.failed('[fontRegistry] sliced face failed to load again', error));
+    }
   }
 
   /** Warns once and reports a face that failed to load; an absent optional add-on is not a failure. */
@@ -819,13 +828,13 @@ export class TextMeasureFontRegistry {
       // Every slice location names its index (`SliceLocation` is opaque here).
       const key = (slices as { ref: { index: string } }).ref.index;
       pending = (async () => {
-        if (failures.has(key)) throw failures.get(key);
+        if (failures.has(key)) throw failures.get(key)!.error;
         let face: ProgressiveFontFace;
         try {
           face = await open(slices);
         } catch (error) {
           if ((error as { name?: unknown } | null)?.name !== 'MissingCjkAddonError') {
-            failures.set(key, error);
+            failures.set(key, { error, loader });
             throw error;
           }
           return this.registerBuffer(await (loader.readOnlyBytes ?? loader)(), undefined, loader);

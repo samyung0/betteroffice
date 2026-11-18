@@ -242,6 +242,13 @@ test('the Han of a Calibri run in SimSun starts the core of the face Calibri pai
   expect(files).not.toContain('NotoSerifSC-Regular/core.zst');
 });
 
+test('the core started as layout starts goes along with the face it hands over (Q758 B)', async () => {
+  recordingFonts(true);
+  const handle = await openDocumentViewer(simSunPackage('Hello 你好世界'));
+  const sans = handle.slicedFaces().find(({ slices }) => (slices as Location).ref.index === 'NotoSansSC-Regular/slices.json')!;
+  expect([...sans.files.keys()]).toContain('NotoSansSC-Regular/core.zst');
+});
+
 test('a slice chunk that fails to load fails the open instead of painting without it', async () => {
   recordingFonts(true, { 'NotoSansJP-Regular/c095.zst': 'NotoSansJP-Regular/c094.zst' });
   await expect(openDocumentViewer(japanesePackage(BODY, HEADER))).rejects.toThrow('NotoSansJP-Regular/c095.zst');

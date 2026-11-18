@@ -188,7 +188,13 @@ export function createRustMeasureSource(options: {
           // Offline, the module fails the face as its index would (Q763 A).
           throw new FontSliceUnavailableError(location.ref.index, 'network', undefined, { cause: error });
         });
-        const face = await openSlicedFace(location);
+        const face = await openSlicedFace(location).catch((error: unknown) => {
+          // The editor names a face that failed to open by its index, whichever
+          // of its files failed: its print block lifts when that face registers.
+          if (!engine.reportSlicedFaceError || (error as { name?: unknown } | null)?.name !== 'FontSliceError') throw error;
+          const { reason, status } = error as { reason: 'network' | 'server'; status?: number };
+          throw new FontSliceUnavailableError(location.ref.index, reason, status, { cause: error });
+        });
         if (engine.registerSlicedFont) {
           const source = await sliceSourceOf(face);
           if (!source) throw new Error('A sliced face opened without file URLs cannot load its outlines in a worker');
@@ -199,12 +205,11 @@ export function createRustMeasureSource(options: {
       : undefined,
     onError: options.onError && ((error) => {
       // A sliced face that failed to open fails as its slices do (Q755 B).
-      const sliced = error instanceof FontSliceUnavailableError || error.name === 'FontSliceError';
-      if (sliced && engine.reportSlicedFaceError) engine.reportSlicedFaceError(error, options.onError!);
+      if (error instanceof FontSliceUnavailableError && engine.reportSlicedFaceError) engine.reportSlicedFaceError(error, options.onError!);
       else options.onError!(error);
     }) },
   );
-  // Back online, faces that failed to open are opened again by the next layout.
+  // Back online, faces that failed to open are opened again at once.
   engine.onFontSlicesRetry?.(() => registry.retryFailedSlices());
   let compat: CompatibilityFlags | undefined;
 

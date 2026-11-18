@@ -324,6 +324,76 @@ test('a face first needed while editing that fails to open is a notice, fails pr
   }
 }, 60_000);
 
+test('a character whose face never opened draws its missing-glyph box; after retryFontSlices print stays blocked until the face opens, or fails with its new failure (Q763 A, Q773 A)', async () => {
+  let offline = true;
+  const index = 'NotoSansKR-Regular/slices.json';
+  const sliced = await editor(true, documentBytes, undefined, (file) => offline && file.startsWith('NotoSansKR-Regular/'));
+  const settle = async (done: () => boolean) => {
+    for (let wait = 0; wait < 150 && !done(); wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  };
+  try {
+    const before = await sliced.display();
+    sliced.session.markPagesPresented();
+    sliced.type('한');
+    const typed = await sliced.display();
+    const page = typed.pages[0]!;
+    // The chain's last face draws its .notdef glyph, the box, outlines included.
+    const drawsBox = (list: DisplayList) => [...new Set(fontIds(list))].find((id) => glyphsOf(list, id).has(0));
+    expect(drawsBox(before)).toBeUndefined();
+    const box = drawsBox(typed)!;
+    expect(box).toBeDefined();
+    await sliced.session.prepareSlicedPaint(page, sliced.chains());
+    expect((JSON.parse(sliced.session.outlineGlyphJson(box, 0)) as { cmds: unknown[] }).cmds.length).toBeGreaterThan(0);
+
+    const print = () => sliced.session.prepareSlicedPaint(page, sliced.chains(), true);
+    const first = sliced.errors[0]!;
+    await expect(print()).rejects.toBe(first);
+    // Still offline: the retry opens the face again at once, it fails again, and print fails with that.
+    sliced.session.retryFontSlices();
+    await expect(print()).rejects.toBe(first);
+    await settle(() => sliced.errors.length > 1);
+    expect(sliced.errors).toHaveLength(2);
+    expect(sliced.errors[1]).not.toBe(first);
+    expect(sliced.errors[1]).toMatchObject({ file: index, reason: 'network' });
+    await expect(print()).rejects.toBe(sliced.errors[1]!);
+
+    // Back online: print right after the retry is still blocked, and passes once the face opened.
+    offline = false;
+    sliced.session.retryFontSlices();
+    await expect(print()).rejects.toBe(sliced.errors[1]!);
+    const opened = () => [...sliced.source.progressiveFaces().values()].some(({ slices }) => (slices as fonts.SliceLocation).ref.index === index);
+    await settle(opened);
+    expect(opened()).toBe(true);
+    await print();
+    const after = await sliced.display();
+    expect(drawsBox(after)).toBeUndefined();
+    expect(sliced.errors).toHaveLength(2);
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
+test('a face whose skeleton failed is named by its index, so its print block lifts when it opens (Q773 A)', async () => {
+  let offline = true;
+  const sliced = await editor(true, documentBytes, undefined, (file) => offline && file === 'NotoSansKR-Regular/skeleton.zst');
+  try {
+    await sliced.display();
+    sliced.session.markPagesPresented();
+    sliced.type('한');
+    const page = (await sliced.display()).pages[0]!;
+    expect(sliced.errors).toHaveLength(1);
+    expect(sliced.errors[0]).toMatchObject({ file: 'NotoSansKR-Regular/slices.json', reason: 'network' });
+    offline = false;
+    sliced.session.retryFontSlices();
+    const opened = () => [...sliced.source.progressiveFaces().values()].some(({ slices }) => (slices as fonts.SliceLocation).ref.index === 'NotoSansKR-Regular/slices.json');
+    for (let wait = 0; wait < 150 && !opened(); wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    await sliced.session.prepareSlicedPaint(page, sliced.chains(), true);
+    expect(sliced.errors).toHaveLength(1);
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
 test('a face that fails to open while the document opens fails the open', async () => {
   const sliced = await editor(true, documentBytes, undefined, (file) => file.startsWith('NotoSansKR-Regular/'));
   try {
