@@ -53,10 +53,11 @@ function recordingFonts(sliced: boolean, swap: Record<string, string> = {}) {
       }, rest, location && sliced ? {
         slices: {
           ...location,
-          url: (file: string) => {
+          // Noted once its URL resolves, when the request goes out.
+          url: (file: string) => location.url(swap[file] ?? file).then((url) => {
             sliceFiles.push(file);
-            return location.url(swap[file] ?? file);
-          },
+            return url;
+          }),
         },
       } : {}) as BundledFontLoader;
       if (loader.readOnlyBytes) next.readOnlyBytes = () => next!();

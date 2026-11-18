@@ -114,9 +114,10 @@ export interface RustMeasureSource {
    * Starts the core chunk of each prepared sliced face that East Asian text in
    * `requirements` paints with first (those flagged `eastAsian`). View calls
    * it as layout starts (Q758 B, Q769 A); a face that only fills characters an
-   * earlier face lacks loads its core when the pages draw.
+   * earlier face lacks loads its core when the pages draw. Resolves whether
+   * it started any.
    */
-  startEastAsianCores(requirements: ResidentFontRequirement[]): Promise<void>;
+  startEastAsianCores(requirements: ResidentFontRequirement[]): Promise<boolean>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -205,9 +206,11 @@ export function createRustMeasureSource(options: {
   return {
     progressiveFaces: () => registry.progressiveFaces(),
 
-    async startEastAsianCores(requirements): Promise<void> {
+    async startEastAsianCores(requirements): Promise<boolean> {
       const eastAsian = mergeRequirements(requirements).filter((requirement) => requirement.eastAsian);
-      for (const face of await registry.eastAsianFaces(eastAsian)) face.prefetchCore();
+      const faces = await registry.eastAsianFaces(eastAsian);
+      for (const face of faces) face.prefetchCore();
+      return faces.size > 0;
     },
 
     setEmbeddedFaces(faces, appFaces): void {

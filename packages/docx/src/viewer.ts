@@ -242,8 +242,9 @@ export async function openDocumentViewer(
     fontChains = measurement.fontChains;
     // The face that paints East Asian text first loads its core while layout
     // runs, no sooner, so it never shares the link with the engine or the
-    // skeletons layout waits for (Q769 A).
-    await source.startEastAsianCores(requirements);
+    // skeletons layout waits for (Q769 A). A task boundary lets the requests
+    // go out before layout holds the thread.
+    if (await source.startEastAsianCores(requirements)) await new Promise((resolve) => setTimeout(resolve, 0));
     const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
     const displayList = JSON.parse(
       document.displayPagesJson(0, Math.min(PAGE_BATCH, pageCount))
