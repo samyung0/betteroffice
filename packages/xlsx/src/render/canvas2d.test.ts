@@ -721,6 +721,21 @@ describe('cellFill', () => {
     expect(cellFill(list(column, pattern('lightGray', '#0000ff', '#ffff00')), cell)).toBe('#bfbf40');
   });
 
+  it('mixes the pattern of a merged cell and of a cell in a frozen pane', () => {
+    // the merge's box, larger than the cell the edit opens in
+    const merged: DrawCmd = {
+      op: 'patternFill', x: 100, y: 20, w: 160, h: 40, pattern: 'gray125', fg: '#000000', bg: '#ffffff', originX: 0, originY: 0,
+    };
+    expect(cellFill(list(merged), cell)).toBe('#dfdfdf');
+    // a frozen cell paints clipped to its pane band, unscrolled
+    const frozen = { x: 10, y: 4, w: 80, h: 20 };
+    const band = { x: 0, y: 0, w: 800, h: 24 };
+    const pane: DrawCmd = {
+      op: 'patternFill', ...frozen, pattern: 'mediumGray', fg: '#000000', bg: '#ffffff', originX: 0, originY: 0, clip: band,
+    };
+    expect(cellFill(list(fill('#ff0000', band), pane), frozen)).toBe('#808080');
+  });
+
   it("is the cell's own fill under a chart", () => {
     const grid: DrawCmd = { op: 'line', x1: 0, y1: 40, x2: 800, y2: 40, width: 1, color: '#e2e2e2' };
     const chartArea = fill('#ffffff', { x: 40, y: 0, w: 400, h: 300 });

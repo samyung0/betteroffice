@@ -230,6 +230,9 @@ struct SheetInfoCache {
     info: SheetInfo,
     bounds: Option<CellRange>,
     geometry: Arc<GridGeometry>,
+    /// Rows of wrapped cells whose values changed, refit when next read: after
+    /// the recalculation that fills a formula's value (Q764 A).
+    refit: BTreeSet<xlsx_model::RowId>,
 }
 
 impl SheetInfoCache {
@@ -1384,7 +1387,13 @@ impl Workbook {
             .sheet_info_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(cached) = &*slot {
+        if let Some(cached) = slot.as_mut() {
+            if !cached.refit.is_empty() {
+                let sheet = self.sheet(self.active_sheet)?;
+                let rows = std::mem::take(&mut cached.refit);
+                Arc::make_mut(&mut cached.geometry).update_rows(sheet, &self.model.styles, rows);
+                cached.refresh_content(sheet.freeze_pane);
+            }
             return Ok(cached.info.clone());
         }
         let sheet = self.sheet(self.active_sheet)?;
@@ -1419,6 +1428,7 @@ impl Workbook {
             info: info.clone(),
             bounds,
             geometry,
+            refit: BTreeSet::new(),
         });
         Ok(info)
     }
@@ -3204,7 +3214,7 @@ impl Workbook {
     /// Fold a committed op batch into the `sheet_info` memo. A `SetCell` that
     /// keeps its target's style and can't contribute to row autofit only moves
     /// the used range outward, which `extend_bounds` folds in without a rescan,
-    /// and a value change in a wrapped cell refits just that cell's row;
+    /// and a value change in a wrapped cell marks just that cell's row to refit;
     /// a cell leaving the used-range edge, a style change (fonts feed autofit),
     /// or an op touching sheets, names, geometry or the freeze drops the memo
     /// for the next `sheet_info` to rebuild.
@@ -3216,7 +3226,6 @@ impl Workbook {
         let Some(cache) = slot.as_mut() else {
             return;
         };
-        let mut refit = BTreeSet::new();
         for op in ops {
             match op {
                 Op::AddSheet { .. }
@@ -3287,7 +3296,7 @@ impl Workbook {
                         && *cell != CellState::default()
                         && self.cell_wraps(cell.style)
                     {
-                        refit.insert(at.row);
+                        cache.refit.insert(at.row);
                     }
                     cache.extend_bounds(*at, self.active_sheet_freeze_pane());
                 }
@@ -3297,10 +3306,6 @@ impl Workbook {
                 | Op::DeleteDefinedName { .. }
                 | Op::SetDefinedNames { .. } => {}
             }
-        }
-        if let (false, Some(sheet)) = (refit.is_empty(), self.model.sheet(self.active_sheet)) {
-            Arc::make_mut(&mut cache.geometry).update_rows(sheet, &self.model.styles, refit);
-            cache.refresh_content(sheet.freeze_pane);
         }
     }
 

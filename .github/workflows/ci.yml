@@ -359,6 +359,7 @@ jobs:
           cargo test -p betteroffice-xlsx-parse --features test-counters
           cargo test -p betteroffice-xlsx-render --features test-counters
           cargo test -p xlsx-view-wasm --features test-counters
+          cargo test -p betteroffice-xlsx --features test-counters --test wrap_refit
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'
