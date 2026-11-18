@@ -240,6 +240,10 @@ export async function openDocumentViewer(
     const measurement = source.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error('DOCX viewer fonts did not load');
     fontChains = measurement.fontChains;
+    // The face that paints East Asian text first loads its core while layout
+    // runs, no sooner, so it never shares the link with the engine or the
+    // skeletons layout waits for (Q769 A).
+    await source.startEastAsianCores(requirements);
     const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
     const displayList = JSON.parse(
       document.displayPagesJson(0, Math.min(PAGE_BATCH, pageCount))

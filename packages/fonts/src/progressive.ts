@@ -21,7 +21,11 @@ export interface ProgressiveFontFace {
   ensureText(text: string): Promise<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
-  /** Starts loading the core chunk (the outlines of the face's most used characters) before anything asks for it. */
+  /**
+   * Starts loading the core chunk (the outlines of the face's most used
+   * characters) before anything asks for it; the next `ensure` publishes it. A
+   * core that fails is remembered as any failed chunk is.
+   */
   prefetchCore(): void;
   /** Whether every outline is loaded. */
   complete(): boolean;
@@ -201,14 +205,9 @@ async function readFile(transport: SliceTransport, entry: SliceFile): Promise<Ui
 
 /**
  * @internal Loads a sliced face's index and skeleton; every outline chunk, the
- * core (chunk 0) included, loads when a glyph or character needs it. With
- * `core`, the core's request goes out beside the skeleton's.
+ * core (chunk 0) included, loads when a glyph or character needs it.
  */
-export async function openProgressiveFace(
-  ref: SliceRef,
-  transport: SliceTransport,
-  options: { core?: boolean } = {},
-): Promise<ProgressiveFontFace> {
+export async function openProgressiveFace(ref: SliceRef, transport: SliceTransport): Promise<ProgressiveFontFace> {
   if (ref.format !== 1) throw new Error(`Unsupported font slice format ${ref.format}`);
   const heldIndex = transport.held?.(ref.index);
   const indexBytes = heldIndex ?? await fetchSlice(transport, ref.index);
@@ -220,30 +219,15 @@ export async function openProgressiveFace(
   const index = JSON.parse(new TextDecoder().decode(indexBytes)) as SliceIndex;
   if (index.format !== 1) throw new Error(`Unsupported font slice index format in ${ref.index}`);
   const decodedFiles = new Map<string, Uint8Array>([[ref.index, new Uint8Array(indexBytes)]]);
-  const loaded = new Set<number>();
-  // Chunks that failed: remembered, so nothing fetches them again until retryFailed().
-  const failed = new Map<number, unknown>();
-  const pending = new Map<number, Promise<void>>();
-  // Chunks read before anything asked for them. They install when first asked
-  // for, so the face's bytes change only through `ensure`; another realm's
-  // open takes them (`files()`) once read.
-  const early = new Map<number, Promise<Uint8Array>>();
-  const prefetchCore = () => {
-    if (early.has(0) || loaded.has(0) || failed.has(0) || pending.has(0)) return;
-    const reading = readFile(transport, index.core);
-    early.set(0, reading);
-    reading.then((bytes) => decodedFiles.set(index.core.file, bytes), (error: unknown) => {
-      if (early.get(0) !== reading) return;
-      early.delete(0);
-      failed.set(0, error);
-    });
-  };
-  if (options.core) prefetchCore();
   const skeletonBytes = await readFile(transport, index.skeleton);
   const skeleton: SliceSkeleton = parseSkeleton(skeletonBytes);
   decodedFiles.set(index.skeleton.file, skeletonBytes);
   const files = new Map<number, SliceFile>([[0, index.core], ...index.chunks.map((chunk): [number, SliceFile] => [chunk.id!, chunk])]);
   const outlines = new Map<number, Uint8Array>();
+  const loaded = new Set<number>();
+  // Chunks that failed: remembered, so nothing fetches them again until retryFailed().
+  const failed = new Map<number, unknown>();
+  const pending = new Map<number, Promise<void>>();
   const listeners = new Set<(revision: number) => void>();
   let revision = 1;
   let dirty = false;
@@ -258,9 +242,7 @@ export async function openProgressiveFace(
     if (promise === undefined) {
       const entry = files.get(chunk);
       if (entry === undefined) return Promise.reject(new Error(`Unknown font slice chunk ${chunk}`));
-      const reading = early.get(chunk) ?? readFile(transport, entry);
-      early.delete(chunk);
-      promise = reading.then((bytes) => {
+      promise = readFile(transport, entry).then((bytes) => {
         install(bytes);
         decodedFiles.set(entry.file, bytes);
         loaded.add(chunk);
@@ -334,7 +316,9 @@ export async function openProgressiveFace(
         listeners.delete(listener);
       };
     },
-    prefetchCore,
+    prefetchCore() {
+      void load(0).catch(() => {});
+    },
     complete() {
       return loaded.size === files.size;
     },

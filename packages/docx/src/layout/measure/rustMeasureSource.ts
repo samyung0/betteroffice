@@ -110,6 +110,13 @@ export interface RustMeasureSource {
   clear(): void;
   /** The sliced faces registered from their skeleton, by font id and measurement view id. */
   progressiveFaces(): ReadonlyMap<number, SlicedFontFace>;
+  /**
+   * Starts the core chunk of each prepared sliced face that East Asian text in
+   * `requirements` paints with first (those flagged `eastAsian`). View calls
+   * it as layout starts (Q758 B, Q769 A); a face that only fills characters an
+   * earlier face lacks loads its core when the pages draw.
+   */
+  startEastAsianCores(requirements: ResidentFontRequirement[]): Promise<void>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -166,7 +173,7 @@ export function createRustMeasureSource(options: {
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), progressive: options.progressive
-      ? async (slices, open) => {
+      ? async (slices) => {
         const location = slices as SliceLocation;
         // The index's URL resolves beside the module that opens the face, so
         // its request goes out with the other faces'.
@@ -175,7 +182,7 @@ export function createRustMeasureSource(options: {
           // Offline, the module fails the face as its index would (Q763 A).
           throw new FontSliceUnavailableError(location.ref.index, 'network', undefined, { cause: error });
         });
-        const face = await openSlicedFace(location, open);
+        const face = await openSlicedFace(location);
         if (engine.registerSlicedFont) {
           const source = await sliceSourceOf(face);
           if (!source) throw new Error('A sliced face opened without file URLs cannot load its outlines in a worker');
@@ -198,6 +205,11 @@ export function createRustMeasureSource(options: {
   return {
     progressiveFaces: () => registry.progressiveFaces(),
 
+    async startEastAsianCores(requirements): Promise<void> {
+      const eastAsian = mergeRequirements(requirements).filter((requirement) => requirement.eastAsian);
+      for (const face of await registry.eastAsianFaces(eastAsian)) face.prefetchCore();
+    },
+
     setEmbeddedFaces(faces, appFaces): void {
       appFamilies = new Set((appFaces ?? []).map(face => face.family.trim().toLowerCase()));
       registry.setEmbeddedFaces(faces, appFaces);
@@ -209,12 +221,6 @@ export function createRustMeasureSource(options: {
 
     async prepareFontRequirements(requirements): Promise<boolean> {
       requirements = mergeRequirements(requirements);
-      // The face that paints East Asian text first starts its core chunk while
-      // layout runs (Q758 B, Q762 A); one that fills only what earlier faces
-      // lack waits.
-      const eastAsian = requirements.filter((requirement) => requirement.eastAsian);
-      const cores = await registry.eastAsianFaces(eastAsian);
-      const coreChains = new Set(eastAsian.filter((_, index) => cores.chains[index]));
       const settled = await Promise.all(
         requirements.flatMap((requirement) => [
           (async () => {
@@ -230,7 +236,6 @@ export function createRustMeasureSource(options: {
                 requirement.family,
                 requirement.bold,
                 requirement.italic,
-                coreChains.has(requirement),
               );
               return true;
             } catch {
@@ -248,7 +253,7 @@ export function createRustMeasureSource(options: {
                 undefined
               )
                 return false;
-              await registry.getScriptFallbackIds([script], cores.scripts.has(script));
+              await registry.getScriptFallbackIds([script]);
               return true;
             } catch {
               return false;

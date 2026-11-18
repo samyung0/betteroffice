@@ -20,10 +20,10 @@ const engineFaces = new WeakMap<FontDecoder, Map<string, Promise<ProgressiveFont
 /**
  * Opens the sliced face a loader's `slices` locates. One face is shared per
  * sliced face, asset base and decoder; a failed open is dropped so a later
- * call retries. With `core`, its core chunk starts loading at once.
+ * call retries.
  * @public
  */
-export function openSlicedFace(location: SliceLocation, options: { core?: boolean } = {}): Promise<ProgressiveFontFace> {
+export function openSlicedFace(location: SliceLocation): Promise<ProgressiveFontFace> {
   const { ref, base, url, timeoutMs, decode, decoder, retain, files } = location;
   let cache = faces;
   if (decoder !== undefined) {
@@ -39,15 +39,13 @@ export function openSlicedFace(location: SliceLocation, options: { core?: boolea
       timeoutMs,
       decode,
       ...(files && { held: (file: string) => files.get(file) }),
-    }, options);
+    });
     cache.set(key, pending);
     const current = pending;
     const forget = () => {
       if (cache.get(key) === current) cache.delete(key);
     };
     pending.then(retain === false ? forget : undefined, forget);
-  } else if (options.core) {
-    void pending.then((face) => face.prefetchCore(), () => {});
   }
   return pending;
 }

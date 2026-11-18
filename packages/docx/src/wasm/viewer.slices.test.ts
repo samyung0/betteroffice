@@ -178,10 +178,11 @@ test('a ① bullet in Century, a Japanese document Latin font, paints with the s
   for (const file of await chunkFiles('NotoSansJP-Regular', '①')) expect(loaded.has(file)).toBe(true);
 });
 
-/** Notes in `events` where the viewer's layout starts and ends. */
+/** Notes in `events` when the engine is ready (it opens the document) and where its layout starts and ends. */
 function markLayout(events: string[]) {
   const open = viewerModule.openViewDocument;
   return spyOn(viewerModule, 'openViewDocument').mockImplementation((bytes: Uint8Array) => {
+    events.push('engine ready');
     const document = open(bytes);
     const layout = document.layout.bind(document);
     return Object.assign(document, {
@@ -205,7 +206,7 @@ function simSunPackage(text: string): Uint8Array {
   }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
 }
 
-/** The slice files an open of `bytes` requested, with where its layout started and ended. */
+/** The slice files an open of `bytes` requested, with when its engine was ready and where its layout started and ended. */
 async function openMarked(bytes: Uint8Array): Promise<string[]> {
   const { sliceFiles } = recordingFonts(true);
   const marks = markLayout(sliceFiles);
@@ -217,19 +218,25 @@ async function openMarked(bytes: Uint8Array): Promise<string[]> {
   return sliceFiles;
 }
 
-test('the face that paints East Asian text first requests its core while layout runs; one that fills only what it lacks waits (Q758 B)', async () => {
+/** Where `files` requested `file`, checked to come after the engine and every skeleton and before layout ends. */
+function startedAsLayoutRuns(files: string[], file: string): number {
+  const at = files.indexOf(file);
+  expect(at).toBeGreaterThan(files.indexOf('engine ready'));
+  for (const [index, name] of files.entries()) if (name.endsWith('/skeleton.zst')) expect(at).toBeGreaterThan(index);
+  expect(at).toBeLessThan(files.indexOf('layout end'));
+  return at;
+}
+
+test('the face that paints East Asian text first requests its core as layout starts; one that fills only what it lacks waits (Q758 B, Q769 A)', async () => {
   // long-handbook's Han paints with Noto Sans TC first; Noto Sans SC draws only what TC lacks.
   const handbook = await openMarked(new Uint8Array(await readFile(resolve(root, 'poc/fixtures/long-handbook.docx'))));
-  const end = handbook.indexOf('layout end');
-  expect(handbook.indexOf('NotoSansTC-Regular/core.zst')).toBeGreaterThanOrEqual(0);
-  expect(handbook.indexOf('NotoSansTC-Regular/core.zst')).toBeLessThan(end);
-  expect(handbook.indexOf('NotoSansSC-Regular/core.zst')).toBeGreaterThan(end);
+  startedAsLayoutRuns(handbook, 'NotoSansTC-Regular/core.zst');
+  expect(handbook.indexOf('NotoSansSC-Regular/core.zst')).toBeGreaterThan(handbook.indexOf('layout end'));
 }, 60_000);
 
 test('the Han of a Calibri run in SimSun starts the core of the face Calibri paints it with, never that of SimSun (Q762 A)', async () => {
   const files = await openMarked(simSunPackage('Hello 你好世界'));
-  expect(files.indexOf('NotoSansSC-Regular/core.zst')).toBeGreaterThanOrEqual(0);
-  expect(files.indexOf('NotoSansSC-Regular/core.zst')).toBeLessThan(files.indexOf('layout end'));
+  startedAsLayoutRuns(files, 'NotoSansSC-Regular/core.zst');
   expect(files).toContain('NotoSerifSC-Regular/slices.json');
   expect(files).not.toContain('NotoSerifSC-Regular/core.zst');
 });

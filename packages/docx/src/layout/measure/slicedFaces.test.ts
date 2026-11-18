@@ -62,24 +62,25 @@ test('a sliced face whose open outlasts setEmbeddedFaces still registers its out
   expect(registry.progressiveFaces().get(id!)?.face).toBe(face);
 });
 
-test('a chain that wants the core of its face starts it although a script fallback opened the face first without it (Q758 B)', async () => {
-  const cores: string[] = [];
-  const opens: boolean[] = [];
-  const face = { ...fakeFace(), prefetchCore: () => cores.push('NotoSansJP') };
+test('the face East Asian text paints with first is found however it was opened first, a script fallback included (Q758 B)', async () => {
+  const face = fakeFace();
   // One loader for the face, whether a family or a script reaches it.
   const loader = slicedLoader('NotoSansJP-Regular/slices.json');
   let next = 0;
   const registry = new TextMeasureFontRegistry({ registerFont: () => next++ }, {
-    bundled: { resolve: () => loader, resolveScriptFallback: () => loader },
-    progressive: async (_slices, { core }) => {
-      opens.push(core);
-      return face;
+    bundled: {
+      resolve: (family) => (family === 'MS Gothic' ? loader : Object.assign(async () => bytes.slice(1), {})),
+      resolveScriptFallback: () => loader,
     },
+    progressive: async () => face,
   });
   await registry.getScriptFallbackIds(['cjk-jp']);
-  await registry.getFontIdChain('MS Gothic', false, false, true);
-  expect(opens).toEqual([false]);
-  expect(cores).toEqual(['NotoSansJP']);
+  await registry.getFontIdChain('MS Gothic', false, false);
+  await registry.getFontIdChain('Calibri', false, false);
+  // Its own sliced face for MS Gothic; past Calibri's Latin face, its Japanese fallback's.
+  expect([...await registry.eastAsianFaces([{ family: 'MS Gothic', bold: false, italic: false }])]).toEqual([face]);
+  expect([...await registry.eastAsianFaces([{ family: 'Calibri', bold: false, italic: false, scripts: ['cjk-jp'] }])]).toEqual([face]);
+  expect([...await registry.eastAsianFaces([{ family: 'Calibri', bold: false, italic: false }])]).toEqual([]);
 });
 
 test('a sliced face whose skeleton fails is reported once and not fetched again on later layout passes', async () => {
