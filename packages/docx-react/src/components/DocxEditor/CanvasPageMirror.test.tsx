@@ -194,3 +194,73 @@ test("a viewer's screen-reader layer is patched and shifted with its text layer"
   const starts = [...container.querySelectorAll('.layout-run-text')].map((run) => run.getAttribute('data-doc-start'));
   expect(starts).toEqual(['4', '10', '4', '10']);
 });
+
+test("a viewer's aria-hidden text layer keeps its links out of the Tab order", async () => {
+  const linked = { ...shapedPage('Read more') } as unknown as { primitives: Record<string, unknown>[] };
+  linked.primitives = [{ ...linked.primitives[0], href: 'https://example.com/more' }];
+  const shaped = linked as unknown as DisplayPage;
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  // one link per glyph cluster, none of them a Tab stop
+  expect(layer.querySelectorAll('a[href]').length).toBe('Read more'.length);
+  expect(layer.querySelectorAll('a[href]:not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])').length).toBe(0);
+  // the screen-reader layer's one link is
+  expect([...reading.querySelectorAll('a[href]')].map((link) => [link.textContent, link.getAttribute('tabindex')])).toEqual([
+    ['Read more', null],
+  ]);
+
+  // a plain-text page is read itself: its link is a Tab stop again
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect([...layer.querySelectorAll('a[href]')].map((link) => link.getAttribute('tabindex'))).toEqual([null]);
+});
+
+test("a viewer's ids resolve to its screen-reader layer, which comes first", () => {
+  const run = (text: string, docStart: number, extra: Record<string, unknown>) => ({
+    kind: 'text',
+    text,
+    x: 100,
+    baselineY: 100,
+    width: text.length * 8,
+    font: '400 16px Calibri',
+    color: '#000000',
+    docStart,
+    docEnd: docStart + text.length,
+    lineIndex: 0,
+    ...extra,
+  });
+  const noted = {
+    pageIndex: 0,
+    width: 800,
+    height: 1000,
+    primitives: [
+      run('Body', 1, { blockKey: 'body:p0' }),
+      run('1', 5, { blockKey: 'body:p0', x: 132, noteRef: { id: 1, kind: 'footnote' } }),
+      run('Head', 10, {
+        blockKey: 'body:t0:r0c0:p0',
+        baselineY: 200,
+        cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1, isHeader: true, cellId: 'head-a' },
+        table: { tableId: 't0' },
+      }),
+    ],
+    noteAreas: [
+      {
+        kind: 'footnote',
+        y: 900,
+        height: 60,
+        noteIds: [1],
+        notes: [{ id: 1, label: '1' }],
+        primitives: [run('Note', 1, { blockKey: 'fn1:p0', groupId: 'footnote-1', baselineY: 920 })],
+      },
+    ],
+  } as unknown as DisplayPage;
+  const { container } = render(<CanvasPageMirror page={noted} revision={0} full selectable />);
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  // A browser's getElementById takes the first element in tree order with the
+  // id, as querySelector does (happy-dom's takes the first connected).
+  for (const id of ['oox-footnote-1', 'oox-noteref-footnote-1', 'head-a']) {
+    expect(container.querySelector('.canvas-page-mirror--selectable')!.querySelector(`[id="${id}"]`)).not.toBeNull();
+    expect(reading.contains(document.querySelector(`[id="${id}"]`))).toBe(true);
+  }
+});

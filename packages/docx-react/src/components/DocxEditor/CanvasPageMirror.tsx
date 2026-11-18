@@ -27,10 +27,11 @@
  * keeps the selection.
  *
  * Screen readers would spell that text layer glyph by glyph, so while it is
- * positioned it is aria-hidden and the editor's whole-word mirror is mounted
- * beside it, built and patched with it, for screen readers only: never
- * selected, copied, hit or painted (`.canvas-page-mirror--reading`, Q753 C).
- * The plain-text form already reads whole words and stays readable.
+ * positioned it is aria-hidden, its links out of the Tab order, and the
+ * editor's whole-word mirror is mounted beside it, built and patched with it,
+ * for screen readers only: never selected, copied, hit or painted
+ * (`.canvas-page-mirror--reading`, Q753 C, Q765 A). The plain-text form
+ * already reads whole words and stays readable.
  */
 
 import { useEffect, useRef } from 'react';
@@ -125,7 +126,14 @@ export function CanvasPageMirror({
         header: t('a11y.headerLabel'),
         footer: t('a11y.footerLabel'),
       };
-      mount(host, (full ? buildMirrorPage : buildMirrorTextPage)(page, { labels, clusters: selectable }));
+      const mirror = (full ? buildMirrorPage : buildMirrorTextPage)(page, { labels, clusters: selectable });
+      // An aria-hidden layer's links leave the Tab order (one per glyph
+      // cluster), so focus reaches only the screen-reader layer's (Q765 A).
+      // Set before patching, so unchanged links compare equal.
+      if (reading && full) {
+        for (const link of mirror.querySelectorAll<HTMLElement>('a[href]')) link.tabIndex = -1;
+      }
+      mount(host, mirror);
       if (reading) {
         if (full) {
           mount(reading, buildMirrorPage(page, { labels }));
