@@ -1,4 +1,4 @@
-import type { ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
+import { FontSliceUnavailableError, type ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
 import type { FontDecoder, SliceLocation } from '@betteroffice/fonts';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
@@ -41,6 +41,14 @@ export interface RustTextEngine {
     onError: (error: Error) => void,
   ): void;
   clearFonts(): void;
+  /**
+   * Reports a sliced face that failed to open (its index, skeleton or the
+   * fonts module) by the rule its slices' failures follow; without it the
+   * failure reaches `onError` as it is.
+   */
+  reportSlicedFaceError?(error: Error, onError: (error: Error) => void): void;
+  /** Calls `listener` when the host asks for failed font slices again; returns an unsubscribe. */
+  onFontSlicesRetry?(listener: () => void): () => void;
 }
 
 export interface ResidentFontRequirement {
@@ -163,7 +171,10 @@ export function createRustMeasureSource(options: {
         // The index's URL resolves beside the module that opens the face, so
         // its request goes out with the other faces'.
         void location.url(location.ref.index).catch(() => {});
-        const { openSlicedFace, sliceSourceOf } = await import('@betteroffice/fonts/progressive');
+        const { openSlicedFace, sliceSourceOf } = await import('@betteroffice/fonts/progressive').catch((error: unknown) => {
+          // Offline, the module fails the face as its index would (Q763 A).
+          throw new FontSliceUnavailableError(location.ref.index, 'network', undefined, { cause: error });
+        });
         const face = await openSlicedFace(location, open);
         if (engine.registerSlicedFont) {
           const source = await sliceSourceOf(face);
@@ -173,8 +184,15 @@ export function createRustMeasureSource(options: {
         return face;
       }
       : undefined,
-    onError: options.onError },
+    onError: options.onError && ((error) => {
+      // A sliced face that failed to open fails as its slices do (Q755 B).
+      const sliced = error instanceof FontSliceUnavailableError || error.name === 'FontSliceError';
+      if (sliced && engine.reportSlicedFaceError) engine.reportSlicedFaceError(error, options.onError!);
+      else options.onError!(error);
+    }) },
   );
+  // Back online, faces that failed to open are opened again by the next layout.
+  engine.onFontSlicesRetry?.(() => registry.retryFailedSlices());
   let compat: CompatibilityFlags | undefined;
 
   return {

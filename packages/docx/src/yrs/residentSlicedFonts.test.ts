@@ -46,8 +46,11 @@ for (const face of ['NotoSansJP-Regular', 'NotoSansKR-Regular', 'NotoSansSC-Regu
   for (const entry of [index.skeleton, index.core, ...index.chunks]) sliceFiles.set(entry.sha256, entry.file);
 }
 
-/** The fonts package's provider, its loaders' slices kept or dropped, recording the slice files decoded. */
-function provider(sliced: boolean, reads: string[]): BundledFontProvider {
+/**
+ * The fonts package's provider, its loaders' slices kept or dropped, recording
+ * the slice files decoded and requested; a file `offline` names fails to fetch.
+ */
+function provider(sliced: boolean, reads: string[], requested: string[] = [], offline: (file: string) => boolean = () => false): BundledFontProvider {
   const source = fonts.createFontProvider(undefined, { retain: false }) as unknown as Record<string, (...args: unknown[]) => BundledFontLoader | undefined>;
   const wrapped = new WeakMap<BundledFontLoader, BundledFontLoader>();
   const wrap = (loader: BundledFontLoader | undefined) => {
@@ -57,7 +60,10 @@ function provider(sliced: boolean, reads: string[]): BundledFontProvider {
       const { slices, ...rest } = loader;
       const location = slices as fonts.SliceLocation | undefined;
       next = Object.assign(() => loader(), rest, location && sliced
-        ? { slices: { ...location, decode: async (encoded: ArrayBuffer, maxOutput: number) => {
+        ? { slices: { ...location, url: (file: string) => {
+          requested.push(file);
+          return offline(file) ? Promise.reject(new TypeError('Failed to fetch')) : location.url(file);
+        }, decode: async (encoded: ArrayBuffer, maxOutput: number) => {
           const decoded = await location.decode(encoded, maxOutput);
           reads.push(sliceFiles.get(createHash('sha256').update(new Uint8Array(decoded)).digest('hex')) ?? 'unknown');
           return decoded;
@@ -76,13 +82,15 @@ function provider(sliced: boolean, reads: string[]): BundledFontProvider {
 async function editor(
   sliced: boolean,
   bytes = documentBytes,
-  adjust: (request: ReturnType<typeof buildResidentRegionLayoutRequest>) => void = () => {}
+  adjust: (request: ReturnType<typeof buildResidentRegionLayoutRequest>) => void = () => {},
+  offline?: (file: string) => boolean
 ) {
   const reads: string[] = [];
+  const requested: string[] = [];
   const errors: Error[] = [];
   const session = await createYrsSession({ clientId: sliced ? 71_001 : 71_002 });
   session.openDocx(bytes, true);
-  const source = createRustMeasureSource({ engine: session, bundled: provider(sliced, reads), progressive: sliced, onError: (error) => errors.push(error) });
+  const source = createRustMeasureSource({ engine: session, bundled: provider(sliced, reads, requested, offline), progressive: sliced, onError: (error) => errors.push(error) });
   let frame: RetainedFrame | null = null;
   let chains: Record<string, number[]> = {};
   const display = async (): Promise<DisplayList> => {
@@ -101,7 +109,7 @@ async function editor(
     const paragraph = session.paragraphs('body')[0]!;
     session.insertText({ story: 'body', paraId: paragraph.paraId, offset: paragraph.text.length }, text);
   };
-  return { session, source, reads, errors, display, type, chains: () => chains };
+  return { session, source, reads, requested, errors, display, type, chains: () => chains };
 }
 
 /** The glyph ids `list` draws with `fontId`. */
@@ -276,6 +284,53 @@ test('a slice that fails while the document opens fails the open; after its page
     expect(sliced.errors).toHaveLength(2);
     expect(sliced.errors[1]).toBeInstanceOf(FontSliceUnavailableError);
     expect(sliced.errors[1]).toMatchObject({ file, reason: 'server', status: 503 });
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
+test('a face first needed while editing that fails to open is a notice, fails print, and opens again only after retryFontSlices (Q755 B)', async () => {
+  let offline = true;
+  const index = 'NotoSansKR-Regular/slices.json';
+  const sliced = await editor(true, documentBytes, undefined, (file) => offline && file.startsWith('NotoSansKR-Regular/'));
+  try {
+    await sliced.display();
+    sliced.session.markPagesPresented();
+    sliced.type('한');
+    const typed = await sliced.display();
+    expect(sliced.errors).toHaveLength(1);
+    expect(sliced.errors[0]).toBeInstanceOf(FontSliceUnavailableError);
+    expect(sliced.errors[0]).toMatchObject({ file: index, reason: 'network' });
+    await expect(sliced.session.prepareSlicedPaint(typed.pages[0]!, sliced.chains(), true)).rejects.toBe(sliced.errors[0]!);
+    // Later layouts neither ask for the face nor report it again.
+    const asked = () => sliced.requested.filter((file) => file === index).length;
+    const before = asked();
+    await sliced.display();
+    expect(asked()).toBe(before);
+    expect(sliced.errors).toHaveLength(1);
+
+    // Back online: the face opens and draws the character.
+    offline = false;
+    sliced.session.retryFontSlices();
+    const list = await sliced.display();
+    expect(asked()).toBeGreaterThan(before);
+    const drawing = [...sliced.source.progressiveFaces()]
+      .filter(([id, { slices }]) => (slices as fonts.SliceLocation).ref.index === index && glyphsOf(list, id).size > 0);
+    expect(drawing).toHaveLength(1);
+    expect(sliced.errors).toHaveLength(1);
+  } finally {
+    sliced.session.destroy();
+  }
+}, 60_000);
+
+test('a face that fails to open while the document opens fails the open', async () => {
+  const sliced = await editor(true, documentBytes, undefined, (file) => file.startsWith('NotoSansKR-Regular/'));
+  try {
+    sliced.type('한');
+    await sliced.display();
+    expect(sliced.errors).toHaveLength(1);
+    expect(sliced.errors[0]).not.toBeInstanceOf(FontSliceUnavailableError);
+    expect(sliced.errors[0]!.message).toContain('while the document opened');
   } finally {
     sliced.session.destroy();
   }

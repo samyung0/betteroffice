@@ -285,7 +285,7 @@ export class TextMeasureFontRegistry {
   /**
    * Sliced faces whose index or skeleton failed, by slice index: layout
    * needs them, so the failure stands (reported once, not fetched again on
-   * later passes) until `clear()`.
+   * later passes) until `retryFailedSlices()` or `clear()`.
    */
   private failedSlices = new Map<string, unknown>();
   /** Failures already reported, so a remembered one reaches `onError` once. */
@@ -315,6 +315,11 @@ export class TextMeasureFontRegistry {
   /** The sliced faces registered from their skeleton, by font id and measurement view id. */
   progressiveFaces(): ReadonlyMap<number, SlicedFontFace> {
     return this.progressiveIds;
+  }
+
+  /** Forgets the sliced faces that failed to open, so the next layout opens them again. */
+  retryFailedSlices(): void {
+    this.failedSlices.clear();
   }
 
   /** Warns once and reports a face that failed to load; an absent optional add-on is not a failure. */
