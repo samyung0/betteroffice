@@ -38,7 +38,9 @@ const page = {
   ],
 } as unknown as DisplayPage;
 
-const mirrorPage = (container: HTMLElement) => container.querySelector('.layout-page-mirror');
+/** The editor's mirror, or a viewer's text layer (not its screen-reader layer). */
+const mirrorPage = (container: HTMLElement) =>
+  container.querySelector('.canvas-page-mirror:not(.canvas-page-mirror--reading) > .layout-page-mirror');
 
 test('swaps between the positioned and the plain-text mirror at idle time', async () => {
   const { container, rerender } = render(<CanvasPageMirror page={page} revision={0} full />);
@@ -60,7 +62,7 @@ test('swaps between the positioned and the plain-text mirror at idle time', asyn
 test('a selectable page holding a selection end keeps its positioned mirror', async () => {
   const { container, rerender } = render(<CanvasPageMirror page={page} revision={0} full selectable />);
   expect(container.querySelector('.canvas-page-mirror--selectable')).not.toBeNull();
-  const text = container.querySelector('.layout-run-text')?.firstChild as Text;
+  const text = mirrorPage(container)?.querySelector('.layout-run-text')?.firstChild as Text;
   document.getSelection()?.setBaseAndExtent(text, 1, text, 4);
 
   rerender(<CanvasPageMirror page={page} revision={0} full={false} selectable />);
@@ -105,9 +107,9 @@ test('a selection end in a plain-text page does not keep it from turning positio
   document.getSelection()?.removeAllRanges();
 });
 
-test("the editor's mirror reads a shaped line as one run, a viewer's text layer keeps one per glyph cluster", () => {
-  const text = 'Marker01 keeps';
-  const shaped = {
+/** One line shaped glyph by glyph, as the engine joins it. */
+function shapedPage(text: string): DisplayPage {
+  return {
     ...page,
     primitives: [
       {
@@ -125,10 +127,198 @@ test("the editor's mirror reads a shaped line as one run, a viewer's text layer 
       },
     ],
   } as unknown as DisplayPage;
-  const runs = (container: HTMLElement) =>
-    [...container.querySelectorAll('.layout-run-text')].map((run) => run.textContent);
-  const editor = render(<CanvasPageMirror page={shaped} revision={0} full />);
+}
+
+const runs = (container: Element) =>
+  [...container.querySelectorAll('.layout-run-text')].map((run) => run.textContent);
+
+test("the editor's mirror reads a shaped line as one run, a viewer's text layer keeps one per glyph cluster", () => {
+  const text = 'Marker01 keeps';
+  const editor = render(<CanvasPageMirror page={shapedPage(text)} revision={0} full />);
   expect(runs(editor.container)).toEqual([text]);
-  const viewer = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
-  expect(runs(viewer.container)).toEqual(Array.from(text));
+  const viewer = render(<CanvasPageMirror page={shapedPage(text)} revision={0} full selectable />);
+  expect(runs(viewer.container.querySelector('.canvas-page-mirror--selectable')!)).toEqual(Array.from(text));
+});
+
+test("a viewer's positioned page is read through the editor's mirror beside its aria-hidden text layer", async () => {
+  const shaped = shapedPage('Marker01 keeps');
+  const editor = render(<CanvasPageMirror page={shaped} revision={0} full />);
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(runs(layer)).toEqual(Array.from('Marker01 keeps'));
+  expect(reading.innerHTML).toBe(editor.container.querySelector('.canvas-page-mirror')!.innerHTML);
+  expect(runs(reading)).toEqual(['Marker01 keeps']);
+
+  // far from the viewport the plain-text page reads whole words itself
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.hasAttribute('aria-hidden')).toBe(false);
+  expect(reading.childElementCount).toBe(0);
+  expect(layer.textContent).toBe('Marker01 keeps');
+
+  rerender(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(runs(reading)).toEqual(['Marker01 keeps']);
+});
+
+test("a viewer's screen-reader layer is patched and shifted with its text layer", () => {
+  const twoLines = (last: string) =>
+    ({
+      ...page,
+      primitives: [
+        page.primitives[0],
+        { ...page.primitives[0], text: last, baselineY: 120, docStart: 7, docEnd: 7 + last.length, lineIndex: 1 },
+      ],
+    }) as unknown as DisplayPage;
+  const first = twoLines('world');
+  const { container, rerender } = render(<CanvasPageMirror page={first} revision={0} full selectable />);
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  const kept = reading.querySelector('.layout-run-text');
+
+  rerender(<CanvasPageMirror page={twoLines('worlds')} revision={0} full selectable />);
+  expect(reading.querySelector('.layout-run-text')).toBe(kept);
+  expect(runs(reading)).toEqual(['Hello', 'worlds']);
+
+  // a position shift rewrites both layers' positions in place
+  const shifted = twoLines('worlds');
+  rerender(<CanvasPageMirror page={shifted} revision={1} full selectable />);
+  for (const p of shifted.primitives) {
+    p.docStart! += 3;
+    p.docEnd! += 3;
+  }
+  rerender(<CanvasPageMirror page={shifted} revision={2} full selectable />);
+  expect(reading.querySelector('.layout-run-text')).toBe(kept);
+  const starts = [...container.querySelectorAll('.layout-run-text')].map((run) => run.getAttribute('data-doc-start'));
+  expect(starts).toEqual(['4', '10', '4', '10']);
+});
+
+test("a viewer's aria-hidden text layer keeps its links out of the Tab order", async () => {
+  const linked = { ...shapedPage('Read more') } as unknown as { primitives: Record<string, unknown>[] };
+  linked.primitives = [{ ...linked.primitives[0], href: 'https://example.com/more' }];
+  const shaped = linked as unknown as DisplayPage;
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  // one link per glyph cluster, none of them a Tab stop
+  expect(layer.querySelectorAll('a[href]').length).toBe('Read more'.length);
+  expect(layer.querySelectorAll('a[href]:not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])').length).toBe(0);
+  // the screen-reader layer's one link is
+  expect([...reading.querySelectorAll('a[href]')].map((link) => [link.textContent, link.getAttribute('tabindex')])).toEqual([
+    ['Read more', null],
+  ]);
+
+  // a plain-text page is read itself: its link is a Tab stop again
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect([...layer.querySelectorAll('a[href]')].map((link) => link.getAttribute('tabindex'))).toEqual([null]);
+});
+
+test("a viewer's ids resolve to its screen-reader layer, which comes first", () => {
+  const run = (text: string, docStart: number, extra: Record<string, unknown>) => ({
+    kind: 'text',
+    text,
+    x: 100,
+    baselineY: 100,
+    width: text.length * 8,
+    font: '400 16px Calibri',
+    color: '#000000',
+    docStart,
+    docEnd: docStart + text.length,
+    lineIndex: 0,
+    ...extra,
+  });
+  const noted = {
+    pageIndex: 0,
+    width: 800,
+    height: 1000,
+    primitives: [
+      run('Body', 1, { blockKey: 'body:p0' }),
+      run('1', 5, { blockKey: 'body:p0', x: 132, noteRef: { id: 1, kind: 'footnote' } }),
+      run('Head', 10, {
+        blockKey: 'body:t0:r0c0:p0',
+        baselineY: 200,
+        cell: { row: 0, col: 0, rowSpan: 1, colSpan: 1, isHeader: true, cellId: 'head-a' },
+        table: { tableId: 't0' },
+      }),
+    ],
+    noteAreas: [
+      {
+        kind: 'footnote',
+        y: 900,
+        height: 60,
+        noteIds: [1],
+        notes: [{ id: 1, label: '1' }],
+        primitives: [run('Note', 1, { blockKey: 'fn1:p0', groupId: 'footnote-1', baselineY: 920 })],
+      },
+    ],
+  } as unknown as DisplayPage;
+  const { container } = render(<CanvasPageMirror page={noted} revision={0} full selectable />);
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  // A browser's getElementById takes the first element in tree order with the
+  // id, as querySelector does (happy-dom's takes the first connected).
+  for (const id of ['oox-footnote-1', 'oox-noteref-footnote-1', 'head-a']) {
+    expect(container.querySelector('.canvas-page-mirror--selectable')!.querySelector(`[id="${id}"]`)).not.toBeNull();
+    expect(reading.contains(document.querySelector(`[id="${id}"]`))).toBe(true);
+  }
+});
+
+const tabStops = (layer: Element) =>
+  [...layer.querySelectorAll('a[href]')].map((link) => [link.textContent, link.getAttribute('tabindex')]);
+
+test("a viewer's page that goes plain and back takes its hidden layer's links out of the Tab order again", async () => {
+  const linked = { ...shapedPage('Go') } as unknown as { primitives: Record<string, unknown>[] };
+  linked.primitives = [{ ...linked.primitives[0], href: 'https://example.com/go' }];
+  const shaped = linked as unknown as DisplayPage;
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(tabStops(layer)).toEqual([['Go', null]]);
+
+  rerender(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(tabStops(layer)).toEqual([
+    ['G', '-1'],
+    ['o', '-1'],
+  ]);
+});
+
+test("a patched page keeps its hidden layer's replaced and added links out of the Tab order", () => {
+  const link = (text: string, docStart: number, line: number, href: string) => ({
+    ...page.primitives[0],
+    text,
+    width: text.length * 8,
+    baselineY: 100 + line * 20,
+    docStart,
+    docEnd: docStart + text.length,
+    lineIndex: line,
+    href,
+  });
+  const version = (...links: ReturnType<typeof link>[]) => ({ ...page, primitives: links }) as unknown as DisplayPage;
+  const kept = link('Kept', 1, 0, 'https://example.com/kept');
+  const { container, rerender } = render(
+    <CanvasPageMirror page={version(kept, link('Old', 6, 1, 'https://example.com/old'))} revision={0} full selectable />
+  );
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const first = layer.querySelector('a[href]');
+
+  // a new version replaces the second link and adds a third
+  rerender(
+    <CanvasPageMirror
+      page={version(kept, link('New', 6, 1, 'https://example.com/new'), link('Added', 10, 2, 'https://example.com/added'))}
+      revision={1}
+      full
+      selectable
+    />
+  );
+  expect(layer.querySelector('a[href]')).toBe(first);
+  expect(tabStops(layer)).toEqual([
+    ['Kept', '-1'],
+    ['New', '-1'],
+    ['Added', '-1'],
+  ]);
 });
