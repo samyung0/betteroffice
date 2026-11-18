@@ -17,7 +17,7 @@ const ROWS: u32 = 12;
 
 /// Column A wraps and is narrow. Row 3 has a custom height, row 6 is hidden,
 /// A7 anchors a one-row merge and A9 a merge over two rows; A5 joins C1 and
-/// D1, which don't wrap.
+/// D1, which don't wrap. A second sheet wraps in a wider column A.
 fn source() -> Vec<u8> {
     let mut model = WorkbookModel::default();
     model.styles.fonts = vec![Font::default()];
@@ -70,20 +70,38 @@ fn source() -> Vec<u8> {
         CellRange::new(CellRef::new(8, 0), CellRef::new(9, 0)),
     ];
     model.sheets.push(sheet);
+    let mut other = Sheet::new("Other");
+    other.col_widths.insert(0, 30.0);
+    for (row, value) in [(0, PARAGRAPH), (1, NOTE), (3, PARAGRAPH)] {
+        other.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: text(value),
+                style: Some(1),
+                ..Default::default()
+            },
+        );
+    }
+    model.sheets.push(other);
     ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap()
+}
+
+/// The active sheet, read through the sheet info the geometry is kept with.
+fn active(workbook: &Workbook) -> SheetId {
+    workbook.sheet_info().unwrap().active_sheet
 }
 
 /// The row's height in the geometry the workbook keeps for its active sheet.
 fn kept_height(workbook: &Workbook, row: u32) -> f32 {
     workbook
-        .cell_scroll_bounds(SheetId(0), CellRef::new(row, 0))
+        .cell_scroll_bounds(active(workbook), CellRef::new(row, 0))
         .unwrap()
         .3
 }
 
 fn fresh(workbook: &Workbook) -> GridGeometry {
     GridGeometry::new(
-        workbook.sheet(SheetId(0)).unwrap(),
+        workbook.sheet(active(workbook)).unwrap(),
         &workbook.model().styles,
     )
 }
@@ -94,9 +112,13 @@ fn fresh_height(workbook: &Workbook, row: u32) -> f32 {
 }
 
 fn edit(workbook: &mut Workbook, row: u32, text: &str) {
+    edit_on(workbook, SheetId(0), row, text);
+}
+
+fn edit_on(workbook: &mut Workbook, sheet: SheetId, row: u32, text: &str) {
     workbook
         .edit_cell(
-            SheetId(0),
+            sheet,
             CellRef::new(row, 0),
             text,
             CalculationOptions::default(),
@@ -246,4 +268,70 @@ fn a_value_change_in_an_unwrapped_cell_walks_no_rows() {
     let (builds, visits) = geometry_counters();
     assert_eq!(builds, 0);
     assert!(visits > 0);
+}
+
+/// Between a wrapped cell's edit and the next read of the geometry: a sheet
+/// switch and back, with an edit on the other sheet meanwhile.
+#[test]
+fn a_sheet_switch_before_the_read_refits_each_sheet_on_its_own() {
+    let mut workbook = Workbook::open(&source()).unwrap();
+    workbook.sheet_info().unwrap();
+    let note = kept_height(&workbook, 0);
+    edit(&mut workbook, 0, PARAGRAPH);
+    workbook.set_active_sheet(SheetId(1)).unwrap();
+    assert_eq!(active(&workbook), SheetId(1));
+    assert_fitted(&workbook);
+    // refit on the sheet it was edited on
+    edit_on(&mut workbook, SheetId(1), 1, PARAGRAPH);
+    assert_fitted(&workbook);
+    edit_on(&mut workbook, SheetId(1), 3, NOTE);
+    workbook.set_active_sheet(SheetId(0)).unwrap();
+    assert!(kept_height(&workbook, 0) > note * 2.0);
+    assert_fitted(&workbook);
+    workbook.set_active_sheet(SheetId(1)).unwrap();
+    assert_fitted(&workbook);
+}
+
+/// Between a wrapped cell's edit and the next read: undo, then undo and redo.
+#[test]
+fn an_undo_before_the_read_refits_to_the_restored_value() {
+    let mut workbook = Workbook::open(&source()).unwrap();
+    workbook.sheet_info().unwrap();
+    let note = kept_height(&workbook, 0);
+    edit(&mut workbook, 0, PARAGRAPH);
+    workbook.undo(CalculationOptions::default()).unwrap();
+    assert_near(kept_height(&workbook, 0), note);
+    assert_fitted(&workbook);
+    edit(&mut workbook, 4, NOTE);
+    workbook.undo(CalculationOptions::default()).unwrap();
+    workbook.redo(CalculationOptions::default()).unwrap();
+    assert_near(kept_height(&workbook, 4), note);
+    assert_fitted(&workbook);
+}
+
+/// Between a wrapped cell's edit and the next read: a peer's update, and a
+/// collaborative undo.
+#[test]
+fn a_remote_update_or_collaborative_undo_before_the_read_refits_from_the_merged_state() {
+    let bytes = source();
+    let mut local = Workbook::open_collaborative(&bytes, 7).unwrap();
+    let mut peer = Workbook::open_collaborative(&bytes, 8).unwrap();
+    local.sheet_info().unwrap();
+    let note = kept_height(&local, 0);
+    edit(&mut local, 0, PARAGRAPH);
+    edit(&mut peer, 10, PARAGRAPH);
+    local
+        .apply_update_v1(
+            &peer.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    for row in [0, 10] {
+        assert!(kept_height(&local, row) > note * 2.0);
+    }
+    assert_fitted(&local);
+    edit(&mut local, 11, PARAGRAPH);
+    local.undo(CalculationOptions::default()).unwrap();
+    assert_near(kept_height(&local, 11), note);
+    assert_fitted(&local);
 }
