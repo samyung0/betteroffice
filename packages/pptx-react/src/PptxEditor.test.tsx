@@ -10,7 +10,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
-import type { HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
+import type { DeckSnapshot, HitTestResult, PptxFontFace, PptxPresenceCursor, SlideDisplayList, TextBoxPrimitive } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { storyClipboard } from './clipboard';
@@ -592,6 +592,127 @@ describe('PptxEditor host integration', () => {
       context.mockRestore();
     }
   }, 30000);
+
+  it('reads and lays out only the slide a key edits', async () => {
+    const changes: DeckSnapshot[] = [];
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        file={fixture}
+        fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        onReady={(ready) => { api = ready; }}
+        onChange={(snapshot) => changes.push(snapshot)}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    const slides = api!.handle.snapshot().slides;
+    const target = slides.length - 1;
+    expect(target).toBeGreaterThan(1);
+    const shape = slides[target].shapes.find((item) => item.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    await act(async () => {
+      api!.selectText({ slide: target + 1, shapeId: shape.id, storyId: story.id, start: 0, end: 0 });
+    });
+    const input = view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+    const before = api!.handle.snapshot();
+    const decks = spyOn(api!.handle, 'snapshot');
+    const keyed = spyOn(api!.handle, 'snapshotWithLayoutKeys');
+    const read = spyOn(api!.handle, 'slideSnapshot');
+    const layouts = spyOn(api!.handle, 'layoutSlide');
+    try {
+      fireEvent.input(input, { target: { value: 'ab' } });
+      fireEvent.keyDown(input, { key: 'Backspace' });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(decks).not.toHaveBeenCalled();
+      expect(keyed).not.toHaveBeenCalled();
+      expect(read.mock.calls).toEqual([[target], [target], [target]]);
+      expect(layouts.mock.calls.map(([index]) => index)).toEqual([target, target, target]);
+    } finally {
+      decks.mockRestore();
+      keyed.mockRestore();
+      read.mockRestore();
+      layouts.mockRestore();
+    }
+    expect(changes).toHaveLength(3);
+    expect(changes[2]).not.toEqual(before);
+    expect(changes[2]).toEqual(api!.handle.snapshot());
+  }, 30000);
+
+  it('reports the engine deck and keeps untouched thumbnails across undo, IME, remote edits and peer slide changes between keys', async () => {
+    const fonts = [{ family: 'Liberation Sans', bytes: fontBytes }];
+    const changes: DeckSnapshot[] = [];
+    let api: PptxEditorApi | undefined;
+    const view = render(
+      <PptxEditor
+        file={fixture}
+        fonts={fonts}
+        clientId={9150}
+        onReady={(ready) => { api = ready; }}
+        onChange={(snapshot) => changes.push(snapshot)}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    const handle = api!.handle;
+    const peer = pptx.openPresentation(fixture, { clientId: 9151, fonts, initialUpdate: handle.encodeStateAsUpdate() });
+    const textOn = (slide: number) => {
+      const shape = handle.snapshot().slides[slide].shapes.find((item) => item.textStories.length > 0)!;
+      return { shape, story: shape.textStories[0] };
+    };
+    const active = textOn(0);
+    const last = handle.snapshot().slides.length - 1;
+    expect(last).toBeGreaterThan(1);
+    const select = () => act(() => {
+      expect(api!.selectText({ slide: 1, shapeId: active.shape.id, storyId: active.story.id, start: 0, end: 0 })).toBe(true);
+    });
+    const fromPeer = (edit: () => void) => {
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      edit();
+      act(() => { handle.applyUpdate(peer.encodeStateAsUpdate()); });
+    };
+    const input = () => view.getByTestId('pptx-text-input') as HTMLTextAreaElement;
+    const layouts = spyOn(handle, 'layoutSlide');
+    // each step lays out only the active slide's frame and the slides it changed, and
+    // the deck the editor reports afterwards is the engine's
+    const step = async (laidOut: number[], run: () => unknown) => {
+      layouts.mockClear();
+      const reported = changes.length;
+      await run();
+      await act(async () => {});
+      expect(layouts.mock.calls.map(([index]) => index).sort((a, b) => a - b)).toEqual(laidOut);
+      expect(changes.length).toBeGreaterThan(reported);
+      expect(changes[changes.length - 1]).toEqual(handle.snapshot());
+    };
+    const type = (text: string) => step([0], () => fireEvent.input(input(), { target: { value: text } }));
+    try {
+      await select();
+      await type('a');
+      await step([0], () => fireEvent.keyDown(input(), { key: 'z', ctrlKey: true }));
+      await step([0], () => fireEvent.keyDown(input(), { key: 'z', ctrlKey: true, shiftKey: true }));
+      await select();
+      await type('b');
+      await step([0], () => fireEvent.keyDown(input(), { key: 'Backspace' }));
+      await step([0], () => {
+        fireEvent.compositionStart(input());
+        input().value = '日本';
+        fireEvent.compositionEnd(input(), { data: '日本' });
+      });
+      await type('c');
+      await step([0], () => fromPeer(() => peer.insertText(active.story.id, 0, 'Same ')));
+      await type('d');
+      await step([0, last], () => fromPeer(() => peer.insertText(textOn(last).story.id, 0, 'Other ')));
+      await type('e');
+      let added = '';
+      await step([0, last + 1], () => fromPeer(() => { added = peer.insertSlide(last + 1).slideId; }));
+      await type('f');
+      await step([0, last, last + 1], () => fromPeer(() => peer.moveSlide(added, last)));
+      await type('g');
+      await step([0, last], () => fromPeer(() => peer.deleteSlide(added)));
+      await type('h');
+    } finally {
+      layouts.mockRestore();
+      peer.dispose();
+    }
+  }, 60000);
 
   it('keeps viewing mode navigable without exposing user mutations', async () => {
     let api: PptxEditorApi | undefined;

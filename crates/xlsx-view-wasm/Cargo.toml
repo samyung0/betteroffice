@@ -26,7 +26,7 @@ wasm-bindgen = "0.2"
 wasm-alloc.workspace = true
 
 [features]
-test-counters = ["xlsx-parse/test-counters"]
+test-counters = ["xlsx-parse/test-counters", "xlsx-render/test-counters"]
 
 [dev-dependencies]
 betteroffice-xlsx.workspace = true

@@ -44,6 +44,7 @@ import type {
   ShapeZOrderReceipt,
   SlideDisplayList,
   SlideReceipt,
+  SlideSnapshot,
   StorySnapshot,
   TextAnchorValue,
   TextReceipt,
@@ -81,6 +82,8 @@ export interface PresentationHandle extends CollaborationReplica {
   /** `snapshot` with each slide's layout key by slide id: a key stays the same
    *  while `layoutSlide` of that slide would return the same display list. */
   snapshotWithLayoutKeys(): { snapshot: DeckSnapshot; keys: Record<string, string> };
+  /** `snapshot().slides[slideIndex]`, read without the rest of the deck. */
+  slideSnapshot(slideIndex: number): SlideSnapshot;
   story(storyId: string): StorySnapshot;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
@@ -489,6 +492,9 @@ export function openPresentation(
     },
     snapshotWithLayoutKeys(): { snapshot: DeckSnapshot; keys: Record<string, string> } {
       return jsonWasmCall(() => withEmbeddedFonts().snapshotWithLayoutKeysJson(doc));
+    },
+    slideSnapshot(slideIndex: number): SlideSnapshot {
+      return jsonWasmCall(() => doc.slideSnapshotJson(slideIndex));
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));

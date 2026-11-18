@@ -662,23 +662,31 @@ function PptxEditorContent({
   }, []);
 
   /** `refreshAll` lays out every other slide's thumbnail again; `'changed'`
-   *  only those whose layout key moved, as after a remote update. */
+   *  only those whose layout key moved, as after a remote update; `'active'`
+   *  none, and reads only the active slide, which a key alone edited. */
   const refreshAt = useCallback(
     (
       requestedIndex?: number,
       notify = false,
-      refreshAll: boolean | 'changed' = false
+      refreshAll: boolean | 'changed' | 'active' = false
     ): EditorModel | null => {
       const handle = handleRef.current;
       if (!handle) return null;
       try {
         caretGoalRef.current = null;
         const previous = modelRef.current;
-        // Laying thumbnails out: learn the key each is laid out under.
-        const { snapshot, keys } =
-          refreshAll || !previous
-            ? handle.snapshotWithLayoutKeys()
-            : { snapshot: handle.snapshot(), keys: undefined };
+        let snapshot: DeckSnapshot;
+        let keys: Record<string, string> | undefined;
+        if (refreshAll === 'active' && previous?.snapshot.slides[previous.slideIndex]) {
+          const slides = [...previous.snapshot.slides];
+          slides[previous.slideIndex] = handle.slideSnapshot(previous.slideIndex);
+          snapshot = { ...previous.snapshot, slides };
+        } else if (refreshAll === true || refreshAll === 'changed' || !previous) {
+          // Laying thumbnails out: learn the key each is laid out under.
+          ({ snapshot, keys } = handle.snapshotWithLayoutKeys());
+        } else {
+          snapshot = handle.snapshot();
+        }
         const index = clampSlideIndex(
           requestedIndex ?? previous?.slideIndex ?? 0,
           snapshot.slides.length
@@ -692,7 +700,7 @@ function PptxEditorContent({
           const cachedKey = previous?.thumbnailKeys.get(id);
           const unchanged =
             refreshAll === 'changed' && cachedKey !== undefined && keys?.[id] === cachedKey;
-          if (cached && (!refreshAll || unchanged)) {
+          if (cached && (!refreshAll || refreshAll === 'active' || unchanged)) {
             thumbnails.set(id, cached);
             if (cachedKey !== undefined) thumbnailKeys.set(id, cachedKey);
           } else {
@@ -1926,7 +1934,7 @@ function PptxEditorContent({
     setSelection(selectionRef.current);
     setShapeSelection(null);
     recentClickRef.current = null;
-    refreshAt(undefined, true);
+    refreshAt(undefined, true, 'active');
   };
 
   /** Ends the engine's typing run: the next edit is a new undo step. */

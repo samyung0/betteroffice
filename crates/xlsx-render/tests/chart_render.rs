@@ -484,3 +484,99 @@ fn a_drawable_chart_is_not_marked_as_a_placeholder() {
             .any(|command| matches!(command, DrawCmd::Path { .. }))
     );
 }
+
+/// The frame paints every cell fill (row, column and cell styles, patterns, a
+/// merged cell, a frozen pane) before its first other command, and only
+/// drawings fill after it: the cell editor reads a cell's fill from that
+/// leading run (Q754 B).
+#[test]
+fn cell_fills_precede_every_other_command() {
+    let mut wb = Workbook::default();
+    let mut fill = |value: Value| {
+        let mut format = wb.styles.cell_format(None);
+        format.fill = serde_json::from_value(value).unwrap();
+        wb.styles.intern_cell_format(&format).unwrap().unwrap()
+    };
+    let solid = fill(json!({"Solid": {"Rgb": "#c6efce"}}));
+    let pattern = fill(json!({"Pattern": {
+        "pattern": "gray125", "fg": {"Rgb": "#000000"}, "bg": {"Rgb": "#ffffff"}
+    }}));
+    let column = fill(json!({"Solid": {"Rgb": "#ff0000"}}));
+    let row = fill(json!({"Solid": {"Rgb": "#0000ff"}}));
+    let mut sheet = Sheet::new("Fills");
+    sheet.col_styles.push(xlsx_model::ColStyle {
+        first: 4,
+        last: 4,
+        xf: column,
+    });
+    sheet.row_styles.insert(6, row);
+    for (row, col, style) in [
+        (0, 0, solid),
+        (1, 1, solid),
+        (2, 2, pattern),
+        (3, 4, pattern),
+        (4, 1, pattern),
+    ] {
+        sheet.set_cell(
+            CellRef::new(row, col),
+            SheetCell {
+                value: CellValue::Text {
+                    value: "text".into(),
+                },
+                style: Some(style),
+                ..Default::default()
+            },
+        );
+    }
+    sheet.merges.push(xlsx_model::CellRange::new(
+        CellRef::new(4, 1),
+        CellRef::new(5, 2),
+    ));
+    sheet.freeze_pane = Some(FreezePane::new(1, 1, CellRef::new(1, 1)));
+    sheet.charts.push(absolute_chart());
+    wb.sheets.push(sheet);
+    let display_list = build_display_list_with_charts(
+        &wb,
+        SheetId(0),
+        &Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 400.0,
+        },
+        |_| Ok::<_, RenderError>(chart_space()),
+    )
+    .unwrap();
+    assert!(!display_list.charts.is_empty());
+    let is_fill = |command: &DrawCmd| {
+        matches!(
+            command,
+            DrawCmd::FillRect { .. } | DrawCmd::PatternFill { .. }
+        )
+    };
+    let first_other = display_list
+        .commands
+        .iter()
+        .position(|command| !is_fill(command))
+        .unwrap();
+    let leading = &display_list.commands[..first_other];
+    assert_eq!(
+        leading
+            .iter()
+            .filter(|command| matches!(command, DrawCmd::PatternFill { .. }))
+            .count(),
+        3
+    );
+    for color in ["#c6efce", "#ff0000", "#0000ff"] {
+        assert!(leading.iter().any(|command| matches!(
+            command,
+            DrawCmd::FillRect { color: painted, .. } if painted.eq_ignore_ascii_case(color)
+        )));
+    }
+    let later: Vec<_> = display_list.commands[first_other..]
+        .iter()
+        .filter(|command| is_fill(command))
+        .collect();
+    assert!(!later.is_empty());
+    assert!(later.iter().all(|command| is_chart_command(command)));
+}

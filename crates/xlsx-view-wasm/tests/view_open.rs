@@ -78,6 +78,36 @@ fn a_view_open_captures_only_the_sheet_that_names_sheet_protection() {
     assert!(active_sheet_protected(&document));
 }
 
+#[cfg(feature = "test-counters")]
+#[test]
+fn a_view_builds_each_sheets_grid_geometry_once() {
+    use xlsx_render::geometry::{geometry_counters, reset_geometry_counters};
+    let mut document = open_view(&with_protected_sheet());
+    reset_geometry_counters();
+    let viewport = r#"{"x":0,"y":0,"width":1600,"height":1000}"#;
+    let scrolled = r#"{"x":0,"y":400,"width":1600,"height":1000}"#;
+    for sheet in 0..2 {
+        document
+            .set_active_sheet(sheet)
+            .unwrap_or_else(|_| panic!("no sheet {sheet}"));
+        for viewport in [viewport, scrolled] {
+            document
+                .sheet_info_json()
+                .unwrap_or_else(|_| panic!("no sheet info"));
+            document
+                .display_list_json(viewport)
+                .unwrap_or_else(|_| panic!("no display list"));
+            document
+                .chart_at_point_json(&format!(r#"{{"viewport":{viewport},"x":200,"y":100}}"#))
+                .unwrap_or_else(|_| panic!("no chart hit"));
+            document
+                .cell_position_json(r#"{"sheet":0,"row":5,"col":3}"#)
+                .unwrap_or_else(|_| panic!("no cell position"));
+        }
+        assert_eq!(geometry_counters().0, u64::from(sheet) + 1);
+    }
+}
+
 #[test]
 fn a_package_broken_only_in_a_part_view_never_reads_opens_in_view_not_in_edit() {
     let whole = with_protected_sheet();
@@ -115,4 +145,70 @@ fn a_view_serves_each_chart_part_as_the_full_package_does() {
         assert!(bytes.is_some_and(|bytes| !bytes.is_empty()));
         assert_eq!(bytes, preserved.package.part_bytes(&chart.part));
     }
+}
+
+/// The geometry a view keeps for its open draws and hit-tests exactly what a
+/// freshly built one does (Q691 R2), on a sheet with charts, merges, a frozen
+/// pane and hidden tracks.
+#[test]
+fn a_views_kept_geometry_draws_and_hits_as_a_fresh_one() {
+    use xlsx_model::{SheetChart, SheetId};
+    use xlsx_render::{RenderError, build_display_list_with_charts, chart_at_point, chart_regions};
+
+    let mut parts = ooxml_opc::unzip_parts(FIXTURE).unwrap();
+    rewrite(&mut parts, "xl/worksheets/sheet1.xml", |text| {
+        text.replace(
+            "</sheetData>",
+            r#"</sheetData><mergeCells count="2"><mergeCell ref="D2:E4"/><mergeCell ref="A6:C6"/></mergeCells>"#,
+        )
+    });
+    let document = open_view(&parts);
+    let viewed = xlsx_parse::parse_workbook_for_view(parts).unwrap();
+    let workbook = &viewed.workbook;
+    let sheet = &workbook.sheets[0];
+    assert!(sheet.freeze_pane.is_some());
+    assert_eq!(sheet.merges.len(), 2);
+    assert_eq!(sheet.charts.len(), 4);
+    let resolve = |chart: &SheetChart| {
+        let bytes = viewed.package.part_bytes(&chart.part).ok_or_else(|| {
+            RenderError::ChartPartMissing {
+                part: chart.part.clone(),
+            }
+        })?;
+        xlsx_parse::preserved_chart_space(bytes, workbook, &sheet.name, &workbook.styles.theme)
+            .ok_or_else(|| RenderError::ChartParseFailed {
+                part: chart.part.clone(),
+            })
+    };
+    let mut hits = 0;
+    for (x, y) in [(0.0, 0.0), (0.0, 140.0), (90.0, 420.0)] {
+        let viewport = xlsx_render::Viewport {
+            x,
+            y,
+            width: 1200.0,
+            height: 800.0,
+        };
+        let json = format!(r#"{{"x":{x},"y":{y},"width":1200,"height":800}}"#);
+        let fresh =
+            build_display_list_with_charts(workbook, SheetId(0), &viewport, resolve).unwrap();
+        assert!(!fresh.charts.is_empty());
+        assert_eq!(
+            document
+                .display_list_json(&json)
+                .unwrap_or_else(|_| panic!("no display list")),
+            serde_json::to_string(&fresh).unwrap()
+        );
+        let regions = chart_regions(sheet, &workbook.styles, &viewport).unwrap();
+        for px in (0..12).map(|step| step as f32 * 100.0 + 5.0) {
+            for py in (0..8).map(|step| step as f32 * 100.0 + 5.0) {
+                let fresh = serde_json::to_string(&chart_at_point(&regions, px, py)).unwrap();
+                let kept = document
+                    .chart_at_point_json(&format!(r#"{{"viewport":{json},"x":{px},"y":{py}}}"#))
+                    .unwrap_or_else(|_| panic!("no chart hit"));
+                assert_eq!(kept, fresh, "hit at {px},{py} in {json}");
+                hits += usize::from(fresh != "null");
+            }
+        }
+    }
+    assert!(hits > 0);
 }

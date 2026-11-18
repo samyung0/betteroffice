@@ -14,6 +14,7 @@ categories = ["parser-implementations", "rendering"]
 [features]
 default = ["raster"]
 raster = ["dep:xlsx-raster"]
+test-counters = ["xlsx-render/test-counters"]
 
 [dependencies]
 ooxml-drawingml = { workspace = true, features = ["chart"] }

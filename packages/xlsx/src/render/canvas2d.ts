@@ -74,22 +74,37 @@ const covers = (outer: Rect, inner: Rect) =>
   outer.x + outer.w >= inner.x + inner.w - 0.5 &&
   outer.y + outer.h >= inner.y + inner.h - 0.5;
 
+/** The share of a pattern's tile its foreground covers. */
+const PATTERN_COVERAGE = Object.fromEntries(
+  Object.entries(PATTERN_MASKS).map(([pattern, mask]) => [
+    pattern,
+    mask.reduce((bits, row) => bits + row.toString(2).split('1').length - 1, 0) / 64,
+  ])
+) as Record<PatternFillCmd['pattern'], number>;
+
+/** A pattern as one colour: its foreground and background mixed by coverage. */
+function patternColor(cmd: PatternFillCmd): string {
+  const share = PATTERN_COVERAGE[cmd.pattern];
+  const fg = Number.parseInt(cmd.fg.slice(1, 7), 16);
+  const bg = Number.parseInt(cmd.bg.slice(1, 7), 16);
+  const channel = (shift: number) =>
+    Math.round(((fg >> shift) & 255) * share + ((bg >> shift) & 255) * (1 - share));
+  return `#${((channel(16) << 16) | (channel(8) << 8) | channel(0)).toString(16).padStart(6, '0')}`;
+}
+
 /**
  * The colour {@link paintDisplayList} fills `cell` with: the last opaque fill
- * painted over the whole cell, else the sheet's white. A pattern fill counts
- * as none.
+ * painted over the whole cell, a pattern as its two colours mixed by coverage
+ * (Q754), else the sheet's white. Only the cells' own fills count: the frame
+ * paints them first, and grid lines, text and drawings (charts) above them.
  */
 export function cellFill(dl: DisplayList, cell: Rect): string {
   let fill = '#ffffff';
   for (const cmd of dl.commands) {
-    if (
-      cmd.op === 'fillRect' &&
-      OPAQUE_COLOR.test(cmd.color) &&
-      covers(cmd, cell) &&
-      (!cmd.clip || covers(cmd.clip, cell))
-    ) {
-      fill = cmd.color;
-    }
+    if (cmd.op !== 'fillRect' && cmd.op !== 'patternFill') break;
+    if (!covers(cmd, cell) || (cmd.clip && !covers(cmd.clip, cell))) continue;
+    if (cmd.op === 'patternFill') fill = patternColor(cmd);
+    else if (OPAQUE_COLOR.test(cmd.color)) fill = cmd.color;
   }
   return fill;
 }
