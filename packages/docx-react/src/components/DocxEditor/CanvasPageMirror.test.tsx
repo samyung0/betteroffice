@@ -264,3 +264,61 @@ test("a viewer's ids resolve to its screen-reader layer, which comes first", () 
     expect(reading.contains(document.querySelector(`[id="${id}"]`))).toBe(true);
   }
 });
+
+const tabStops = (layer: Element) =>
+  [...layer.querySelectorAll('a[href]')].map((link) => [link.textContent, link.getAttribute('tabindex')]);
+
+test("a viewer's page that goes plain and back takes its hidden layer's links out of the Tab order again", async () => {
+  const linked = { ...shapedPage('Go') } as unknown as { primitives: Record<string, unknown>[] };
+  linked.primitives = [{ ...linked.primitives[0], href: 'https://example.com/go' }];
+  const shaped = linked as unknown as DisplayPage;
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(tabStops(layer)).toEqual([['Go', null]]);
+
+  rerender(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(tabStops(layer)).toEqual([
+    ['G', '-1'],
+    ['o', '-1'],
+  ]);
+});
+
+test("a patched page keeps its hidden layer's replaced and added links out of the Tab order", () => {
+  const link = (text: string, docStart: number, line: number, href: string) => ({
+    ...page.primitives[0],
+    text,
+    width: text.length * 8,
+    baselineY: 100 + line * 20,
+    docStart,
+    docEnd: docStart + text.length,
+    lineIndex: line,
+    href,
+  });
+  const version = (...links: ReturnType<typeof link>[]) => ({ ...page, primitives: links }) as unknown as DisplayPage;
+  const kept = link('Kept', 1, 0, 'https://example.com/kept');
+  const { container, rerender } = render(
+    <CanvasPageMirror page={version(kept, link('Old', 6, 1, 'https://example.com/old'))} revision={0} full selectable />
+  );
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const first = layer.querySelector('a[href]');
+
+  // a new version replaces the second link and adds a third
+  rerender(
+    <CanvasPageMirror
+      page={version(kept, link('New', 6, 1, 'https://example.com/new'), link('Added', 10, 2, 'https://example.com/added'))}
+      revision={1}
+      full
+      selectable
+    />
+  );
+  expect(layer.querySelector('a[href]')).toBe(first);
+  expect(tabStops(layer)).toEqual([
+    ['Kept', '-1'],
+    ['New', '-1'],
+    ['Added', '-1'],
+  ]);
+});
