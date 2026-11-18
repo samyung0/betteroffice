@@ -801,7 +801,14 @@ fn collect_paragraph_font_requirements(
             // Measurement takes the East Asian slot's family, but the display
             // list paints the run's characters along the run's own family
             // (`fmt.font_family`), whose face is the one they need (Q762 A).
-            collector.east_asian(run_family, bold, italic);
+            // Only Han, kana and Hangul count: the hint alone also routes
+            // curly quotes and dashes here, which a Latin face draws (Q772 A).
+            if !hint
+                || ooxml_text::font_slot_characters(content, false, false)
+                    .any(|(_, slot)| slot == 2)
+            {
+                collector.east_asian(run_family, bold, italic);
+            }
         }
         // Text typed into a tab's or field's complex-script run resolves as text does.
         if slot_use.complex_script {
@@ -8286,6 +8293,16 @@ mod tests {
         assert_eq!(
             flagged(json!([{"kind": "text", "text": "你好", "fontFamily": "Calibri"}])),
             ["calibri|0|0"]
+        );
+        // The East Asian hint routes curly quotes to the slot, but Times New
+        // Roman paints them: only the Han set in 宋体 flags its family (Q772 A).
+        let hinted = json!({"ascii": "Times New Roman", "hAnsi": "Times New Roman", "eastAsia": "宋体", "hint": "eastAsia"});
+        assert_eq!(
+            flagged(json!([
+                {"kind": "text", "text": "“Hello”", "fontFamily": "Times New Roman", "fontSlots": hinted},
+                {"kind": "text", "text": "中文", "fontFamily": "宋体", "fontSlots": {"eastAsia": "宋体"}}
+            ])),
+            ["宋体|0|0"]
         );
     }
 
