@@ -8,6 +8,8 @@ export interface ProgressiveFontFace {
   /** The face with every outline loaded so far. */
   bytes(): ArrayBuffer;
   ensureGlyphs(glyphIds: Iterable<number>): Promise<number>;
+  /** Starts loading the core chunk before anything asks for it. */
+  prefetchCore(): void;
   ensureText(text: string): Promise<number>;
   /** Copies of the decoded files loaded so far, which another realm's open of the face can take. */
   files(): Map<string, ArrayBuffer>;
@@ -260,6 +262,8 @@ export class TextMeasureFontRegistry {
    */
   private bufferIds = new WeakMap<ArrayBuffer, Promise<number>>();
   private loaderIds = new WeakMap<() => Promise<ArrayBuffer>, Promise<number>>();
+  /** Each sliced face's open, so a caller that wants its core can ask after another opened it. */
+  private faceOpens = new WeakMap<BundledFontLoader, Promise<ProgressiveFontFace>>();
   private scriptIds = new Map<FontScript, Promise<ScriptResolution>>();
   /** Settled per-script results for the synchronous view. */
   private scriptResults = new Map<FontScript, ScriptResolution>();
@@ -286,7 +290,7 @@ export class TextMeasureFontRegistry {
   private failedSlices = new Map<string, unknown>();
   /** Failures already reported, so a remembered one reaches `onError` once. */
   private reported = new WeakSet<object>();
-  private readonly progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+  private readonly progressive?: (slices: SliceLocation, options: { core: boolean }) => Promise<ProgressiveFontFace>;
   private readonly onError?: (error: Error) => void;
 
   /**
@@ -298,7 +302,7 @@ export class TextMeasureFontRegistry {
   constructor(sink: TextEngineFontSink, opts?: {
     bundled?: BundledFontProviderSource;
     baseLatin?: BundledFontProviderSource;
-    progressive?: (slices: SliceLocation) => Promise<ProgressiveFontFace>;
+    progressive?: (slices: SliceLocation, options: { core: boolean }) => Promise<ProgressiveFontFace>;
     onError?: (error: Error) => void;
   }) {
     this.sink = sink;
@@ -366,17 +370,45 @@ export class TextMeasureFontRegistry {
   }
 
   /**
-   * Lazily resolves and registers a font chain. Concurrent calls share work;
-   * failed registrations remain retryable.
+   * Where East Asian characters painted along each of these families' chains
+   * go first: the family's own sliced face (`chains`, in order) or, past faces
+   * without CJK, the first CJK script fallback (`scripts`). A family with an
+   * embedded face goes to neither.
    */
-  getFontIdChain(family: string, bold: boolean, italic: boolean): Promise<number[]> {
+  async eastAsianFaces(
+    families: ReadonlyArray<{ family: string; bold: boolean; italic: boolean; scripts?: readonly FontScript[] }>
+  ): Promise<{ chains: boolean[]; scripts: Set<FontScript> }> {
+    const scripts = new Set<FontScript>();
+    if (families.length === 0) return { chains: [], scripts };
+    const bundled = await this.bundled();
+    const chains = families.map(({ family, bold, italic, scripts: own = [] }) => {
+      if ([this.facesByFamily, this.appFacesByFamily].some((byFamily) => this.pickEmbeddedFace(family, bold, italic, byFamily))) {
+        return false;
+      }
+      let sliced = false;
+      try {
+        sliced = bundled?.resolve(family, bold, italic)?.slices !== undefined;
+      } catch {}
+      const script = sliced ? undefined : own.find((name) => name.startsWith('cjk-'));
+      if (script) scripts.add(script);
+      return sliced;
+    });
+    return { chains, scripts };
+  }
+
+  /**
+   * Lazily resolves and registers a font chain. Concurrent calls share work;
+   * failed registrations remain retryable. With `core`, the family's own
+   * sliced face starts loading its core chunk at once.
+   */
+  getFontIdChain(family: string, bold: boolean, italic: boolean, core = false): Promise<number[]> {
     const key = chainKey(family, bold, italic);
     let chain = this.chains.get(key);
     if (!chain) {
       const chains = this.chains;
       const results = this.chainResults;
       const generation = this.generation;
-      const pending = this.resolveChain(family, bold, italic);
+      const pending = this.resolveChain(family, bold, italic, core);
       pending.then(
         (resolution) => {
           if (generation !== this.generation) return;
@@ -491,10 +523,13 @@ export class TextMeasureFontRegistry {
     return previous.length !== ids.length || previous.some((id, index) => ids[index] !== id);
   }
 
-  /** Resolves unique script fallbacks in order; stable misses cache and failures retry. */
-  getScriptFallbackIds(scripts: FontScript[]): Promise<number[]> {
+  /**
+   * Resolves unique script fallbacks in order; stable misses cache and failures
+   * retry. With `core`, their sliced faces start loading their core chunk at once.
+   */
+  getScriptFallbackIds(scripts: FontScript[], core = false): Promise<number[]> {
     const unique = [...new Set(scripts)];
-    return Promise.all(unique.map((script) => this.resolveScript(script))).then((resolutions) => {
+    return Promise.all(unique.map((script) => this.resolveScript(script, core))).then((resolutions) => {
       const out: number[] = [];
       for (const { id } of resolutions) {
         if (id !== null && !out.includes(id)) out.push(id);
@@ -548,6 +583,7 @@ export class TextMeasureFontRegistry {
     this.lastResortIds = new Map();
     this.bufferIds = new WeakMap();
     this.loaderIds = new WeakMap();
+    this.faceOpens = new WeakMap();
     this.progressiveIds = new Map();
     this.failedSlices = new Map();
     this.scriptIds = new Map();
@@ -565,7 +601,8 @@ export class TextMeasureFontRegistry {
   private async resolveChain(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    core: boolean
   ): Promise<ChainResolution> {
     const key = chainKey(family, bold, italic);
     const ids: number[] = [];
@@ -614,7 +651,7 @@ export class TextMeasureFontRegistry {
       retryable = true;
     }
 
-    const primary = loader && this.registerBundled(key, loader, family);
+    const primary = loader && this.registerBundled(key, loader, family, core && !embedded.some(Boolean));
     const eagerLastResort = lastResort && !lastResort.onlyIfPrimaryFails
       ? this.registerLastResort(key, lastResort, family) : undefined;
     const glyphFallback = coverage && this.registerLastResort(`${key}|coverage`, coverage, family);
@@ -771,7 +808,7 @@ export class TextMeasureFontRegistry {
    * host without the optional CJK add-on loads the face whole, which stands in
    * a Latin face.
    */
-  private registerFaceLoader(loader: BundledFontLoader): Promise<number> {
+  private registerFaceLoader(loader: BundledFontLoader, core = false): Promise<number> {
     const open = this.progressive;
     const slices = loader.slices;
     if (open === undefined || slices === undefined) return this.registerLoader(loader);
@@ -786,7 +823,9 @@ export class TextMeasureFontRegistry {
         if (failures.has(key)) throw failures.get(key);
         let face: ProgressiveFontFace;
         try {
-          face = await open(slices);
+          const opening = open(slices, { core });
+          this.faceOpens.set(loader, opening);
+          face = await opening;
         } catch (error) {
           if ((error as { name?: unknown } | null)?.name !== 'MissingCjkAddonError') {
             failures.set(key, error);
@@ -806,6 +845,9 @@ export class TextMeasureFontRegistry {
       })();
       evictFailedPromise(ids, loader, pending, () => false);
       ids.set(loader, pending);
+    } else if (core) {
+      // Another path (a script fallback, say) opened the face without its core.
+      void this.faceOpens.get(loader)?.then((face) => face.prefetchCore(), () => {});
     }
     return pending;
   }
@@ -849,14 +891,15 @@ export class TextMeasureFontRegistry {
   private registerBundled(
     key: string,
     loader: BundledFontLoader,
-    family: string
+    family: string,
+    core: boolean
   ): Promise<number | null> {
     let pending = this.bundledIds.get(key);
     if (!pending) {
       const ids = this.bundledIds;
       pending = (async () => {
         try {
-          const base = await this.registerFaceLoader(loader);
+          const base = await this.registerFaceLoader(loader, core);
           return this.measuredAs(base, loader.measureAs ?? family);
         } catch (error) {
           this.failed(`[fontRegistry] bundled face for "${family}" failed to load or register; falling back`, error);
@@ -895,7 +938,7 @@ export class TextMeasureFontRegistry {
     return pending;
   }
 
-  private resolveScript(script: FontScript): Promise<ScriptResolution> {
+  private resolveScript(script: FontScript, core: boolean): Promise<ScriptResolution> {
     let pending = this.scriptIds.get(script);
     if (!pending) {
       const ids = this.scriptIds;
@@ -917,7 +960,7 @@ export class TextMeasureFontRegistry {
         }
         if (loader) {
           try {
-            id = await this.registerFaceLoader(loader);
+            id = await this.registerFaceLoader(loader, core);
           } catch (error) {
             retryable = true;
             this.failed(`[fontRegistry] script-fallback face for "${script}" failed to load or register; falling back`, error);

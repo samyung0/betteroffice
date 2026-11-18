@@ -1,6 +1,6 @@
 import type { ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
-import type { FontDecoder } from '@betteroffice/fonts';
+import type { FontDecoder, SliceLocation } from '@betteroffice/fonts';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
 import {
   excludeHostedFontFamilies,
@@ -51,6 +51,8 @@ export interface ResidentFontRequirement {
   scripts?: FontScript[];
   characters?: string[];
   characterBits?: string;
+  /** Some run paints East Asian characters along this family's chain. */
+  eastAsian?: boolean;
 }
 
 /** @internal */
@@ -67,6 +69,7 @@ function mergeRequirements(requirements: ResidentFontRequirement[]): ResidentFon
       ...known,
       scripts: [...new Set([...(known.scripts ?? []), ...(requirement.scripts ?? [])])],
       characters: [...new Set([...(known.characters ?? []), ...characters])],
+      ...(requirement.eastAsian && { eastAsian: true }),
     } : { ...requirement, characters });
   }
   return [...merged.values()];
@@ -155,15 +158,20 @@ export function createRustMeasureSource(options: {
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), progressive: options.progressive
-      ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
-        const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
+      ? async (slices, open) => {
+        const location = slices as SliceLocation;
+        // The index's URL resolves beside the module that opens the face, so
+        // its request goes out with the other faces'.
+        void location.url(location.ref.index).catch(() => {});
+        const { openSlicedFace, sliceSourceOf } = await import('@betteroffice/fonts/progressive');
+        const face = await openSlicedFace(location, open);
         if (engine.registerSlicedFont) {
           const source = await sliceSourceOf(face);
           if (!source) throw new Error('A sliced face opened without file URLs cannot load its outlines in a worker');
           sources.set(face, source);
         }
         return face;
-      })
+      }
       : undefined,
     onError: options.onError },
   );
@@ -183,6 +191,12 @@ export function createRustMeasureSource(options: {
 
     async prepareFontRequirements(requirements): Promise<boolean> {
       requirements = mergeRequirements(requirements);
+      // The face that paints East Asian text first starts its core chunk while
+      // layout runs (Q758 B, Q762 A); one that fills only what earlier faces
+      // lack waits.
+      const eastAsian = requirements.filter((requirement) => requirement.eastAsian);
+      const cores = await registry.eastAsianFaces(eastAsian);
+      const coreChains = new Set(eastAsian.filter((_, index) => cores.chains[index]));
       const settled = await Promise.all(
         requirements.flatMap((requirement) => [
           (async () => {
@@ -198,6 +212,7 @@ export function createRustMeasureSource(options: {
                 requirement.family,
                 requirement.bold,
                 requirement.italic,
+                coreChains.has(requirement),
               );
               return true;
             } catch {
@@ -215,7 +230,7 @@ export function createRustMeasureSource(options: {
                 undefined
               )
                 return false;
-              await registry.getScriptFallbackIds([script]);
+              await registry.getScriptFallbackIds([script], cores.scripts.has(script));
               return true;
             } catch {
               return false;

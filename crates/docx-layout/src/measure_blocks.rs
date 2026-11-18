@@ -237,6 +237,9 @@ pub struct FontRequirement {
         skip_serializing_if = "FontCharacters::is_empty"
     )]
     pub characters: FontCharacters,
+    /// Some run paints East Asian characters with this family's chain.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub east_asian: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -486,6 +489,7 @@ impl FontRequirementCollector {
         for (key, requirement) in &self.implicit {
             if let Some(named) = self.named.get_mut(key) {
                 named.characters.extend(&requirement.characters);
+                named.east_asian |= requirement.east_asian;
             }
         }
         self.implicit.clear();
@@ -502,10 +506,14 @@ impl FontRequirementCollector {
         for (key, requirement) in implicit {
             if let Some(named) = named.get_mut(&key) {
                 named.characters.extend(&requirement.characters);
+                named.east_asian |= requirement.east_asian;
             } else {
                 requirements
                     .entry(key)
-                    .and_modify(|kept| kept.characters.extend(&requirement.characters))
+                    .and_modify(|kept| {
+                        kept.characters.extend(&requirement.characters);
+                        kept.east_asian |= requirement.east_asian;
+                    })
                     .or_insert(requirement);
             }
         }
@@ -513,6 +521,7 @@ impl FontRequirementCollector {
             match requirements.entry(key) {
                 Entry::Occupied(mut kept) => {
                     kept.get_mut().characters.extend(&requirement.characters);
+                    kept.get_mut().east_asian |= requirement.east_asian;
                     let scripts = &mut kept.get_mut().scripts;
                     for script in requirement.scripts {
                         if !scripts.contains(&script) {
@@ -540,6 +549,12 @@ impl FontRequirementCollector {
     fn reach(&mut self, family: &str, bold: bool, italic: bool, scripts: &[String]) {
         let key = add_font_requirement(family, bold, italic, scripts, &mut self.implicit);
         self.used.insert(key);
+    }
+
+    /// A family and style whose chain paints East Asian characters.
+    fn east_asian(&mut self, family: &str, bold: bool, italic: bool) {
+        let key = add_font_requirement(family, bold, italic, &[], &mut self.implicit);
+        self.implicit.get_mut(&key).unwrap().east_asian = true;
     }
 
     fn characters(&mut self, family: &str, bold: bool, italic: bool, characters: FontCharacters) {
@@ -652,6 +667,7 @@ fn add_font_requirement(
             italic,
             scripts: Vec::new(),
             characters: FontCharacters::default(),
+            east_asian: false,
         });
     for script in scripts {
         if !requirement.scripts.contains(script) {
@@ -782,6 +798,10 @@ fn collect_paragraph_font_requirements(
                 italic,
                 scripts,
             );
+            // Measurement takes the East Asian slot's family, but the display
+            // list paints the run's characters along the run's own family
+            // (`fmt.font_family`), whose face is the one they need (Q762 A).
+            collector.east_asian(run_family, bold, italic);
         }
         // Text typed into a tab's or field's complex-script run resolves as text does.
         if slot_use.complex_script {
@@ -8221,6 +8241,52 @@ mod tests {
                 "{document}"
             );
         }
+    }
+
+    #[test]
+    fn flags_the_run_family_that_paints_east_asian_characters() {
+        let flagged = |runs: Value| -> Vec<String> {
+            let block: LayoutBlock =
+                serde_json::from_value(json!({"kind": "paragraph", "id": "p", "runs": runs}))
+                    .unwrap();
+            collect_font_requirements([&block], "Calibri")
+                .into_iter()
+                .filter(|requirement| requirement.east_asian)
+                .map(|requirement| requirement.key)
+                .collect()
+        };
+        let slots = json!({"ascii": "Calibri", "hAnsi": "Calibri", "eastAsia": "SimSun"});
+        let run = |text: &str, extra: Value| {
+            let mut run = json!({"kind": "text", "text": text, "fontFamily": "Calibri", "fontSlots": slots, "language": {"eastAsia": "zh-CN"}});
+            run.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            run
+        };
+        // SimSun measures the Han of a Calibri run, but Calibri's chain paints it.
+        assert_eq!(
+            flagged(json!([run("Hello 你好", json!({}))])),
+            ["calibri|0|0"]
+        );
+        assert_eq!(
+            flagged(json!([
+                run("Hello ", json!({})),
+                run("你好", json!({"bold": true}))
+            ])),
+            ["calibri|1|0"]
+        );
+        // Latin text paints no East Asian characters.
+        assert!(flagged(json!([run("Hello", json!({}))])).is_empty());
+        // A run in SimSun paints its Han along SimSun's chain.
+        assert_eq!(
+            flagged(json!([run("你好", json!({"fontFamily": "SimSun"}))])),
+            ["simsun|0|0"]
+        );
+        // A run naming no East Asian family measures its Han with its text family.
+        assert_eq!(
+            flagged(json!([{"kind": "text", "text": "你好", "fontFamily": "Calibri"}])),
+            ["calibri|0|0"]
+        );
     }
 
     #[test]

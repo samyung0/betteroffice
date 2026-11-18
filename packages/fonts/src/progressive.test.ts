@@ -132,6 +132,36 @@ test('a progressive face loads index and skeleton, then only the chunks of the g
   expect(sha(face.bytes())).toBe(index.sha256);
 });
 
+test('a face opened with its core requests it beside the skeleton and installs it only when asked; a failed core waits for retryFailed', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let space = 0;
+  while (skeleton.chunkOfGlyph(space) !== 0) space += 1;
+  const plain = await openProgressiveFace(jpRef, transport([]));
+
+  const reads: string[] = [];
+  const face = await openProgressiveFace(jpRef, transport(reads), { core: true });
+  expect(reads.sort()).toEqual([jpRef.index, index.skeleton.file, index.core.file].sort());
+  // The read core changes nothing a registration sees until something asks for it.
+  expect(face.revision).toBe(1);
+  expect(face.bytes()).toEqual(plain.bytes());
+  reads.length = 0;
+  expect(await face.ensureGlyphs([space])).toBe(2);
+  expect(reads).toEqual([]);
+
+  const failing: string[] = [];
+  let tampering = true;
+  const broken = await openProgressiveFace(jpRef, transport(failing, (file) => tampering && file === index.core.file), { core: true });
+  const failure = await broken.ensureGlyphs([space]).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ name: 'FontSliceError', file: index.core.file, reason: 'server' });
+  tampering = false;
+  await expect(broken.ensureGlyphs([space])).rejects.toBe(failure);
+  expect(failing.filter((file) => file === index.core.file)).toHaveLength(1);
+  broken.retryFailed();
+  expect(await broken.ensureGlyphs([space])).toBe(2);
+  expect(failing.filter((file) => file === index.core.file)).toHaveLength(2);
+});
+
 test('an open handed the decoded files of another reads and decodes none of them, and fails on one that changed', async () => {
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
   const skeleton = parseSkeleton(await decode(index.skeleton.file));

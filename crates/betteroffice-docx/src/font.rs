@@ -267,6 +267,7 @@ fn text_requirement(run: &docx_layout::display_list::TextRunPrimitive) -> Option
         italic,
         scripts: text_scripts(run),
         characters: Default::default(),
+        east_asian: false,
     })
 }
 
@@ -309,6 +310,7 @@ mod tests {
             italic: false,
             scripts: Vec::new(),
             characters: Default::default(),
+            east_asian: false,
         };
         let mut empty = FontRegistry::default();
         empty.resolve(&manager, &[requirement("")]).unwrap();

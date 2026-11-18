@@ -180,6 +180,24 @@ test('a typed character whose chunk is not loaded loads it, its outline installs
   }
 }, 60_000);
 
+test('the face that paints East Asian text first loads its core with the fonts the editor lays out with, before any page paints (Q758 B)', async () => {
+  const reads: string[] = [];
+  const session = await createYrsSession({ clientId: 71_005 });
+  try {
+    session.openDocx(documentBytes, true);
+    const source = createRustMeasureSource({ engine: session, bundled: provider(true, reads), progressive: true });
+    const request = buildResidentRegionLayoutRequest(session.materializeDocx()!, 24, {});
+    const requirements = JSON.parse(session.layoutFontRequirementsJson(JSON.stringify(request))) as ResidentFontRequirement[];
+    expect(requirements.find((requirement) => requirement.key === 'ms gothic|0|0')?.eastAsian).toBe(true);
+    await source.prepareFontRequirements(requirements);
+    // Nothing paints here: only the early core reads it.
+    for (let wait = 0; wait < 100 && !reads.includes('NotoSansJP-Regular/core.zst'); wait += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(reads).toContain('NotoSansJP-Regular/core.zst');
+  } finally {
+    session.destroy();
+  }
+});
+
 test('a worker snapshot names the sliced faces with their files, for the worker to open them', async () => {
   const sliced = await editor(true);
   try {

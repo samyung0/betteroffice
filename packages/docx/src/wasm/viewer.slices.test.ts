@@ -7,6 +7,7 @@ import type { BundledFontLoader, BundledFontProvider } from '../layout/measure/f
 import type { DisplayList } from '../layout/render';
 import { configureDefaultFonts, initWasm, openDocumentViewer } from '../viewer';
 import { preloadOpcWasm, rezipContainer } from './opc';
+import * as viewerModule from './viewer';
 
 const root = resolve(import.meta.dir, '../../../..');
 const assets = resolve(root, 'packages/fonts-cjk/assets');
@@ -175,6 +176,62 @@ test('a ① bullet in Century, a Japanese document Latin font, paints with the s
   expect(marker && 'font' in marker && marker.font).toContain(`"Century", "${sliced!.family}"`);
   const loaded = new Set(sliceFiles);
   for (const file of await chunkFiles('NotoSansJP-Regular', '①')) expect(loaded.has(file)).toBe(true);
+});
+
+/** Notes in `events` where the viewer's layout starts and ends. */
+function markLayout(events: string[]) {
+  const open = viewerModule.openViewDocument;
+  return spyOn(viewerModule, 'openViewDocument').mockImplementation((bytes: Uint8Array) => {
+    const document = open(bytes);
+    const layout = document.layout.bind(document);
+    return Object.assign(document, {
+      layout: (json: string) => {
+        events.push('layout start');
+        const pages = layout(json);
+        events.push('layout end');
+        return pages;
+      },
+    });
+  });
+}
+
+/** One paragraph of `text` with Latin in Calibri and East Asian text in SimSun, in Simplified Chinese. */
+function simSunPackage(text: string): Uint8Array {
+  const fonts = '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="SimSun"/><w:lang w:eastAsia="zh-CN"/>';
+  return rezipContainer(Object.fromEntries(Object.entries({
+    '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${TYPE}.document.main+xml"/></Types>`,
+    '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/document.xml': `<w:document ${W}><w:body><w:p><w:r><w:rPr>${fonts}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`,
+  }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
+}
+
+/** The slice files an open of `bytes` requested, with where its layout started and ended. */
+async function openMarked(bytes: Uint8Array): Promise<string[]> {
+  const { sliceFiles } = recordingFonts(true);
+  const marks = markLayout(sliceFiles);
+  try {
+    await openDocumentViewer(bytes);
+  } finally {
+    marks.mockRestore();
+  }
+  return sliceFiles;
+}
+
+test('the face that paints East Asian text first requests its core while layout runs; one that fills only what it lacks waits (Q758 B)', async () => {
+  // long-handbook's Han paints with Noto Sans TC first; Noto Sans SC draws only what TC lacks.
+  const handbook = await openMarked(new Uint8Array(await readFile(resolve(root, 'poc/fixtures/long-handbook.docx'))));
+  const end = handbook.indexOf('layout end');
+  expect(handbook.indexOf('NotoSansTC-Regular/core.zst')).toBeGreaterThanOrEqual(0);
+  expect(handbook.indexOf('NotoSansTC-Regular/core.zst')).toBeLessThan(end);
+  expect(handbook.indexOf('NotoSansSC-Regular/core.zst')).toBeGreaterThan(end);
+}, 60_000);
+
+test('the Han of a Calibri run in SimSun starts the core of the face Calibri paints it with, never that of SimSun (Q762 A)', async () => {
+  const files = await openMarked(simSunPackage('Hello 你好世界'));
+  expect(files.indexOf('NotoSansSC-Regular/core.zst')).toBeGreaterThanOrEqual(0);
+  expect(files.indexOf('NotoSansSC-Regular/core.zst')).toBeLessThan(files.indexOf('layout end'));
+  expect(files).toContain('NotoSerifSC-Regular/slices.json');
+  expect(files).not.toContain('NotoSerifSC-Regular/core.zst');
 });
 
 test('a slice chunk that fails to load fails the open instead of painting without it', async () => {

@@ -12,6 +12,7 @@ function fakeFace(): ProgressiveFontFace {
     bytes: () => bytes.slice(0),
     ensureGlyphs: async () => 1,
     ensureText: async () => 1,
+    prefetchCore: () => {},
     files: () => new Map(),
     retryFailed: () => {},
     markFailed: () => {},
@@ -59,6 +60,26 @@ test('a sliced face whose open outlasts setEmbeddedFaces still registers its out
   const [id] = await registry.getFontIdChain('MS Gothic', false, false);
   expect(sliced).toEqual([id!]);
   expect(registry.progressiveFaces().get(id!)?.face).toBe(face);
+});
+
+test('a chain that wants the core of its face starts it although a script fallback opened the face first without it (Q758 B)', async () => {
+  const cores: string[] = [];
+  const opens: boolean[] = [];
+  const face = { ...fakeFace(), prefetchCore: () => cores.push('NotoSansJP') };
+  // One loader for the face, whether a family or a script reaches it.
+  const loader = slicedLoader('NotoSansJP-Regular/slices.json');
+  let next = 0;
+  const registry = new TextMeasureFontRegistry({ registerFont: () => next++ }, {
+    bundled: { resolve: () => loader, resolveScriptFallback: () => loader },
+    progressive: async (_slices, { core }) => {
+      opens.push(core);
+      return face;
+    },
+  });
+  await registry.getScriptFallbackIds(['cjk-jp']);
+  await registry.getFontIdChain('MS Gothic', false, false, true);
+  expect(opens).toEqual([false]);
+  expect(cores).toEqual(['NotoSansJP']);
 });
 
 test('a sliced face whose skeleton fails is reported once and not fetched again on later layout passes', async () => {
