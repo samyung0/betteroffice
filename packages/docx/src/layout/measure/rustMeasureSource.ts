@@ -148,6 +148,11 @@ export function createRustMeasureSource(options: {
   onError?: (error: Error) => void;
 }): RustMeasureSource {
   const engine = options.engine;
+  // The editor (its engine's worker paints sliced faces) loads the module that
+  // opens them as it opens: Chromium keeps a failed dynamic import failed for
+  // the page's life, so a face first needed offline could otherwise not open
+  // on the online retry without a reload (Q771 A).
+  if (options.progressive && engine.registerSlicedFont) void import('@betteroffice/fonts/progressive').catch(() => {});
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;

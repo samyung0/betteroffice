@@ -13,9 +13,9 @@ test('the fonts module failing to load fails the face as its index failing to lo
     slices: { ref: { format: 1, index: 'NotoSansKR-Regular/slices.json', indexSha256: '0'.repeat(64) }, url: async (file: string) => new URL(file, 'http://127.0.0.1:9/') } as unknown as SliceLocation,
   });
   const reported: Error[] = [];
+  // No `registerSlicedFont`: an engine that loads the module only when a face needs it.
   const engine: RustTextEngine = {
     registerFont: () => 1,
-    registerSlicedFont() {},
     clearFonts() {},
     reportSlicedFaceError: (error) => reported.push(error),
   };
