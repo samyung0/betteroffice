@@ -132,6 +132,37 @@ test('a progressive face loads index and skeleton, then only the chunks of the g
   expect(sha(face.bytes())).toBe(index.sha256);
 });
 
+test('prefetchCore reads the core before anything asks for it, once; a failed core waits for retryFailed', async () => {
+  const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
+  const skeleton = parseSkeleton(await decode(index.skeleton.file));
+  let space = 0;
+  while (skeleton.chunkOfGlyph(space) !== 0) space += 1;
+
+  const reads: string[] = [];
+  const face = await openProgressiveFace(jpRef, transport(reads));
+  reads.length = 0;
+  face.prefetchCore();
+  face.prefetchCore();
+  for (let wait = 0; wait < 100 && reads.length === 0; wait += 1) await Bun.sleep(10);
+  expect(reads).toEqual([index.core.file]);
+  // The glyph that asks for it then reads nothing more.
+  expect(await face.ensureGlyphs([space])).toBe(2);
+  expect(reads).toEqual([index.core.file]);
+
+  const failing: string[] = [];
+  let tampering = true;
+  const broken = await openProgressiveFace(jpRef, transport(failing, (file) => tampering && file === index.core.file));
+  broken.prefetchCore();
+  const failure = await broken.ensureGlyphs([space]).catch((error: unknown) => error);
+  expect(failure).toMatchObject({ name: 'FontSliceError', file: index.core.file, reason: 'server' });
+  tampering = false;
+  await expect(broken.ensureGlyphs([space])).rejects.toBe(failure);
+  expect(failing.filter((file) => file === index.core.file)).toHaveLength(1);
+  broken.retryFailed();
+  expect(await broken.ensureGlyphs([space])).toBe(2);
+  expect(failing.filter((file) => file === index.core.file)).toHaveLength(2);
+});
+
 test('an open handed the decoded files of another reads and decodes none of them, and fails on one that changed', async () => {
   const index = JSON.parse(await Bun.file(new URL(jpRef.index, assets)).text()) as Index;
   const skeleton = parseSkeleton(await decode(index.skeleton.file));

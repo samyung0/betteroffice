@@ -356,4 +356,84 @@ describe('useRustMeasurement sliced faces', () => {
       warn.mockRestore();
     }
   }, 15_000);
+
+  test('a face that failed to open is asked for again, by a new layout, only when the editor retries its slices (Q755 B)', async () => {
+    const asked: string[] = [];
+    const index = 'NotoSansJP-Regular/slices.json';
+    const gothic = Object.assign(async () => bytesOf('whole face'), {
+      slices: {
+        ref: { format: 1, index, indexSha256: '0'.repeat(64) },
+        base: 'http://127.0.0.1:9/',
+        // Offline: no file can be fetched.
+        url: async (file: string) => {
+          asked.push(file);
+          throw new TypeError('Failed to fetch');
+        },
+        decode: async (encoded: ArrayBuffer) => encoded,
+        timeoutMs: 2_000,
+      },
+    });
+    configureDefaultFonts({
+      load: () =>
+        Promise.resolve({
+          createFontProvider: () => ({
+            resolve: (family: string) => (family === 'MS Gothic' ? gothic : () => Promise.resolve(bytesOf(family))),
+          }),
+        }),
+    });
+    let fonts = 0;
+    const retries = new Set<() => void>();
+    const reported: Error[] = [];
+    const engine: RustTextEngine = {
+      registerFont: () => ++fonts,
+      registerSlicedFont() {},
+      clearFonts() {},
+      reportSlicedFaceError: (error, onError) => {
+        reported.push(error);
+        onError(error);
+      },
+      onFontSlicesRetry: (listener) => {
+        retries.add(listener);
+        return () => retries.delete(listener);
+      },
+    };
+    const errors: Error[] = [];
+    const requirement: ResidentFontRequirement = { key: 'ms gothic|0|0', family: 'MS Gothic', bold: false, italic: false };
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { result } = renderHook(() =>
+        useRustMeasurement({ document: null, textEngine: engine, onError: (error) => errors.push(error) })
+      );
+      await waitFor(() => expect(result.current.deferLayoutPass()).toBe(false));
+      let layouts = 0;
+      result.current.runLayoutPipelineRef.current = () => {
+        layouts += 1;
+      };
+      const config = () => result.current.residentMeasurementConfig([requirement]);
+      config();
+      await waitFor(() => expect(errors).toHaveLength(1), { timeout: 10_000 });
+      // The engine heard the failure, by its slices' rule.
+      expect(reported).toEqual(errors);
+      const opened = () => asked.filter((file) => file === index).length;
+      const before = opened();
+      // Later passes lay out without the face and never ask for it again.
+      for (let pass = 0; pass < 4; pass += 1) {
+        config();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(opened()).toBe(before);
+      expect(errors).toHaveLength(1);
+
+      // Back online: the editor lays out again, and that layout asks for the face.
+      const laidOut = layouts;
+      for (const retry of retries) retry();
+      expect(layouts).toBe(laidOut + 1);
+      await waitFor(() => {
+        config();
+        expect(opened()).toBeGreaterThan(before);
+      }, { timeout: 10_000 });
+    } finally {
+      warn.mockRestore();
+    }
+  }, 15_000);
 });

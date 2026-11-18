@@ -866,6 +866,15 @@ export interface YrsSession extends CollaborationReplica {
   /** Calls `listener` on `retryFontSlices`, for the engine worker to ask again too. */
   onFontSlicesRetry(listener: () => void): () => void;
   /**
+   * Reports a sliced face that failed to open (its index, its skeleton or the
+   * module that opens it) as its slices' failures are reported (Q755 B): a
+   * plain (fatal) `Error` until the pages are presented, a
+   * `FontSliceUnavailableError` after. Print and thumbnails
+   * (`prepareSlicedPaint` with `complete`) fail with it until the face
+   * registers, or with its new failure once it fails again (Q773 A).
+   */
+  reportSlicedFaceError(error: Error, onError: (error: Error) => void): void;
+  /**
    * The document's pages have been presented. Until then a slice that fails
    * is part of the document opening and reaches `onError` as a plain
    * (fatal) `Error`; from then on it is the non-fatal `FontSliceUnavailableError`.
@@ -1374,7 +1383,13 @@ function wrapSession(
   // Faces whose missing slice was reported: once per face across this page and
   // its engine worker, until retryFontSlices.
   const unavailableReported = new Set<ProgressiveFontFace>();
+  // Sliced faces that failed to open after the pages were presented, by
+  // index, until each registers; text that needed one may be gone (Q774 A).
+  const unopenedFaces = new Map<string, FontSliceUnavailableError>();
   let pagesPresented = false;
+  // A slice or face that fails while the document opens fails the open.
+  const openFailure = (error: Error) =>
+    new Error(`A font slice failed while the document opened: ${error.message}`, { cause: error });
   let docxSource: Uint8Array | null = null;
 
   const invalidateReadCaches = (): void => {
@@ -1518,8 +1533,10 @@ function wrapSession(
       progressiveFonts = null;
       progressiveSpecs = [];
       unavailableReported.clear();
+      unopenedFaces.clear();
     },
     registerSlicedFont: (id, face, source, onError) => {
+      unopenedFaces.delete(source.ref.index);
       if (!progressiveFonts) {
         const fonts = new ResidentProgressiveFonts({
           updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
@@ -1531,9 +1548,8 @@ function wrapSession(
       }
       const report = (error: Error) => {
         if (error instanceof FontSliceUnavailableError) {
-          // A slice that fails while the document opens fails the open.
           if (!pagesPresented) {
-            onError(new Error(`A font slice failed while the document opened: ${error.message}`, { cause: error }));
+            onError(openFailure(error));
             return;
           }
           if (unavailableReported.has(face)) return;
@@ -1548,6 +1564,9 @@ function wrapSession(
       residentFontsRevision += 1;
     },
     prepareSlicedPaint: async (page, fontChains, complete = false) => {
+      // Its characters would print as missing-glyph boxes (Q763 A).
+      const [unopened] = unopenedFaces.values();
+      if (complete && unopened) throw unopened;
       const fonts = progressiveFonts;
       if (!fonts) return { changed: new Set(), outlineOnlyFontIds: new Set(), fontFamilies: new Map() };
       const waitMs = complete ? UNTIL_COMPLETE : PROGRESSIVE_OUTLINE_WAIT_MS;
@@ -1589,6 +1608,15 @@ function wrapSession(
     },
     markPagesPresented: () => {
       pagesPresented = true;
+    },
+    reportSlicedFaceError: (error, onError) => {
+      if (!pagesPresented) {
+        onError(openFailure(error));
+        return;
+      }
+      const unavailable = error instanceof FontSliceUnavailableError ? error : FontSliceUnavailableError.from(error);
+      unopenedFaces.set(unavailable.file, unavailable);
+      onError(unavailable);
     },
     onFontSlicesRetry: (listener) => {
       retryListeners.add(listener);

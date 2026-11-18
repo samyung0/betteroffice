@@ -21,6 +21,12 @@ export interface ProgressiveFontFace {
   ensureText(text: string): Promise<number>;
   /** Calls `listener` with each new revision; returns an unsubscribe. */
   onUpdate(listener: (revision: number) => void): () => void;
+  /**
+   * Starts loading the core chunk (the outlines of the face's most used
+   * characters) before anything asks for it; the next `ensure` publishes it. A
+   * core that fails is remembered as any failed chunk is.
+   */
+  prefetchCore(): void;
   /** Whether every outline is loaded. */
   complete(): boolean;
   /**
@@ -309,6 +315,9 @@ export async function openProgressiveFace(ref: SliceRef, transport: SliceTranspo
       return () => {
         listeners.delete(listener);
       };
+    },
+    prefetchCore() {
+      void load(0).catch(() => {});
     },
     complete() {
       return loaded.size === files.size;

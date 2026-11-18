@@ -38,6 +38,7 @@ function releasableTextEngine(engine: RustTextEngine): {
   release: () => void;
 } {
   let released = false;
+  const stops: Array<() => void> = [];
   return {
     engine: {
       registerFont: (bytes) => (released ? -1 : engine.registerFont(bytes)),
@@ -53,9 +54,22 @@ function releasableTextEngine(engine: RustTextEngine): {
       clearFonts: () => {
         if (!released) engine.clearFonts();
       },
+      ...(engine.reportSlicedFaceError && {
+        reportSlicedFaceError: (error: Error, onError: (error: Error) => void) => {
+          if (!released) engine.reportSlicedFaceError!(error, onError);
+        },
+      }),
+      ...(engine.onFontSlicesRetry && {
+        onFontSlicesRetry: (listener: () => void) => {
+          const stop = engine.onFontSlicesRetry!(listener);
+          stops.push(stop);
+          return stop;
+        },
+      }),
     },
     release: () => {
       released = true;
+      for (const stop of stops.splice(0)) stop();
     },
   };
 }
@@ -116,6 +130,8 @@ export function useRustMeasurement(
             progressive: releasable.engine.registerSlicedFont !== undefined,
             onError: (error) => onErrorRef.current?.(error, engine),
           });
+          // Back online, faces that failed to open are opened again by a new layout (Q755 B).
+          releasable.engine.onFontSlicesRetry?.(() => runLayoutPipelineRef.current?.());
           sourceRef.current = source;
           releaseSourceRef.current = releasable.release;
         }

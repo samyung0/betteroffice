@@ -1,6 +1,6 @@
-import type { ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
+import { FontSliceUnavailableError, type ProgressiveFontSource } from '../../yrs/residentProgressiveFonts';
 import type { CompatibilityFlags } from '../../docx/settingsParser';
-import type { FontDecoder } from '@betteroffice/fonts';
+import type { FontDecoder, SliceLocation } from '@betteroffice/fonts';
 import { baseLatinAlias, baseLatinCandidate, charactersFromBits, symbolFamily, type FontCoverage } from './fontCoverage';
 import {
   excludeHostedFontFamilies,
@@ -41,6 +41,14 @@ export interface RustTextEngine {
     onError: (error: Error) => void,
   ): void;
   clearFonts(): void;
+  /**
+   * Reports a sliced face that failed to open (its index, skeleton or the
+   * fonts module) by the rule its slices' failures follow; without it the
+   * failure reaches `onError` as it is.
+   */
+  reportSlicedFaceError?(error: Error, onError: (error: Error) => void): void;
+  /** Calls `listener` when the host asks for failed font slices again; returns an unsubscribe. */
+  onFontSlicesRetry?(listener: () => void): () => void;
 }
 
 export interface ResidentFontRequirement {
@@ -51,6 +59,8 @@ export interface ResidentFontRequirement {
   scripts?: FontScript[];
   characters?: string[];
   characterBits?: string;
+  /** Some run paints East Asian characters along this family's chain. */
+  eastAsian?: boolean;
 }
 
 /** @internal */
@@ -67,6 +77,7 @@ function mergeRequirements(requirements: ResidentFontRequirement[]): ResidentFon
       ...known,
       scripts: [...new Set([...(known.scripts ?? []), ...(requirement.scripts ?? [])])],
       characters: [...new Set([...(known.characters ?? []), ...characters])],
+      ...(requirement.eastAsian && { eastAsian: true }),
     } : { ...requirement, characters });
   }
   return [...merged.values()];
@@ -99,6 +110,14 @@ export interface RustMeasureSource {
   clear(): void;
   /** The sliced faces registered from their skeleton, by font id and measurement view id. */
   progressiveFaces(): ReadonlyMap<number, SlicedFontFace>;
+  /**
+   * Starts the core chunk of each prepared sliced face that East Asian text in
+   * `requirements` paints with first (those flagged `eastAsian`). View calls
+   * it as layout starts (Q758 B, Q769 A); a face that only fills characters an
+   * earlier face lacks loads its core when the pages draw. Resolves whether
+   * it started any.
+   */
+  startEastAsianCores(requirements: ResidentFontRequirement[]): Promise<boolean>;
 }
 
 let enginePromise: Promise<RustTextEngine> | null = null;
@@ -129,6 +148,11 @@ export function createRustMeasureSource(options: {
   onError?: (error: Error) => void;
 }): RustMeasureSource {
   const engine = options.engine;
+  // The editor (its engine's worker paints sliced faces) loads the module that
+  // opens them as it opens: Chromium keeps a failed dynamic import failed for
+  // the page's life, so a face first needed offline could otherwise not open
+  // on the online retry without a reload (Q771 A).
+  if (options.progressive && engine.registerSlicedFont) void import('@betteroffice/fonts/progressive').catch(() => {});
   const hosted = hostedFontFamilies(options.bundled);
   let implicit = false;
   let generation = 0;
@@ -155,22 +179,49 @@ export function createRustMeasureSource(options: {
       if (current === generation) implicit = isImplicitFontProvider(provider);
       return provider;
     }), progressive: options.progressive
-      ? async (slices) => import('@betteroffice/fonts/progressive').then(async ({ openSlicedFace, sliceSourceOf }) => {
-        const face = await openSlicedFace(slices as Parameters<typeof openSlicedFace>[0]);
+      ? async (slices) => {
+        const location = slices as SliceLocation;
+        // The index's URL resolves beside the module that opens the face, so
+        // its request goes out with the other faces'.
+        void location.url(location.ref.index).catch(() => {});
+        const { openSlicedFace, sliceSourceOf } = await import('@betteroffice/fonts/progressive').catch((error: unknown) => {
+          // Offline, the module fails the face as its index would (Q763 A).
+          throw new FontSliceUnavailableError(location.ref.index, 'network', undefined, { cause: error });
+        });
+        const face = await openSlicedFace(location).catch((error: unknown) => {
+          // The editor names a face that failed to open by its index, whichever
+          // of its files failed: its print block lifts when that face registers.
+          if (!engine.reportSlicedFaceError || (error as { name?: unknown } | null)?.name !== 'FontSliceError') throw error;
+          const { reason, status } = error as { reason: 'network' | 'server'; status?: number };
+          throw new FontSliceUnavailableError(location.ref.index, reason, status, { cause: error });
+        });
         if (engine.registerSlicedFont) {
           const source = await sliceSourceOf(face);
           if (!source) throw new Error('A sliced face opened without file URLs cannot load its outlines in a worker');
           sources.set(face, source);
         }
         return face;
-      })
+      }
       : undefined,
-    onError: options.onError },
+    onError: options.onError && ((error) => {
+      // A sliced face that failed to open fails as its slices do (Q755 B).
+      if (error instanceof FontSliceUnavailableError && engine.reportSlicedFaceError) engine.reportSlicedFaceError(error, options.onError!);
+      else options.onError!(error);
+    }) },
   );
+  // Back online, faces that failed to open are opened again at once.
+  engine.onFontSlicesRetry?.(() => registry.retryFailedSlices());
   let compat: CompatibilityFlags | undefined;
 
   return {
     progressiveFaces: () => registry.progressiveFaces(),
+
+    async startEastAsianCores(requirements): Promise<boolean> {
+      const eastAsian = mergeRequirements(requirements).filter((requirement) => requirement.eastAsian);
+      const faces = await registry.eastAsianFaces(eastAsian);
+      for (const face of faces) face.prefetchCore();
+      return faces.size > 0;
+    },
 
     setEmbeddedFaces(faces, appFaces): void {
       appFamilies = new Set((appFaces ?? []).map(face => face.family.trim().toLowerCase()));

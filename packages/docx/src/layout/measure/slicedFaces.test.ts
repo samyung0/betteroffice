@@ -12,6 +12,7 @@ function fakeFace(): ProgressiveFontFace {
     bytes: () => bytes.slice(0),
     ensureGlyphs: async () => 1,
     ensureText: async () => 1,
+    prefetchCore: () => {},
     files: () => new Map(),
     retryFailed: () => {},
     markFailed: () => {},
@@ -59,6 +60,27 @@ test('a sliced face whose open outlasts setEmbeddedFaces still registers its out
   const [id] = await registry.getFontIdChain('MS Gothic', false, false);
   expect(sliced).toEqual([id!]);
   expect(registry.progressiveFaces().get(id!)?.face).toBe(face);
+});
+
+test('the face East Asian text paints with first is found however it was opened first, a script fallback included (Q758 B)', async () => {
+  const face = fakeFace();
+  // One loader for the face, whether a family or a script reaches it.
+  const loader = slicedLoader('NotoSansJP-Regular/slices.json');
+  let next = 0;
+  const registry = new TextMeasureFontRegistry({ registerFont: () => next++ }, {
+    bundled: {
+      resolve: (family) => (family === 'MS Gothic' ? loader : Object.assign(async () => bytes.slice(1), {})),
+      resolveScriptFallback: () => loader,
+    },
+    progressive: async () => face,
+  });
+  await registry.getScriptFallbackIds(['cjk-jp']);
+  await registry.getFontIdChain('MS Gothic', false, false);
+  await registry.getFontIdChain('Calibri', false, false);
+  // Its own sliced face for MS Gothic; past Calibri's Latin face, its Japanese fallback's.
+  expect([...await registry.eastAsianFaces([{ family: 'MS Gothic', bold: false, italic: false }])]).toEqual([face]);
+  expect([...await registry.eastAsianFaces([{ family: 'Calibri', bold: false, italic: false, scripts: ['cjk-jp'] }])]).toEqual([face]);
+  expect([...await registry.eastAsianFaces([{ family: 'Calibri', bold: false, italic: false }])]).toEqual([]);
 });
 
 test('a sliced face whose skeleton fails is reported once and not fetched again on later layout passes', async () => {
