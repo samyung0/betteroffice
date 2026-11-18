@@ -664,6 +664,14 @@
   color: transparent;
   background: rgba(66, 133, 244, 0.3);
 }
+/* The whole-word mirror beside a positioned text layer (which is aria-hidden)
+   is read only by screen readers: never hit (images set pointer-events
+   inline) nor selected, and as invisible as the editor's (Q753 C). */
+.canvas-page-mirror--reading,
+.canvas-page-mirror--reading * {
+  pointer-events: none !important;
+  user-select: none;
+}
 
 /* ============================================================================
  * SPECIAL CONTENT TYPES

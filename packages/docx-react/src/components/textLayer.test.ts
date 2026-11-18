@@ -218,6 +218,29 @@ describe('text layer copy', () => {
     }
   });
 
+  test("a positioned page's screen-reader layer is never copied nor selected by select all", () => {
+    const host = (className: string, mirror: HTMLElement) => {
+      const el = document.createElement('div');
+      el.className = `canvas-page-mirror ${className}`;
+      el.append(mirror);
+      return el;
+    };
+    const layer = host('canvas-page-mirror--selectable', buildMirrorPage(noted, { clusters: true }));
+    const root = mount(host('canvas-page-mirror--reading', buildMirrorPage(noted)), layer);
+    expect(copyAll(root, [noted])).toBe('Body1\nMore');
+
+    // select all in a footnote: the text layer's notes, copied as without the other layer
+    const selection = document.getSelection()!;
+    selection.collapse(textNode(layer, 'Note text'), 2);
+    selectStory(root);
+    expect(layer.contains(selection.anchorNode)).toBe(true);
+    const notes = textLayerText(selection.getRangeAt(0), root, [noted], 'footnotes');
+    selection.collapse(textNode(layer, 'Note text'), 2);
+    selectStory(layer);
+    expect(notes).toBe(textLayerText(selection.getRangeAt(0), layer, [noted], 'footnotes'));
+    expect(notes).toContain('Note text');
+  });
+
   test('footnotes and endnotes are separate stories, and select all keeps to the notes', () => {
     const area = (kind: string, id: number, text: string) => ({
       kind,

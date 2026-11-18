@@ -38,7 +38,9 @@ const page = {
   ],
 } as unknown as DisplayPage;
 
-const mirrorPage = (container: HTMLElement) => container.querySelector('.layout-page-mirror');
+/** The editor's mirror, or a viewer's text layer (not its screen-reader layer). */
+const mirrorPage = (container: HTMLElement) =>
+  container.querySelector('.canvas-page-mirror:not(.canvas-page-mirror--reading) > .layout-page-mirror');
 
 test('swaps between the positioned and the plain-text mirror at idle time', async () => {
   const { container, rerender } = render(<CanvasPageMirror page={page} revision={0} full />);
@@ -60,7 +62,7 @@ test('swaps between the positioned and the plain-text mirror at idle time', asyn
 test('a selectable page holding a selection end keeps its positioned mirror', async () => {
   const { container, rerender } = render(<CanvasPageMirror page={page} revision={0} full selectable />);
   expect(container.querySelector('.canvas-page-mirror--selectable')).not.toBeNull();
-  const text = container.querySelector('.layout-run-text')?.firstChild as Text;
+  const text = mirrorPage(container)?.querySelector('.layout-run-text')?.firstChild as Text;
   document.getSelection()?.setBaseAndExtent(text, 1, text, 4);
 
   rerender(<CanvasPageMirror page={page} revision={0} full={false} selectable />);
@@ -105,9 +107,9 @@ test('a selection end in a plain-text page does not keep it from turning positio
   document.getSelection()?.removeAllRanges();
 });
 
-test("the editor's mirror reads a shaped line as one run, a viewer's text layer keeps one per glyph cluster", () => {
-  const text = 'Marker01 keeps';
-  const shaped = {
+/** One line shaped glyph by glyph, as the engine joins it. */
+function shapedPage(text: string): DisplayPage {
+  return {
     ...page,
     primitives: [
       {
@@ -125,10 +127,70 @@ test("the editor's mirror reads a shaped line as one run, a viewer's text layer 
       },
     ],
   } as unknown as DisplayPage;
-  const runs = (container: HTMLElement) =>
-    [...container.querySelectorAll('.layout-run-text')].map((run) => run.textContent);
-  const editor = render(<CanvasPageMirror page={shaped} revision={0} full />);
+}
+
+const runs = (container: Element) =>
+  [...container.querySelectorAll('.layout-run-text')].map((run) => run.textContent);
+
+test("the editor's mirror reads a shaped line as one run, a viewer's text layer keeps one per glyph cluster", () => {
+  const text = 'Marker01 keeps';
+  const editor = render(<CanvasPageMirror page={shapedPage(text)} revision={0} full />);
   expect(runs(editor.container)).toEqual([text]);
-  const viewer = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
-  expect(runs(viewer.container)).toEqual(Array.from(text));
+  const viewer = render(<CanvasPageMirror page={shapedPage(text)} revision={0} full selectable />);
+  expect(runs(viewer.container.querySelector('.canvas-page-mirror--selectable')!)).toEqual(Array.from(text));
+});
+
+test("a viewer's positioned page is read through the editor's mirror beside its aria-hidden text layer", async () => {
+  const shaped = shapedPage('Marker01 keeps');
+  const editor = render(<CanvasPageMirror page={shaped} revision={0} full />);
+  const { container, rerender } = render(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  const layer = container.querySelector('.canvas-page-mirror--selectable')!;
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(runs(layer)).toEqual(Array.from('Marker01 keeps'));
+  expect(reading.innerHTML).toBe(editor.container.querySelector('.canvas-page-mirror')!.innerHTML);
+  expect(runs(reading)).toEqual(['Marker01 keeps']);
+
+  // far from the viewport the plain-text page reads whole words itself
+  rerender(<CanvasPageMirror page={shaped} revision={0} full={false} selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.hasAttribute('aria-hidden')).toBe(false);
+  expect(reading.childElementCount).toBe(0);
+  expect(layer.textContent).toBe('Marker01 keeps');
+
+  rerender(<CanvasPageMirror page={shaped} revision={0} full selectable />);
+  await act(() => new Promise((resolve) => setTimeout(resolve, 200)));
+  expect(layer.getAttribute('aria-hidden')).toBe('true');
+  expect(runs(reading)).toEqual(['Marker01 keeps']);
+});
+
+test("a viewer's screen-reader layer is patched and shifted with its text layer", () => {
+  const twoLines = (last: string) =>
+    ({
+      ...page,
+      primitives: [
+        page.primitives[0],
+        { ...page.primitives[0], text: last, baselineY: 120, docStart: 7, docEnd: 7 + last.length, lineIndex: 1 },
+      ],
+    }) as unknown as DisplayPage;
+  const first = twoLines('world');
+  const { container, rerender } = render(<CanvasPageMirror page={first} revision={0} full selectable />);
+  const reading = container.querySelector('.canvas-page-mirror--reading')!;
+  const kept = reading.querySelector('.layout-run-text');
+
+  rerender(<CanvasPageMirror page={twoLines('worlds')} revision={0} full selectable />);
+  expect(reading.querySelector('.layout-run-text')).toBe(kept);
+  expect(runs(reading)).toEqual(['Hello', 'worlds']);
+
+  // a position shift rewrites both layers' positions in place
+  const shifted = twoLines('worlds');
+  rerender(<CanvasPageMirror page={shifted} revision={1} full selectable />);
+  for (const p of shifted.primitives) {
+    p.docStart! += 3;
+    p.docEnd! += 3;
+  }
+  rerender(<CanvasPageMirror page={shifted} revision={2} full selectable />);
+  expect(reading.querySelector('.layout-run-text')).toBe(kept);
+  const starts = [...container.querySelectorAll('.layout-run-text')].map((run) => run.getAttribute('data-doc-start'));
+  expect(starts).toEqual(['4', '10', '4', '10']);
 });

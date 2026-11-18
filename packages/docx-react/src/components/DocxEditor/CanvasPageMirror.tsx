@@ -25,6 +25,12 @@
  * holding a selection end keeps its positioned form when it leaves the
  * viewport, until the selection lets go of it, so scrolling away and back
  * keeps the selection.
+ *
+ * Screen readers would spell that text layer glyph by glyph, so while it is
+ * positioned it is aria-hidden and the editor's whole-word mirror is mounted
+ * beside it, built and patched with it, for screen readers only: never
+ * selected, copied, hit or painted (`.canvas-page-mirror--reading`, Q753 C).
+ * The plain-text form already reads whole words and stays readable.
  */
 
 import { useEffect, useRef } from 'react';
@@ -58,6 +64,7 @@ export function CanvasPageMirror({
   selectable?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const readingRef = useRef<HTMLDivElement>(null);
   // Position-shift deltas mutate primitives in place — identity alone is stale.
   const builtForRef = useRef<{
     page: DisplayPage;
@@ -70,11 +77,17 @@ export function CanvasPageMirror({
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    const reading = readingRef.current;
     let built = builtForRef.current;
     // A shift moved the page's positions in place: the mirror keeps its nodes.
     if (built?.page === page && built.t === t && built.revision !== revision) {
       const mirror = host.firstElementChild;
-      if (mirror instanceof HTMLElement && syncMirrorPositions(mirror)) {
+      const readingMirror = reading?.firstElementChild;
+      if (
+        mirror instanceof HTMLElement &&
+        syncMirrorPositions(mirror) &&
+        (!(readingMirror instanceof HTMLElement) || syncMirrorPositions(readingMirror))
+      ) {
         built = { ...built, revision };
         builtForRef.current = built;
       }
@@ -107,22 +120,20 @@ export function CanvasPageMirror({
         releaseHold = () => doc.removeEventListener('selectionchange', retry);
         return;
       }
-      const mirror = (full ? buildMirrorPage : buildMirrorTextPage)(page, {
-        labels: {
-          page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-          header: t('a11y.headerLabel'),
-          footer: t('a11y.footerLabel'),
-        },
-        clusters: selectable,
-      });
-      // Keep the previous mirror connected until this replacement is ready.
-      // Clearing in effect cleanup creates a detached-DOM window on every page
-      // update; unmounting already removes the host and its complete subtree.
-      // Patching keeps the unchanged blocks' nodes, so a keystroke restyles and
-      // lays out only the blocks it changed, not the whole page.
-      const current = host.firstElementChild;
-      if (!(current instanceof HTMLElement && patchMirrorPage(current, mirror))) {
-        host.replaceChildren(mirror);
+      const labels = {
+        page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+        header: t('a11y.headerLabel'),
+        footer: t('a11y.footerLabel'),
+      };
+      mount(host, (full ? buildMirrorPage : buildMirrorTextPage)(page, { labels, clusters: selectable }));
+      if (reading) {
+        if (full) {
+          mount(reading, buildMirrorPage(page, { labels }));
+          host.setAttribute('aria-hidden', 'true');
+        } else {
+          reading.replaceChildren();
+          host.removeAttribute('aria-hidden');
+        }
       }
       builtForRef.current = { page, revision, t, full };
     };
@@ -144,26 +155,47 @@ export function CanvasPageMirror({
     };
   }, [page, revision, t, defer, full, selectable]);
 
+  // The mirror content is built in page-local px; when the canvas is enlarged
+  // for zoom (CSS size = page * zoom), CSS-scale the mirror by the same factor
+  // from its top-left origin so its nodes' `getBoundingClientRect` still lands
+  // on the painted glyphs. At zoom = 1 this is an identity scale.
+  const style = {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    pointerEvents: 'none',
+    transform: zoom !== 1 ? `scale(${zoom})` : undefined,
+    transformOrigin: '0 0',
+  } as const;
   return (
-    <div
-      ref={hostRef}
-      className={
-        selectable ? 'canvas-page-mirror canvas-page-mirror--selectable' : 'canvas-page-mirror'
-      }
-      // The mirror content is built in page-local px; when the canvas is
-      // enlarged for zoom (CSS size = page * zoom), CSS-scale the mirror by the
-      // same factor from its top-left origin so its nodes' `getBoundingClientRect`
-      // still lands on the painted glyphs. At zoom = 1 this is an identity scale.
-      style={{
-        position: 'absolute',
-        left: 0,
-        top: 0,
-        pointerEvents: 'none',
-        transform: zoom !== 1 ? `scale(${zoom})` : undefined,
-        transformOrigin: '0 0',
-      }}
-    />
+    <>
+      {/* First, so the ids both layers carry (notes, note references, header
+          cells) resolve to the layer screen readers follow links into. */}
+      {selectable ? (
+        <div ref={readingRef} className="canvas-page-mirror canvas-page-mirror--reading" style={style} />
+      ) : null}
+      <div
+        ref={hostRef}
+        className={
+          selectable ? 'canvas-page-mirror canvas-page-mirror--selectable' : 'canvas-page-mirror'
+        }
+        style={style}
+      />
+    </>
   );
+}
+
+/**
+ * Keeps the previous mirror connected until its replacement is ready (clearing
+ * in effect cleanup would leave a detached-DOM window on every page update;
+ * unmounting already removes the host and its subtree), patching it so a
+ * keystroke restyles and lays out only the blocks it changed.
+ */
+function mount(host: HTMLElement, mirror: HTMLElement): void {
+  const current = host.firstElementChild;
+  if (!(current instanceof HTMLElement && patchMirrorPage(current, mirror))) {
+    host.replaceChildren(mirror);
+  }
 }
 
 /** Also a caret: a drag starts as one, before its first extension. */

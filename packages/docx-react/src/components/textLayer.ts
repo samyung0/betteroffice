@@ -14,6 +14,7 @@ import {
 } from '@betteroffice/docx/layout/render';
 
 const PAGE = '.layout-page-mirror';
+const READING = '.canvas-page-mirror--reading';
 const RUN = '.layout-run-text';
 const BLOCK = '[data-block-id]';
 const PARAGRAPH = '.layout-paragraph[data-block-id]';
@@ -63,7 +64,8 @@ export function textLayerText(
   // collecting, so a drawing's paragraph text can be looked for on any of them.
   const mirrors: Array<[HTMLElement, Range | null]> = [];
   for (const pageEl of root.querySelectorAll<HTMLElement>(PAGE)) {
-    if (!range.intersectsNode(pageEl)) continue;
+    // The whole-word mirror beside a positioned page is for screen readers only.
+    if (!range.intersectsNode(pageEl) || pageEl.closest(READING)) continue;
     const local = pageEl.ownerDocument.createRange();
     local.selectNodeContents(pageEl);
     const whole =
@@ -493,7 +495,9 @@ export function selectStory(host: HTMLElement): void {
     return;
   }
   const role = story === 'endnotes' ? 'doc-endnote' : 'doc-footnote';
-  const notes = host.querySelectorAll(`.layout-note[role="${role}"]`);
+  const notes = Array.from(host.querySelectorAll(`.layout-note[role="${role}"]`)).filter(
+    (note) => !note.closest(READING)
+  );
   const first = notes[0];
   const last = notes[notes.length - 1];
   if (first && last) selection.setBaseAndExtent(first, 0, last, last.childNodes.length);
