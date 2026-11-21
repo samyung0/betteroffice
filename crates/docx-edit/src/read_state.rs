@@ -1,6 +1,7 @@
 //! Aggregated read-state queries for host UI surfaces.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
@@ -395,32 +396,59 @@ impl EditingDoc {
         };
         let mut result = Vec::new();
         for story_id in story_ids {
-            for change in self.list_changes(&story_id)? {
-                let range = LocRange {
-                    start: change.range.start.clone(),
-                    end: change.range.end.clone(),
-                };
-                let preview = if matches!(
-                    change.kind,
-                    crate::ChangeKind::ParagraphMarkInsertion
-                        | crate::ChangeKind::ParagraphMarkDeletion
-                        | crate::ChangeKind::ParagraphPropertiesChanged
-                        | crate::ChangeKind::TableRowInsertion
-                        | crate::ChangeKind::TableRowDeletion
-                        | crate::ChangeKind::TableInsertion
-                        | crate::ChangeKind::TableDeletion
-                ) {
-                    String::new()
-                } else {
-                    let full = self.text_between(&range, TextView::Raw)?;
-                    full.chars().take(PREVIEW_MAX_CHARS).collect()
-                };
-                result.push(RevisionInfo {
-                    story: story_id.clone(),
-                    change,
-                    preview,
-                });
-            }
+            // A story's list is read again only once the story has changed; an
+            // empty one stays empty while only plain text is inserted.
+            let revision = self.story_revision(&story_id);
+            let kept = self
+                .revision_lists
+                .lock()
+                .unwrap()
+                .get(&story_id, revision, Vec::is_empty);
+            let list = match kept {
+                Some(list) => list,
+                None => {
+                    let list = Arc::new(self.story_revision_list(&story_id)?);
+                    self.revision_lists.lock().unwrap().insert(
+                        &story_id,
+                        revision,
+                        Arc::clone(&list),
+                    );
+                    list
+                }
+            };
+            result.extend(list.iter().cloned());
+        }
+        Ok(result)
+    }
+
+    /// The [`RevisionInfo`] entries of one story, in position order.
+    fn story_revision_list(&self, story_id: &str) -> OpResult<Vec<RevisionInfo>> {
+        let mut result = Vec::new();
+        for change in self.list_changes(story_id)? {
+            let range = LocRange {
+                start: change.range.start.clone(),
+                end: change.range.end.clone(),
+            };
+            let preview = if matches!(
+                change.kind,
+                crate::ChangeKind::ParagraphMarkInsertion
+                    | crate::ChangeKind::ParagraphMarkDeletion
+                    | crate::ChangeKind::ParagraphPropertiesChanged
+                    | crate::ChangeKind::TableRowInsertion
+                    | crate::ChangeKind::TableRowDeletion
+                    | crate::ChangeKind::TableInsertion
+                    | crate::ChangeKind::TableDeletion
+            ) {
+                String::new()
+            } else {
+                let full = self.text_between(&range, TextView::Raw)?;
+                full.chars().take(PREVIEW_MAX_CHARS).collect()
+            };
+            result.push(RevisionInfo {
+                story: story_id.to_owned(),
+                change,
+                preview,
+            });
         }
         Ok(result)
     }
@@ -733,6 +761,50 @@ mod tests {
         let snapshots = doc.chunk_snapshots.lock().unwrap();
         assert!(snapshots.get("body", epoch).is_none());
         assert!(snapshots.get("body:t0:r0c0", epoch).is_none());
+    }
+
+    #[test]
+    fn revision_lists_are_read_again_only_for_changed_stories() {
+        let doc = seed("alpha beta");
+        for story in ["header:rId7", "fn:1"] {
+            doc.create_story(story, "note", "Normal", "left").unwrap();
+        }
+        for (story, at, text) in [("header:rId7", 4, "!"), ("body", 10, " one")] {
+            doc.insert_text(
+                &suggesting("Alice"),
+                Position::new(story, at),
+                text,
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        }
+        assert_eq!(doc.list_revisions().unwrap().len(), 2);
+        let kept = |story: &str| Arc::clone(&doc.revision_lists.lock().unwrap().entries[story].1);
+        let (header, body, note) = (kept("header:rId7"), kept("body"), kept("fn:1"));
+
+        // A suggestion reads the body again; plain typing in a story without
+        // changes reads it not at all.
+        doc.insert_text(
+            &suggesting("Bob"),
+            Position::new("body", 0),
+            "zero ",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.insert_text(&local(), Position::new("fn:1", 4), "s", FormatPolicy::Plain)
+            .unwrap();
+        let revisions = doc.list_revisions().unwrap();
+        assert_eq!(revisions.len(), 3);
+        assert_eq!(revisions[0].change.author, "Bob");
+        assert!(!Arc::ptr_eq(&kept("body"), &body));
+        assert!(
+            Arc::ptr_eq(&kept("header:rId7"), &header),
+            "an untouched story's list is kept"
+        );
+        assert!(
+            Arc::ptr_eq(&kept("fn:1"), &note),
+            "an empty list outlives plain typing"
+        );
     }
 
     #[test]

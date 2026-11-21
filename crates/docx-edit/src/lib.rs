@@ -351,12 +351,34 @@ impl<T> EpochCache<T> {
 /// (content, embedded maps, the story entry itself) with the next revision.
 /// `structure` moves on with each change that can add, remove or reshape a
 /// table: an embed inserted, anything deleted, a story added or removed, or a
-/// table key set.
+/// table key set. `marked` is the revision each story last changed at by
+/// anything but inserting plain text (no `ins`, `del` or `rPrChange` on it).
 #[derive(Default)]
 struct StoryRevisions {
     current: u64,
     structure: u64,
     stamped: HashMap<Arc<str>, u64>,
+    marked: HashMap<Arc<str>, u64>,
+}
+
+/// A story's revisions in [`StoryRevisions`]: `(stamped, marked)`.
+type StoryStamp = (u64, u64);
+
+/// Whether `event` only inserts plain text: no embed, no deletion, no
+/// formatting, no map key, no tracked-change attribute.
+fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> bool {
+    let yrs::types::Event::Text(event) = event else {
+        return false;
+    };
+    event.delta(txn).iter().all(|delta| match delta {
+        Delta::Retain(_, None) => true,
+        Delta::Inserted(Out::Any(Any::String(_)), attrs) => attrs.as_ref().is_none_or(|attrs| {
+            [INS, DEL, "rPrChange"]
+                .iter()
+                .all(|key| attrs.get(*key).is_none_or(|value| *value == Any::Null))
+        }),
+        _ => false,
+    })
 }
 
 impl StoryRevisions {
@@ -382,17 +404,48 @@ impl StoryRevisions {
             match event.path().front() {
                 Some(yrs::types::PathSegment::Key(story)) => {
                     self.stamped.insert(Arc::clone(story), self.current);
+                    if !inserts_plain_text(txn, event) {
+                        self.marked.insert(Arc::clone(story), self.current);
+                    }
                 }
                 Some(yrs::types::PathSegment::Index(_)) => {}
                 None => {
                     if let yrs::types::Event::Map(entries) = event {
                         for story in entries.keys(txn).keys() {
                             self.stamped.insert(Arc::clone(story), self.current);
+                            self.marked.insert(Arc::clone(story), self.current);
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// Per-story values kept across edits, each read at the story's revisions and
+/// served while the story is unchanged, or while it only had plain text
+/// inserted and the value says that cannot change it. A removed story's entry
+/// is never served again: removing it stamped and marked a newer revision.
+struct StoryCache<T> {
+    entries: HashMap<Box<str>, (StoryStamp, Arc<T>)>,
+}
+
+impl<T> Default for StoryCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<T> StoryCache<T> {
+    fn get(&self, story_id: &str, now: StoryStamp, keeps: impl Fn(&T) -> bool) -> Option<Arc<T>> {
+        let (at, value) = self.entries.get(story_id)?;
+        (at.0 == now.0 || (at.1 == now.1 && keeps(value))).then(|| Arc::clone(value))
+    }
+
+    fn insert(&mut self, story_id: &str, at: StoryStamp, value: Arc<T>) {
+        self.entries.insert(story_id.into(), (at, value));
     }
 }
 
@@ -416,6 +469,7 @@ pub struct EditingDoc {
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     table_membership: Mutex<Option<TableMembership>>,
+    revision_lists: Mutex<StoryCache<Vec<RevisionInfo>>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
     _update_sub: Subscription,
@@ -467,10 +521,19 @@ impl EditingDoc {
             chunk_snapshots: Mutex::default(),
             story_revisions,
             table_membership: Mutex::new(None),
+            revision_lists: Mutex::default(),
             package: Mutex::new(None),
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
         }
+    }
+
+    /// The revisions `story_id` last changed at: by anything, and by anything
+    /// but inserting plain text.
+    pub(crate) fn story_revision(&self, story_id: &str) -> StoryStamp {
+        let revisions = self.story_revisions.lock().unwrap();
+        let at = |stamps: &HashMap<Arc<str>, u64>| stamps.get(story_id).copied().unwrap_or(0);
+        (at(&revisions.stamped), at(&revisions.marked))
     }
 
     /// Records what reseeding a field needs from the source package.
@@ -1509,12 +1572,19 @@ mod tests {
         let (since, typed, stories) = changed_since(since);
         assert_eq!(stories, ["body"], "a remote text edit");
         assert_eq!(typed, structure, "typing moves no table");
+        let marked = |story: &str| b.story_revisions.lock().unwrap().marked[story];
+        assert!(marked("body") < since, "plain typing marks nothing");
 
         let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
         b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
             .unwrap();
         let (since, _, stories) = changed_since(since);
         assert_eq!(stories, ["header:rId7"], "a pilcrow property");
+        assert_eq!(
+            marked("header:rId7"),
+            since,
+            "a pilcrow property marks its story"
+        );
 
         b.create_story("fn:1", "note", "Normal", "left").unwrap();
         b.delete_story("header:rId7").unwrap();
