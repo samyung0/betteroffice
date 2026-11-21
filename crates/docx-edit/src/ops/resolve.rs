@@ -593,28 +593,74 @@ fn sorted_stories<T: ReadTxn>(txn: &T) -> Vec<(String, TextRef)> {
         .collect()
 }
 
+/// Whether a field in a story keeps a tracked change as markup in its code or
+/// result, and whether any field or content control there could (its data
+/// holds one), which no plain text inserted around it can change.
+pub(crate) struct FieldChanges {
+    kept: bool,
+    candidates: bool,
+}
+
+fn story_field_changes<T: ReadTxn>(txn: &T, story: &TextRef) -> FieldChanges {
+    let chunks = snapshot(story, txn);
+    let mut candidates = false;
+    let kept = chunks.iter().enumerate().any(|(position, chunk)| {
+        let ChunkKind::Embed(Some(map)) = &chunk.kind else {
+            return false;
+        };
+        match (map.get(txn, KIND_KEY), map.get(txn, "fieldData")) {
+            (_, Some(Out::Any(Any::String(data)))) => {
+                candidates |= field_changes::field_data_keeps_changes(&data);
+                field_changes::embed_keeps_changes(txn, &chunks, position, &data)
+            }
+            (Some(Out::Any(Any::String(kind))), _) if kind.as_ref() == "sdt" => {
+                matches!(map.get(txn, "content"), Some(Out::Any(content)) if field_changes::sdt_keeps_changes(&content))
+            }
+            _ => false,
+        }
+    });
+    FieldChanges {
+        kept,
+        candidates: candidates || kept,
+    }
+}
+
 impl EditingDoc {
     /// Whether a field anywhere keeps a tracked change as markup in its code
     /// or result: one only [`ChangeTarget::All`] resolves.
     pub fn has_field_changes(&self) -> bool {
         let txn = self.yrs_doc().transact();
-        sorted_stories(&txn).iter().any(|(_, story)| {
-            let chunks = snapshot(story, &txn);
-            chunks.iter().enumerate().any(|(position, chunk)| {
-                let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-                    return false;
-                };
-                match (map.get(&txn, KIND_KEY), map.get(&txn, "fieldData")) {
-                    (_, Some(Out::Any(Any::String(data)))) => {
-                        field_changes::embed_keeps_changes(&txn, &chunks, position, &data)
-                    }
-                    (Some(Out::Any(Any::String(kind))), _) if kind.as_ref() == "sdt" => {
-                        matches!(map.get(&txn, "content"), Some(Out::Any(content)) if field_changes::sdt_keeps_changes(&content))
-                    }
-                    _ => false,
-                }
-            })
-        })
+        sorted_stories(&txn)
+            .iter()
+            .any(|(story_id, story)| self.story_has_field_changes(&txn, story_id, story))
+    }
+
+    /// [`Self::has_field_changes`] for one story. Its answer is read again only
+    /// once the story has changed, or, with no field there that could keep a
+    /// change, once more than plain text was inserted.
+    pub(crate) fn story_has_field_changes<T: ReadTxn>(
+        &self,
+        txn: &T,
+        story_id: &str,
+        story: &TextRef,
+    ) -> bool {
+        let revision = self.story_revision(story_id);
+        let kept = self.kept_field_changes.lock().unwrap().get(
+            story_id,
+            revision,
+            |answer: &FieldChanges| !answer.candidates,
+        );
+        if let Some(answer) = kept {
+            return answer.kept;
+        }
+        let answer = story_field_changes(txn, story);
+        let kept = answer.kept;
+        self.kept_field_changes.lock().unwrap().insert(
+            story_id,
+            revision,
+            std::sync::Arc::new(answer),
+        );
+        kept
     }
 
     /// Accepts the targeted changes: pending insertions become plain content

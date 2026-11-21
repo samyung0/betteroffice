@@ -470,6 +470,7 @@ pub struct EditingDoc {
     story_revisions: Arc<Mutex<StoryRevisions>>,
     table_membership: Mutex<Option<TableMembership>>,
     revision_lists: Mutex<StoryCache<Vec<RevisionInfo>>>,
+    kept_field_changes: Mutex<StoryCache<ops::resolve::FieldChanges>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
     _update_sub: Subscription,
@@ -522,6 +523,7 @@ impl EditingDoc {
             story_revisions,
             table_membership: Mutex::new(None),
             revision_lists: Mutex::default(),
+            kept_field_changes: Mutex::default(),
             package: Mutex::new(None),
             _update_sub: update_sub,
             _story_revision_sub: story_revision_sub,
@@ -1541,6 +1543,36 @@ mod tests {
             "a value built before a commit is not kept"
         );
         assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn field_change_answers_are_read_again_only_for_changed_stories() {
+        let doc = seed("alpha");
+        assert!(!doc.has_field_changes());
+        let kept = |story: &str| doc.kept_field_changes.lock().unwrap().entries[story].0;
+        let (header, body) = (kept("header:rId7"), kept("body"));
+
+        // Plain typing reads neither story again: no field there could keep a change.
+        doc.insert_text(
+            &local("A"),
+            Position::new("body", 5),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert!(!doc.has_field_changes());
+        assert_eq!((kept("header:rId7"), kept("body")), (header, body));
+
+        // A paragraph split reads the body again, and only the body.
+        doc.split_paragraph(&local("A"), Position::new("body", 2))
+            .unwrap();
+        assert!(!doc.has_field_changes());
+        assert_eq!(
+            kept("header:rId7"),
+            header,
+            "an untouched story's answer is kept"
+        );
+        assert!(kept("body") > body);
     }
 
     #[test]
