@@ -976,6 +976,17 @@ impl EditingDoc {
         Ok(story.len(&txn))
     }
 
+    /// Each paragraph of `story_id` as `(paraId, length in units)`, in story
+    /// order, read from the committed segment index.
+    pub fn paragraph_spans(&self, story_id: &str) -> EditResult<Vec<(String, u32)>> {
+        Ok(self
+            .segment_index(story_id)?
+            .paras()
+            .iter()
+            .map(|para| (para.para_id.to_string(), para.pilcrow - para.start))
+            .collect())
+    }
+
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
@@ -1573,6 +1584,26 @@ mod tests {
             "an untouched story's answer is kept"
         );
         assert!(kept("body") > body);
+    }
+
+    #[test]
+    fn paragraph_spans_are_read_from_the_segment_index() {
+        let doc = seed("one two");
+        let split = doc
+            .split_paragraph(&local("A"), Position::new("body", 3))
+            .unwrap();
+        assert_eq!(
+            doc.paragraph_spans("body").unwrap(),
+            vec![(split.first_para_id, 3), (split.second_para_id, 4)]
+        );
+        let epoch = doc.epoch.load(Ordering::Relaxed);
+        assert!(
+            doc.segment_indexes
+                .lock()
+                .unwrap()
+                .get("body")
+                .is_some_and(|(at, _)| *at == epoch)
+        );
     }
 
     #[test]
