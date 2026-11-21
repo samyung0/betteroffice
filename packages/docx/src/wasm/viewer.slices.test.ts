@@ -319,3 +319,63 @@ for (const name of ['exchange-plan.docx', 'long-handbook.docx', 'japanese.docx']
     expect(canonical(slicedList)).toBe(canonical(wholeList));
   }, 60_000);
 }
+
+/**
+ * Two MS Gothic Japanese lists with Calibri markers, a page apart: page 1's
+ * numbers Latin (`1.`), page 2's CJK (`鰯1`), so only page 2's marker names
+ * the sliced face after Calibri.
+ */
+function twoListPackage(): Uint8Array {
+  const marker = '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="Calibri"/></w:rPr>';
+  const list = (id: number, text: string) => `<w:abstractNum w:abstractNumId="${id}"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="840" w:hanging="840"/></w:pPr>${marker}</w:lvl></w:abstractNum>`;
+  const item = (id: number) => `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${id}"/></w:numPr></w:pPr><w:r><w:t>本文</w:t></w:r></w:p>`;
+  return rezipContainer(Object.fromEntries(Object.entries({
+    '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${TYPE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${TYPE}.styles+xml"/><Override PartName="/word/numbering.xml" ContentType="${TYPE}.numbering+xml"/></Types>`,
+    '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/><Relationship Id="rId3" Type="${R}/numbering" Target="numbering.xml"/></Relationships>`,
+    'word/styles.xml': `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="MS Gothic" w:hAnsi="MS Gothic" w:eastAsia="MS Gothic"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
+    'word/numbering.xml': `<w:numbering ${W}>${list(0, '%1.')}${list(1, '鰯%1')}<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num><w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num></w:numbering>`,
+    'word/document.xml': `<w:document ${W}><w:body>${item(1)}<w:p><w:r><w:br w:type="page"/></w:r></w:p>${item(2)}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`,
+  }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
+}
+
+/** `pages` with font ids renumbered by first use and the open's number taken out of private family names. */
+function samePages(pages: unknown): string {
+  const ids = new Map<number, number>();
+  return JSON.stringify(pages, (key, value: unknown) => {
+    if (key === 'font' && typeof value === 'string') return value.replace(/BetterOffice Sliced \d+\./g, 'BetterOffice Sliced ');
+    if (key !== 'fontId' || typeof value !== 'number') return value;
+    if (!ids.has(value)) ids.set(value, ids.size);
+    return ids.get(value);
+  });
+}
+
+test('pages handed over as they are built end as a whole open\'s, a later page\'s marker renaming an earlier one\'s family', async () => {
+  const bytes = twoListPackage();
+  recordingFonts(true);
+  const whole = await openDocumentViewer(bytes);
+  recordingFonts(true);
+  const arrived: number[] = [];
+  const received: unknown[] = [];
+  const outlines = new Map<string, number>();
+  const handle = await openDocumentViewer(bytes, {
+    progressive: {
+      firstPages: () => 1,
+      onPages({ pages, slicedFaces }) {
+        for (const page of pages) {
+          arrived.push(page.pageIndex);
+          received[page.pageIndex] = structuredClone(page);
+        }
+        for (const face of slicedFaces) outlines.set(face.family, face.bytes.byteLength);
+      },
+    },
+  });
+  expect(whole.displayList().pages).toHaveLength(2);
+  // Page 1 again once page 2's marker named the face after Calibri.
+  expect(arrived).toEqual([0, 1, 0]);
+  expect(samePages(received)).toBe(samePages(whole.displayList().pages));
+  expect(samePages(handle.displayList().pages)).toBe(samePages(whole.displayList().pages));
+  const faces = handle.slicedFaces();
+  expect(faces.map((face) => new Uint8Array(face.bytes))).toEqual(whole.slicedFaces().map((face) => new Uint8Array(face.bytes)));
+  expect([...outlines.values()]).toEqual(faces.map((face) => face.bytes.byteLength));
+});

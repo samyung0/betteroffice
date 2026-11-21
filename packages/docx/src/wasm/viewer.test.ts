@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
 import type { DisplayList } from '../layout/render';
-import { configureDefaultFonts, initWasm, openDocumentViewer } from '../viewer';
+import { configureDefaultFonts, type DocxPageSize, initWasm, openDocumentViewer } from '../viewer';
 import { createYrsSession } from '../yrs';
 import { preloadEditWasm } from './edit';
 import { preloadOpcWasm, rezipContainer } from './opc';
@@ -135,6 +135,44 @@ describe('DOCX viewer wasm', () => {
     } finally {
       DocxViewDocument.prototype.displayPagesJson = build;
       DocxViewDocument.prototype.free = free;
+    }
+  });
+
+  test('hands over the first pages before building the rest, then the rest in batches', async () => {
+    const steps: string[] = [];
+    const build = DocxViewDocument.prototype.displayPagesJson;
+    DocxViewDocument.prototype.displayPagesJson = function (start, end) {
+      steps.push(`build ${start}-${end}`);
+      return build.call(this, start, end);
+    };
+    try {
+      let sizes: DocxPageSize[] = [];
+      const viewer = await openDocumentViewer(pagedPackage(20), {
+        progressive: {
+          firstPages(all) {
+            sizes = [...all];
+            return 2;
+          },
+          onPages({ pages }) {
+            steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+          },
+        },
+      });
+      expect(steps).toEqual([
+        'build 0-2',
+        'pages 0-2',
+        'build 2-10',
+        'pages 2-10',
+        'build 10-18',
+        'pages 10-18',
+        'build 18-20',
+        'pages 18-20',
+      ]);
+      const { pages } = viewer.displayList();
+      viewer.dispose();
+      expect(sizes).toEqual(pages.map(({ width, height }) => ({ width, height })));
+    } finally {
+      DocxViewDocument.prototype.displayPagesJson = build;
     }
   });
 

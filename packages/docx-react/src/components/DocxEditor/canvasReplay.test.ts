@@ -87,6 +87,17 @@ describe('CanvasReplayState', () => {
     expect(state.prepare(surface, 1n, environment)).not.toBeNull();
   });
 
+  test('with no frame, a page shown keeps its pixels until its object or revision changes', () => {
+    const state = new CanvasReplayState();
+    const surface = canvas();
+    const page = { pageIndex: 0, width: 100, height: 100, primitives: [] };
+    state.didPresent(state.prepare(surface, undefined, environment, { drawn: page, revision: 0 })!);
+    // More pages arrived: this one is the same.
+    expect(state.prepare(surface, undefined, environment, { drawn: page, revision: 0 })).toBeNull();
+    expect(state.prepare(surface, undefined, environment, { drawn: page, revision: 1 })).not.toBeNull();
+    expect(state.prepare(surface, undefined, environment, { drawn: { ...page }, revision: 0 })).not.toBeNull();
+  });
+
   test('environment changes and remounted canvases require a successful new presentation', () => {
     const state = new CanvasReplayState();
     const surface = canvas();

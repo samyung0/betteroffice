@@ -3,7 +3,7 @@
 use wasm_alloc as _;
 
 use docx_edit::{EngineSession, package_media, parse_docx_for_edit, seed_parsed_docx_in_place};
-use docx_layout::display_list::ResidentDisplayInput;
+use docx_layout::display_list::{ResidentDisplayInput, px};
 use docx_parse::S9PackageWire;
 use docx_parse::section::SectionProperties;
 use serde_json::{Value, json};
@@ -13,13 +13,16 @@ const DEFAULT_PAGE_GAP: f64 = 24.0;
 
 /// Opens in steps so the host registers the fonts the layout needs first:
 /// `open`, `layoutRequestJson`, `fontRequirementsJson`, `layout`, then
-/// `displayPagesJson` a batch of pages at a time.
+/// `displayPagesJson` a batch of pages at a time (`pageSizesJson` sizes them
+/// all before any is built).
 #[wasm_bindgen]
 pub struct DocxViewDocument {
     engine: EngineSession,
     request: String,
     /// What the display list is built with once laid out, parsed once.
     display: Option<ResidentDisplayInput>,
+    /// Each laid-out page's `[width, height]`, as its display page gives them.
+    page_sizes: Vec<[serde_json::Number; 2]>,
 }
 
 #[wasm_bindgen]
@@ -34,6 +37,7 @@ impl DocxViewDocument {
             engine,
             request,
             display: None,
+            page_sizes: Vec::new(),
         })
     }
 
@@ -62,7 +66,7 @@ impl DocxViewDocument {
             Some(chains) => json!({ "fontChains": chains }),
             None => json!({}),
         };
-        let pages = self
+        let sizes = self
             .engine
             .layout_document_with_regions(request)
             .map_err(js_error)?;
@@ -71,7 +75,15 @@ impl DocxViewDocument {
                 .region_display_input(&extras.to_string())
                 .map_err(js_error)?,
         );
-        u32::try_from(pages).map_err(js_error)
+        self.page_sizes = sizes.into_iter().map(|(w, h)| [px(w), px(h)]).collect();
+        u32::try_from(self.page_sizes.len()).map_err(js_error)
+    }
+
+    /// `[[width, height], …]` of every laid-out page, before its display page
+    /// is built.
+    #[wasm_bindgen(js_name = pageSizesJson)]
+    pub fn page_sizes_json(&self) -> String {
+        json!(self.page_sizes).to_string()
     }
 
     /// `{ pages }` display list JSON of pages `start..end`, built from the
@@ -320,6 +332,29 @@ mod tests {
         let pages = document.layout(&document.layout_request_json()).unwrap();
         assert!(pages > 0);
         document.display_pages_json(0, pages).unwrap();
+    }
+
+    /// Every page is sized right after layout as its display page is built.
+    #[test]
+    fn page_sizes_are_the_display_pages_sizes() {
+        for bytes in [
+            &include_bytes!("../../../poc/fixtures/book-30p.docx")[..],
+            include_bytes!("../../../poc/fixtures/wordprocessingml-comprehensive.docx"),
+        ] {
+            let mut document = DocxViewDocument::open(bytes).unwrap();
+            let pages = document.layout(&document.layout_request_json()).unwrap();
+            let sizes: Value = serde_json::from_str(&document.page_sizes_json()).unwrap();
+            let list: Value =
+                serde_json::from_str(&document.display_pages_json(0, pages).unwrap()).unwrap();
+            let built = list["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|page| json!([page["width"], page["height"]]))
+                .collect::<Vec<_>>();
+            assert!(pages > 1);
+            assert_eq!(sizes, Value::Array(built));
+        }
     }
 
     /// The viewer's list as the host joins it, from batches of `batch` pages.

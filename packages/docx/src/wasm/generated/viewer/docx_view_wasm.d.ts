@@ -4,7 +4,8 @@
 /**
  * Opens in steps so the host registers the fonts the layout needs first:
  * `open`, `layoutRequestJson`, `fontRequirementsJson`, `layout`, then
- * `displayPagesJson` a batch of pages at a time.
+ * `displayPagesJson` a batch of pages at a time (`pageSizesJson` sizes them
+ * all before any is built).
  */
 export class DocxViewDocument {
     private constructor();
@@ -30,6 +31,11 @@ export class DocxViewDocument {
      */
     layoutRequestJson(): string;
     static open(bytes: Uint8Array): DocxViewDocument;
+    /**
+     * `[[width, height], …]` of every laid-out page, before its display page
+     * is built.
+     */
+    pageSizesJson(): string;
     static version(): string;
 }
 
@@ -204,6 +210,7 @@ export interface InitOutput {
     readonly docxviewdocument_layout: (a: number, b: number, c: number) => [number, number, number];
     readonly docxviewdocument_layoutRequestJson: (a: number) => [number, number];
     readonly docxviewdocument_open: (a: number, b: number) => [number, number, number];
+    readonly docxviewdocument_pageSizesJson: (a: number) => [number, number];
     readonly docxviewdocument_version: () => [number, number];
     readonly hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

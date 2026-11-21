@@ -266,8 +266,11 @@ export function CanvasPagesView({
   onGlyphOutlines,
   offscreenReplay,
   onWorkerPresentationChange,
+  pendingPages,
 }: {
   displayList: DisplayList;
+  /** The sizes of the pages still to come after `displayList`'s: blank space holds their place. */
+  pendingPages?: readonly { width: number; height: number }[];
   /** Binary retained-frame metadata used to scope page replay. */
   frame?: RetainedFrame | null;
   resolveImage?: ImageResolver;
@@ -627,7 +630,12 @@ export function CanvasPagesView({
       }
       // A remounted canvas (surface-mode flip) has no pixels regardless of
       // the retained frame's damage set — always paint it.
-      const presentation = replayState.prepare(canvas, retainedPage?.pageId, environment);
+      const presentation = replayState.prepare(
+        canvas,
+        retainedPage?.pageId,
+        environment,
+        retainedPage ? undefined : { drawn: page, revision: displayPageRevision(page) }
+      );
       if (!presentation) continue;
       // Raster off-DOM first. The connected canvas keeps its previous pixels
       // until every damaged page has finished all async image/glyph work.
@@ -741,6 +749,18 @@ export function CanvasPagesView({
             />
           );
         })}
+        {pendingPages?.length ? (
+          <div
+            aria-hidden="true"
+            style={{
+              flexShrink: 0,
+              width: Math.max(...pendingPages.map((page) => page.width)) * zoom,
+              height:
+                pendingPages.reduce((sum, page) => sum + page.height * zoom, 0) +
+                (pendingPages.length - 1) * pageGap,
+            }}
+          />
+        ) : null}
       </div>
     </div>
   );

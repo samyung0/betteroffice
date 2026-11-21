@@ -18,6 +18,7 @@ export const docxviewdocument_fontRequirementsJson: (a: number, b: number, c: nu
 export const docxviewdocument_layout: (a: number, b: number, c: number) => [number, number, number];
 export const docxviewdocument_layoutRequestJson: (a: number) => [number, number];
 export const docxviewdocument_open: (a: number, b: number) => [number, number, number];
+export const docxviewdocument_pageSizesJson: (a: number) => [number, number];
 export const docxviewdocument_version: () => [number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
