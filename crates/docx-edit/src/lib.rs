@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
-use yrs::types::{Attrs, Delta};
+use yrs::types::{Attrs, DeepObservable, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
@@ -346,6 +346,62 @@ impl<T> EpochCache<T> {
     }
 }
 
+/// The revision each story last changed at (upstream #912, #1530). Every
+/// committed change to the stories map stamps the stories it touched
+/// (content, embedded maps, the story entry itself) with the next revision.
+/// `structure` moves on with each change that can add, remove or reshape a
+/// table: an embed inserted, anything deleted, a story added or removed, or a
+/// table key set.
+#[derive(Default)]
+struct StoryRevisions {
+    current: u64,
+    structure: u64,
+    stamped: HashMap<Arc<str>, u64>,
+}
+
+impl StoryRevisions {
+    fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
+        self.current += 1;
+        if events.iter().any(|event| match event {
+            yrs::types::Event::Text(event) => event.delta(txn).iter().any(|delta| match delta {
+                Delta::Inserted(Out::Any(Any::String(_)), _) | Delta::Retain(_, _) => false,
+                Delta::Inserted(_, _) | Delta::Deleted(_) => true,
+            }),
+            yrs::types::Event::Map(event) => {
+                event.path().is_empty()
+                    || event
+                        .keys(txn)
+                        .keys()
+                        .any(|key| matches!(key.as_ref(), KIND_KEY | "rows" | "cells" | "story"))
+            }
+            _ => true,
+        }) {
+            self.structure += 1;
+        }
+        for event in events.iter() {
+            match event.path().front() {
+                Some(yrs::types::PathSegment::Key(story)) => {
+                    self.stamped.insert(Arc::clone(story), self.current);
+                }
+                Some(yrs::types::PathSegment::Index(_)) => {}
+                None => {
+                    if let yrs::types::Event::Map(entries) = event {
+                        for story in entries.keys(txn).keys() {
+                            self.stamped.insert(Arc::clone(story), self.current);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The table cell stories, read at one `structure` revision.
+struct TableMembership {
+    structure: u64,
+    cells: std::collections::HashSet<String>,
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -358,9 +414,12 @@ pub struct EditingDoc {
     /// with the epoch before it ([`segments::follow_commit`]).
     segment_indexes: Arc<Mutex<segments::Indexes>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    story_revisions: Arc<Mutex<StoryRevisions>>,
+    table_membership: Mutex<Option<TableMembership>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
     _update_sub: Subscription,
+    _story_revision_sub: Subscription,
 }
 
 impl EditingDoc {
@@ -394,6 +453,11 @@ impl EditingDoc {
                 }
             })
             .expect("a fresh doc accepts an update observer");
+        let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
+        let stamped = Arc::clone(&story_revisions);
+        let story_revision_sub = doc
+            .get_or_insert_map(STORIES)
+            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
         Self {
             doc,
             client_id,
@@ -401,8 +465,11 @@ impl EditingDoc {
             epoch,
             segment_indexes,
             chunk_snapshots: Mutex::default(),
+            story_revisions,
+            table_membership: Mutex::new(None),
             package: Mutex::new(None),
             _update_sub: update_sub,
+            _story_revision_sub: story_revision_sub,
         }
     }
 
@@ -1411,6 +1478,53 @@ mod tests {
             "a value built before a commit is not kept"
         );
         assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn story_revisions_name_the_stories_each_change_touched() {
+        let (a, b) = peers("one two", 1, 2);
+        // The stories changed after `since`, sorted, with the current revision.
+        let changed_since = |since: u64| {
+            let revisions = b.story_revisions.lock().unwrap();
+            let mut stories: Vec<String> = revisions
+                .stamped
+                .iter()
+                .filter(|(_, revision)| **revision > since)
+                .map(|(story, _)| story.to_string())
+                .collect();
+            stories.sort();
+            (revisions.current, revisions.structure, stories)
+        };
+        let (since, structure, stories) = changed_since(0);
+        assert_eq!(stories, ["body", "header:rId7"]);
+
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (since, typed, stories) = changed_since(since);
+        assert_eq!(stories, ["body"], "a remote text edit");
+        assert_eq!(typed, structure, "typing moves no table");
+
+        let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
+        b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
+            .unwrap();
+        let (since, _, stories) = changed_since(since);
+        assert_eq!(stories, ["header:rId7"], "a pilcrow property");
+
+        b.create_story("fn:1", "note", "Normal", "left").unwrap();
+        b.delete_story("header:rId7").unwrap();
+        let (_, created, stories) = changed_since(since);
+        assert_eq!(
+            stories,
+            ["fn:1", "header:rId7"],
+            "created and deleted stories"
+        );
+        assert!(created > typed, "a story added or removed");
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {

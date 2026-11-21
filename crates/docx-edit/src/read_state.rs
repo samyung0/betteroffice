@@ -184,6 +184,26 @@ pub(crate) fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
     cells
 }
 
+/// Whether `story` is a table cell story, from the cell list read at the
+/// current table structure (upstream #1530): typing keeps the list, and only a
+/// change that can add, remove or reshape a table reads every story again.
+pub(crate) fn is_table_cell_story<T: ReadTxn>(doc: &EditingDoc, txn: &T, story: &str) -> bool {
+    let structure = doc.story_revisions.lock().unwrap().structure;
+    let mut membership = doc.table_membership.lock().unwrap();
+    if membership
+        .as_ref()
+        .is_none_or(|cached| cached.structure != structure)
+    {
+        *membership = Some(crate::TableMembership {
+            structure,
+            cells: table_cell_stories(txn),
+        });
+    }
+    membership
+        .as_ref()
+        .is_some_and(|cached| cached.cells.contains(story))
+}
+
 impl EditingDoc {
     /// Aggregates text-unit marks and start-paragraph state over a story range.
     pub fn selection_context(&self, range: &StoryRange) -> OpResult<SelectionContextInfo> {
@@ -354,7 +374,7 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(&txn).contains(&range.story),
+            in_table: is_table_cell_story(self, &txn, &range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
@@ -601,6 +621,60 @@ mod tests {
                 .in_table
         );
         assert!(!context(&doc, 1, 4).in_table);
+    }
+
+    #[test]
+    fn table_cell_list_is_kept_until_a_table_changes() {
+        let doc = seed("body text");
+        let table = |cell_story: &str| {
+            doc.create_story(cell_story, "cell", "Normal", "left")
+                .unwrap();
+            let cell = Any::Map(Arc::new(HashMap::from([(
+                "story".into(),
+                Any::from(cell_story),
+            )])));
+            let row = Any::Map(Arc::new(HashMap::from([(
+                "cells".into(),
+                Any::Array(Arc::from(vec![cell])),
+            )])));
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "table".into(),
+                    payload: vec![("rows".into(), Any::Array(Arc::from(vec![row])))],
+                    attrs: yrs::types::Attrs::new(),
+                }],
+                &local(),
+            )
+            .unwrap();
+        };
+        let in_table = |story: &str| {
+            doc.selection_context(&StoryRange::new(story, 0, 0))
+                .unwrap()
+                .in_table
+        };
+        table("body:t0:r0c0");
+        assert!(in_table("body:t0:r0c0"));
+        let read_at = |doc: &EditingDoc| {
+            doc.table_membership
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|membership| membership.structure)
+        };
+        let structure = read_at(&doc);
+
+        // Typing keeps the list read before.
+        doc.insert_text(&local(), Position::new("body", 3), "x", FormatPolicy::Plain)
+            .unwrap();
+        assert!(!in_table("body"));
+        assert_eq!(read_at(&doc), structure);
+
+        // A new table is read again, with its cell.
+        table("body:t1:r0c0");
+        assert!(in_table("body:t1:r0c0"));
+        assert_ne!(read_at(&doc), structure);
     }
 
     #[test]
