@@ -151,6 +151,7 @@ export function useDocxEditorRefApi({
   selectionChangeSubscribersRef,
   getCachedStyleResolver,
   commentIdAllocator,
+  showCitation,
 }: {
   ref: React.ForwardedRef<DocxEditorRef>;
   document: Document | null;
@@ -174,6 +175,7 @@ export function useDocxEditorRefApi({
     styles: Parameters<typeof createStyleResolver>[0]
   ) => ReturnType<typeof createStyleResolver>;
   commentIdAllocator: CommentIdAllocator;
+  showCitation: DocxEditorRef['showCitation'];
 }) {
   useImperativeHandle(
     ref,
@@ -364,6 +366,7 @@ export function useDocxEditorRefApi({
       scrollToChangeId: (revisionId) =>
         pagedEditorRef.current?.scrollToChangeId(revisionId) ?? false,
       highlightRange: (from, to) => pagedEditorRef.current?.highlightRange(from, to),
+      showCitation,
 
       findInDocument: (query, options) => {
         const session = pagedEditorRef.current?.getYrsSession();

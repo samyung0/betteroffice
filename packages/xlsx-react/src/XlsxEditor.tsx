@@ -311,6 +311,11 @@ export interface XlsxEditorProps {
    * font and the editor shows no error; the host reports it.
    */
   onFontError?: (family: string, error: Error) => void;
+  /**
+   * A cell the host marks (a citation), filled in `color` over the grid while
+   * its sheet shows. Display only: no edit, no selection, nothing peers see.
+   */
+  markedCell?: { sheetId: string; row: number; col: number; color: string } | null;
 }
 
 /**
@@ -853,6 +858,7 @@ function XlsxEditorContent({
   initialZoom = 1,
   defaultFonts,
   onFontError,
+  markedCell,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   // a cut reading its selection in pieces refuses edits, as a send does, so
@@ -3377,6 +3383,11 @@ function XlsxEditorContent({
       ? rangeRect(grid, expandRangeToMergedCells(normalizeRange(pointed), visibleMergedRanges))
       : null;
   const scaledPointedRect = pointedRect ? scaledRect(pointedRect, paintedZoom) : null;
+  const markRect =
+    grid && markedCell?.sheetId === activeSheetId
+      ? cellRect(grid, markedCell.row, markedCell.col)
+      : null;
+  const scaledMarkRect = markRect ? scaledRect(markRect, paintedZoom) : null;
   // committed inputs on this sheet the worker has not drawn yet, over their cells.
   const optimisticCells = grid
     ? optimistic.flatMap((entry) => {
@@ -4003,6 +4014,19 @@ function XlsxEditorContent({
               pointerEvents: 'none',
             }}
           >
+            {scaledMarkRect && markedCell && (
+              <div
+                data-citation-highlight="true"
+                style={{
+                  position: 'absolute',
+                  left: scaledMarkRect.x,
+                  top: scaledMarkRect.y,
+                  width: scaledMarkRect.w,
+                  height: scaledMarkRect.h,
+                  background: markedCell.color,
+                }}
+              />
+            )}
             {scaledSelectionRect && !selectedChart && (
               <div
                 data-testid="xlsx-selection"

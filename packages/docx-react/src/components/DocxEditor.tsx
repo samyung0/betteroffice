@@ -48,6 +48,12 @@ import {
   CanvasSidebarBrightenOverlay,
   type CanvasBrightenRange,
 } from './DocxEditor/overlays/CanvasSidebarBrightenOverlay';
+import {
+  CanvasCitationOverlay,
+  citedRange,
+  findCitedParagraph,
+  type DocxCitation,
+} from './DocxEditor/overlays/CanvasCitationOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
 import { isWithinPageArea } from './DocxEditor/internals/pageAreaRouting';
 import { useFormattingActions } from './DocxEditor/hooks/useFormattingActions';
@@ -450,6 +456,14 @@ export interface DocxEditorRef {
    * @example ref.current?.highlightRange(10, 24)
    */
   highlightRange: (from: number, to: number) => void;
+  /**
+   * Marks the body paragraph `citation.match` picks among the document's
+   * paragraphs in `citation.color`, and centres it once the pages hold it.
+   * Display only: no selection, no document change, nothing collaborators see.
+   * The mark follows its paragraph through edits until the next call; `null`
+   * or no pick clears it.
+   */
+  showCitation: (citation: DocxCitation | null) => void;
   /** Open print preview */
   openPrintPreview: () => void;
   /** Print the document directly */
@@ -1543,6 +1557,21 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return null;
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
+  // A host's citation (showCitation): its paragraph is picked once per call,
+  // after the first layout, and marked at its live range after every layout.
+  const [citation, setCitation] = useState<DocxCitation | null>(null);
+  const laidOut = canvasRenderer.displayList != null;
+  const citedParagraph = useMemo(() => {
+    const session = yrsCore.session;
+    return citation && session && laidOut ? findCitedParagraph(session, citation) : null;
+  }, [citation, yrsCore.session, laidOut]);
+  const citationRange = useMemo(() => {
+    const session = yrsCore.session;
+    const paged = pagedEditorRef.current;
+    if (!citedParagraph || !session || !paged || !canvasRenderer.queries) return null;
+    return citedRange(session, citedParagraph, paged.yrsLocToDisplayPosition);
+  }, [citedParagraph, yrsCore.session, canvasRenderer.queries]);
+
   const {
     displayList: printList,
     resolveImage: printImages,
@@ -1599,6 +1628,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     selectionChangeSubscribersRef,
     getCachedStyleResolver,
     commentIdAllocator: commentIdAllocatorRef.current,
+    showCitation: setCitation,
   });
 
   const initialSectionProperties = useMemo(
@@ -2361,6 +2391,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
         <CanvasFindHighlightOverlay
           matches={canvasFindMatches}
           currentIndex={findReplace.state.currentIndex}
+          overlayTarget={canvasFindOverlayTarget}
+          canvasHostRef={canvasRenderer.canvasHostRef}
+          displayListQueries={canvasRenderer.queries}
+          sidebarOpen={sidebarOpen}
+          zoom={zoom}
+        />
+      ) : null}
+      {canvasFindOverlayTarget && canvasRenderer.queries && citation ? (
+        <CanvasCitationOverlay
+          range={citationRange}
+          color={citation.color}
+          scrollKey={citedParagraph}
           overlayTarget={canvasFindOverlayTarget}
           canvasHostRef={canvasRenderer.canvasHostRef}
           displayListQueries={canvasRenderer.queries}
