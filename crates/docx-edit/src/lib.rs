@@ -349,10 +349,12 @@ impl<T> EpochCache<T> {
 /// The revision each story last changed at (upstream #912, #1530). Every
 /// committed change to the stories map stamps the stories it touched
 /// (content, embedded maps, the story entry itself) with the next revision.
+/// `marked` is the revision each story last changed at by anything that can
+/// add a tracked change or a field keeping one ([`item_change`]); typing,
+/// deleting and paragraph breaks outside tracked changes leave it.
 /// `structure` moves on with each change that can add, remove or reshape a
-/// table: an embed inserted, anything deleted, a story added or removed, or a
-/// table key set. `marked` is the revision each story last changed at by
-/// anything but inserting plain text (no `ins`, `del` or `rPrChange` on it).
+/// table: a table embed inserted or deleted, a table's keys set, a story
+/// added or removed.
 #[derive(Default)]
 struct StoryRevisions {
     current: u64,
@@ -364,61 +366,225 @@ struct StoryRevisions {
 /// A story's revisions in [`StoryRevisions`]: `(stamped, marked)`.
 type StoryStamp = (u64, u64);
 
-/// Whether `event` only inserts plain text: no embed, no deletion, no
-/// formatting, no map key, no tracked-change attribute.
-fn inserts_plain_text(txn: &yrs::TransactionMut, event: &yrs::types::Event) -> bool {
-    let yrs::types::Event::Text(event) = event else {
-        return false;
+/// The format keys whose ranges are tracked changes.
+const TRACKED_FORMATS: [&str; 3] = [INS, DEL, "rPrChange"];
+
+/// The paragraph mark keys holding tracked changes, as `list_changes` reads
+/// them.
+const MARK_CHANGE_KEYS: [&str; 4] = [PPR_INS, PPR_DEL, PPR_CHANGE, "_originalRunBoundaries"];
+
+/// The kind an embed's map names, read also from a map this commit deleted
+/// (its entries keep their content until the commit's garbage collection).
+fn embed_kind(item: yrs::block::ItemPtr) -> Option<Arc<str>> {
+    let yrs::block::ItemContent::Type(branch) = item.content() else {
+        return None;
     };
-    event.delta(txn).iter().all(|delta| match delta {
-        Delta::Retain(_, None) => true,
-        Delta::Inserted(Out::Any(Any::String(_)), attrs) => attrs.as_ref().is_none_or(|attrs| {
-            [INS, DEL, "rPrChange"]
-                .iter()
-                .all(|key| attrs.get(*key).is_none_or(|value| *value == Any::Null))
-        }),
-        _ => false,
-    })
+    let entry = branch.entry_item(KIND_KEY)?;
+    if entry.is_deleted() && !item.is_deleted() {
+        return None;
+    }
+    match entry.content() {
+        yrs::block::ItemContent::Any(values) => match values.last() {
+            Some(Any::String(kind)) => Some(Arc::clone(kind)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a tracked-change format is open right before `item`: the format
+/// markers left of it back to a paragraph mark `index` knows, then the
+/// formats open after that mark; back to the story's start without one.
+/// `index` is the story's segment index in step with the state before the
+/// commit: a tracked format the commit inserted or deleted left of that mark
+/// marks the story by itself.
+fn tracked_format_open_before(item: yrs::block::ItemPtr, index: Option<&SegmentIndex>) -> bool {
+    let mut decided = [false; TRACKED_FORMATS.len()];
+    let mut left = item.left();
+    while let Some(prev) = left {
+        left = prev.left();
+        if prev.is_deleted() {
+            continue;
+        }
+        match prev.content() {
+            yrs::block::ItemContent::Format(key, value) => {
+                if let Some(at) = TRACKED_FORMATS
+                    .iter()
+                    .position(|tracked| **key == **tracked)
+                    && !decided[at]
+                {
+                    if **value != Any::Null {
+                        return true;
+                    }
+                    decided[at] = true;
+                    if decided.iter().all(|decided| *decided) {
+                        return false;
+                    }
+                }
+            }
+            yrs::block::ItemContent::Type(_) => {
+                if let Some(index) = index
+                    && let Some(slot) = index.slot_of(prev.id())
+                {
+                    let after = &index.paras()[slot].after;
+                    return TRACKED_FORMATS.iter().zip(decided).any(|(key, decided)| {
+                        !decided && after.get(*key).is_some_and(|value| *value != Any::Null)
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What `item`, inserted (`added`) or deleted by a commit, did to its story:
+/// `(story, marks, structure)`, `None` outside the stories. It marks the
+/// story when it can add a tracked change or a field keeping one: a tracked
+/// format inserted or deleted, content inserted where a tracked format is
+/// open, an embed other than a paragraph mark inserted, a tracked-change key
+/// of a paragraph mark set, any key of another embed set. Deleting content
+/// and inserting plain text and paragraph marks does not. Tables and story
+/// entries mark the story and the structure.
+fn item_change(
+    item: yrs::block::ItemPtr,
+    added: bool,
+    stories: yrs::branch::BranchPtr,
+    inserted: &yrs::IdSet,
+    index_of: &mut impl FnMut(&str) -> Option<Arc<SegmentIndex>>,
+) -> Option<(Arc<str>, bool, bool)> {
+    use yrs::block::ItemContent;
+    let (story, level) = segments::story_level(item, stories)?;
+    let Some(level) = level else {
+        // A story added, removed or replaced.
+        return Some((story, true, true));
+    };
+    // Inserted and deleted again, or arrived deleted: nothing of it stands.
+    if (added && item.is_deleted()) || (!added && inserted.contains(item.id())) {
+        return Some((story, false, false));
+    }
+    let tracked = |key: &str| TRACKED_FORMATS.contains(&key);
+    if level != item {
+        let kind_entry = item.parent_sub().is_some_and(|key| &**key == KIND_KEY)
+            && matches!(item.content(), ItemContent::Any(values)
+                if matches!(values.last(), Some(Any::String(kind)) if &**kind == "table"));
+        let direct = item.parent_branch().and_then(|parent| parent.item()) == Some(level);
+        let (marks, structure) = if kind_entry || !direct {
+            (true, true)
+        } else if level.is_deleted() {
+            // Removed with its embed, which tells by itself.
+            (false, false)
+        } else {
+            match embed_kind(level).as_deref() {
+                Some("table") | None => (true, true),
+                // A new mark's kind is told by the mark itself; an old one's
+                // changing kind marks.
+                Some(PILCROW_KIND) => (
+                    item.parent_sub().is_some_and(|key| {
+                        MARK_CHANGE_KEYS.contains(&&**key)
+                            || (&**key == KIND_KEY && !inserted.contains(level.id()))
+                    }),
+                    false,
+                ),
+                Some(_) => (true, false),
+            }
+        };
+        return Some((story, marks, structure));
+    }
+    // A run of inserted items reads the formats open before it from its first.
+    let mut open = || {
+        added
+            && item
+                .left()
+                .is_none_or(|left| left.is_deleted() || !inserted.contains(left.id()))
+            && tracked_format_open_before(item, index_of(&story).as_deref())
+    };
+    let (marks, structure) = match item.content() {
+        ItemContent::Format(key, _) => (tracked(key) || open(), false),
+        ItemContent::String(_) => (open(), false),
+        ItemContent::Type(_) => match embed_kind(item).as_deref() {
+            Some("table") => (true, true),
+            Some(PILCROW_KIND) => (open(), false),
+            _ => (added, false),
+        },
+        _ => (true, true),
+    };
+    Some((story, marks, structure))
 }
 
 impl StoryRevisions {
-    fn stamp(&mut self, txn: &yrs::TransactionMut, events: &yrs::types::Events) {
+    /// Stamps the stories a commit touched, read from its inserted and
+    /// deleted items rather than its events' deltas, which walk whole
+    /// stories (Q807 A). `indexes` at `epoch` are the segment indexes in step
+    /// with the state before the commit.
+    fn stamp(
+        &mut self,
+        txn: &yrs::TransactionMut,
+        events: &yrs::types::Events,
+        indexes: &Mutex<segments::Indexes>,
+        epoch: u64,
+    ) {
         self.current += 1;
-        if events.iter().any(|event| match event {
-            yrs::types::Event::Text(event) => event.delta(txn).iter().any(|delta| match delta {
-                Delta::Inserted(Out::Any(Any::String(_)), _) | Delta::Retain(_, _) => false,
-                Delta::Inserted(_, _) | Delta::Deleted(_) => true,
-            }),
-            yrs::types::Event::Map(event) => {
-                event.path().is_empty()
-                    || event
-                        .keys(txn)
-                        .keys()
-                        .any(|key| matches!(key.as_ref(), KIND_KEY | "rows" | "cells" | "story"))
+        if self.stamp_items(txn, indexes, epoch).is_none() {
+            // A block the commit names is gone (a peer's update carrying a
+            // collected range): every story an event names changed in every way.
+            self.structure += 1;
+            for event in events.iter() {
+                let stories: Vec<Arc<str>> = match (event.path().front(), event) {
+                    (Some(yrs::types::PathSegment::Key(story)), _) => vec![Arc::clone(story)],
+                    (None, yrs::types::Event::Map(entries)) => {
+                        entries.keys(txn).keys().cloned().collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for story in stories {
+                    self.stamped.insert(Arc::clone(&story), self.current);
+                    self.marked.insert(story, self.current);
+                }
             }
-            _ => true,
-        }) {
+        }
+    }
+
+    fn stamp_items(
+        &mut self,
+        txn: &yrs::TransactionMut,
+        indexes: &Mutex<segments::Indexes>,
+        epoch: u64,
+    ) -> Option<()> {
+        let stories = txn.get_map(STORIES)?;
+        let stories = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(&stories));
+        let inserted = txn.insert_set();
+        let mut index_of = |story: &str| {
+            indexes
+                .lock()
+                .unwrap()
+                .get(story)
+                .filter(|(at, _)| *at == epoch)
+                .map(|(_, index)| Arc::clone(index))
+        };
+        let mut structure = false;
+        for (set, added) in [(inserted, true), (txn.delete_set(), false)] {
+            for (client, ranges) in set.iter() {
+                for range in ranges.iter() {
+                    for (_, item) in txn.store().blocks_in(client, range.clone()) {
+                        let Some((story, marks, reshapes)) =
+                            item_change(item?, added, stories, inserted, &mut index_of)
+                        else {
+                            continue;
+                        };
+                        if marks {
+                            self.marked.insert(Arc::clone(&story), self.current);
+                        }
+                        self.stamped.insert(story, self.current);
+                        structure |= reshapes;
+                    }
+                }
+            }
+        }
+        if structure {
             self.structure += 1;
         }
-        for event in events.iter() {
-            match event.path().front() {
-                Some(yrs::types::PathSegment::Key(story)) => {
-                    self.stamped.insert(Arc::clone(story), self.current);
-                    if !inserts_plain_text(txn, event) {
-                        self.marked.insert(Arc::clone(story), self.current);
-                    }
-                }
-                Some(yrs::types::PathSegment::Index(_)) => {}
-                None => {
-                    if let yrs::types::Event::Map(entries) = event {
-                        for story in entries.keys(txn).keys() {
-                            self.stamped.insert(Arc::clone(story), self.current);
-                            self.marked.insert(Arc::clone(story), self.current);
-                        }
-                    }
-                }
-            }
-        }
+        Some(())
     }
 }
 
@@ -510,9 +676,15 @@ impl EditingDoc {
             .expect("a fresh doc accepts an update observer");
         let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
         let stamped = Arc::clone(&story_revisions);
+        let (indexes, epoch_now) = (Arc::clone(&segment_indexes), Arc::clone(&epoch));
+        // Deep observers run before the update observer above moves the epoch
+        // on, so the indexes at the current epoch are the pre-commit ones.
         let story_revision_sub = doc
             .get_or_insert_map(STORIES)
-            .observe_deep(move |txn, events| stamped.lock().unwrap().stamp(txn, events));
+            .observe_deep(move |txn, events| {
+                let before = epoch_now.load(Ordering::Relaxed);
+                stamped.lock().unwrap().stamp(txn, events, &indexes, before);
+            });
         Self {
             doc,
             client_id,
@@ -1574,9 +1746,26 @@ mod tests {
         assert!(!doc.has_field_changes());
         assert_eq!((kept("header:rId7"), kept("body")), (header, body));
 
-        // A paragraph split reads the body again, and only the body.
+        // Nor do Enter, Backspace, Delete and a join (Q808 A).
+        // "al" | "pha!": Backspace, the mark (a join), Delete.
         doc.split_paragraph(&local("A"), Position::new("body", 2))
             .unwrap();
+        for _ in 0..3 {
+            doc.delete_range(&local("A"), StoryRange::new("body", 1, 2))
+                .unwrap();
+        }
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "aha!");
+        assert!(!doc.has_field_changes());
+        assert_eq!((kept("header:rId7"), kept("body")), (header, body));
+
+        // A suggestion reads the body again, and only the body.
+        doc.insert_text(
+            &suggesting("A"),
+            Position::new("body", 1),
+            "s",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
         assert!(!doc.has_field_changes());
         assert_eq!(
             kept("header:rId7"),
@@ -1635,29 +1824,84 @@ mod tests {
         let (since, typed, stories) = changed_since(since);
         assert_eq!(stories, ["body"], "a remote text edit");
         assert_eq!(typed, structure, "typing moves no table");
-        let marked = |story: &str| b.story_revisions.lock().unwrap().marked[story];
+        let marked = |story: &str| {
+            let revisions = b.story_revisions.lock().unwrap();
+            revisions.marked.get(story).copied().unwrap_or(0)
+        };
         assert!(marked("body") < since, "plain typing marks nothing");
 
+        // Remote Backspace, Delete, Enter and a join (Q808 A): "on!" | "two".
+        let mut since = since;
+        for edit in 0..4 {
+            let before = a.encode_state_vector_v1();
+            match edit {
+                0 => a.delete_range(&local("A"), StoryRange::new("body", 2, 3)),
+                1 => a.delete_range(&local("A"), StoryRange::new("body", 3, 4)),
+                2 => a
+                    .split_paragraph(&local("A"), Position::new("body", 3))
+                    .map(|_| Receipt::default()),
+                _ => a.delete_range(&local("A"), StoryRange::new("body", 3, 4)),
+            }
+            .unwrap();
+            b.apply_update_v1(&a.encode_diff_v1(&before).unwrap())
+                .unwrap();
+            let (now, moved, stories) = changed_since(since);
+            assert_eq!(stories, ["body"], "edit {edit}");
+            assert_eq!(moved, structure, "edit {edit} moves no table");
+            since = now;
+        }
+        assert_eq!(b.paragraphs("body").unwrap()[0].text, "on!two");
+        assert!(marked("body") < since, "nor do they mark it");
+
+        // A paragraph property stamps its story; a suggestion marks it.
         let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
         b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
             .unwrap();
         let (since, _, stories) = changed_since(since);
         assert_eq!(stories, ["header:rId7"], "a pilcrow property");
-        assert_eq!(
-            marked("header:rId7"),
-            since,
-            "a pilcrow property marks its story"
-        );
+        assert!(marked("header:rId7") < since);
+        b.insert_text(
+            &suggesting("B"),
+            Position::new("header:rId7", 0),
+            "s",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let (since, _, _) = changed_since(since);
+        assert_eq!(marked("header:rId7"), since, "a suggestion marks its story");
 
+        // A table embed inserted, its rows set and the embed deleted each move
+        // the structure on, as do a story added and one removed.
+        let rows = |cells: usize| Any::Array(Arc::from(vec![Any::Null; cells]));
+        let mut structure = typed;
+        for op in [
+            RawOp::InsertEmbed {
+                index: 0,
+                kind: "table".into(),
+                payload: vec![("rows".into(), rows(0))],
+                attrs: Attrs::new(),
+            },
+            RawOp::SetEmbedAttr {
+                index: 0,
+                key: "rows".into(),
+                value: rows(1),
+            },
+            RawOp::Delete { index: 0, len: 1 },
+        ] {
+            b.apply_raw_ops("body", vec![op], &local("B")).unwrap();
+            let moved = changed_since(since).1;
+            assert!(moved > structure);
+            structure = moved;
+        }
         b.create_story("fn:1", "note", "Normal", "left").unwrap();
         b.delete_story("header:rId7").unwrap();
         let (_, created, stories) = changed_since(since);
         assert_eq!(
             stories,
-            ["fn:1", "header:rId7"],
+            ["body", "fn:1", "header:rId7"],
             "created and deleted stories"
         );
-        assert!(created > typed, "a story added or removed");
+        assert!(created > structure + 1, "a story added or removed");
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {
