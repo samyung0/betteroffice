@@ -4,9 +4,10 @@ use std::collections::HashSet;
 
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
-use crate::op::{LocRange, OpError, OpResult, para_bounds};
-use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
+use crate::op::{LocRange, OpError, OpResult};
+use crate::ops::{ChunkKind, capture_pilcrow, chunks_from, snapshot_range};
 use crate::queries::TextView;
+use crate::segments::tables;
 use crate::{
     ChangeInfo, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string, story_ref,
 };
@@ -148,22 +149,17 @@ pub struct RevisionInfo {
 /// Collects every story id referenced as a cell story by a `table` embed
 /// (payload `rows[*].cells[*].story`). Nested tables are covered because a
 /// nested table's embed lives in a cell story that is itself iterated.
-pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashSet<String> {
+/// Walks each story's items for its tables without snapshotting its chunks.
+pub(crate) fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let mut cells = HashSet::new();
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return cells;
     };
-    for (story_id, value) in stories.iter(txn) {
+    for (_, value) in stories.iter(txn) {
         let Out::YText(story) = value else {
             continue;
         };
-        for chunk in doc.chunk_snapshot(story_id, &story, txn).iter() {
-            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-                continue;
-            };
-            if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
-                continue;
-            }
+        for (_, map) in tables(&story, txn) {
             let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
                 continue;
             };
@@ -197,10 +193,12 @@ impl EditingDoc {
                 end: range.end,
             });
         }
+        // The committed segment index places the range's paragraphs, so only
+        // the chunks from the start paragraph to the range's end are read.
+        let index = self.segment_index(&range.story)?;
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &range.story)?;
-        let chunks = self.chunk_snapshot(&range.story, &story, &txn);
-        let story_len = chunks.last().map_or(0, Chunk::end);
+        let story_len = index.len();
         if range.end > story_len {
             return Err(OpError::OutOfBounds {
                 index: range.end,
@@ -208,17 +206,19 @@ impl EditingDoc {
             });
         }
 
-        let bounds = para_bounds(&story, &txn);
-        let start_para = bounds
-            .iter()
-            .find(|para| range.start <= para.pilcrow)
+        let start_para = index
+            .para_at(range.start)
             .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
-        let end_para = bounds
-            .iter()
-            .find(|para| range.end <= para.pilcrow)
-            .or_else(|| bounds.last())
+        let end_para = index
+            .para_at(range.end)
+            .or_else(|| index.paras().last())
             .ok_or_else(|| OpError::UnknownStory(range.story.clone()))?;
         let is_multi_paragraph = start_para.para_id != end_para.para_id;
+        let (lo, hi) = (start_para.start, range.end.max(start_para.pilcrow + 1));
+        let chunks = match index.slot_start(story.as_ref(), &txn, index.slot_at(range.start)) {
+            Some((next, at, attrs)) => chunks_from(&txn, next, at, attrs, lo, hi),
+            None => snapshot_range(&story, &txn, lo, hi),
+        };
 
         // Paragraph properties from the start paragraph's pilcrow map.
         let (para_id, para_props) = chunks
@@ -354,7 +354,7 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(self, &txn).contains(&range.story),
+            in_table: table_cell_stories(&txn).contains(&range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
@@ -601,6 +601,63 @@ mod tests {
                 .in_table
         );
         assert!(!context(&doc, 1, 4).in_table);
+    }
+
+    #[test]
+    fn selection_context_after_an_edit_snapshots_no_story() {
+        // A 61-paragraph body that holds a table with one cell story.
+        let doc = seed("tail");
+        for _ in 0..60 {
+            doc.split_paragraph(&local(), Position::new("body", 0))
+                .unwrap();
+            doc.insert_text(
+                &local(),
+                Position::new("body", 0),
+                "para",
+                FormatPolicy::Plain,
+            )
+            .unwrap();
+        }
+        doc.create_story("body:t0:r0c0", "cell", "Normal", "left")
+            .unwrap();
+        let cell = Any::Map(Arc::new(HashMap::from([(
+            "story".into(),
+            Any::from("body:t0:r0c0"),
+        )])));
+        let row = Any::Map(Arc::new(HashMap::from([(
+            "cells".into(),
+            Any::Array(Arc::from(vec![cell])),
+        )])));
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "table".into(),
+                payload: vec![("rows".into(), Any::Array(Arc::from(vec![row])))],
+                attrs: yrs::types::Attrs::new(),
+            }],
+            &local(),
+        )
+        .unwrap();
+        doc.insert_text(
+            &local(),
+            Position::new("body", 150),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+
+        // The toolbar's read after the key: only the caret's paragraph is
+        // read, and the table check reads no story's chunks either.
+        let middle = context(&doc, 151, 151);
+        assert_eq!((middle.has_selection, middle.in_table), (false, false));
+        let in_cell = doc
+            .selection_context(&StoryRange::new("body:t0:r0c0", 2, 2))
+            .unwrap();
+        assert!(in_cell.in_table);
+        let epoch = doc.epoch.load(std::sync::atomic::Ordering::Relaxed);
+        let snapshots = doc.chunk_snapshots.lock().unwrap();
+        assert!(snapshots.values().all(|(at, _)| *at != epoch));
     }
 
     #[test]
