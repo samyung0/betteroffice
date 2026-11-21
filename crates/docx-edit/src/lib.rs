@@ -1777,22 +1777,95 @@ mod tests {
 
     #[test]
     fn paragraph_spans_are_read_from_the_segment_index() {
-        let doc = seed("one two");
-        let split = doc
+        let (a, b) = peers("one two", 1, 2);
+        // b's index, read before the peer's edits, follows them.
+        assert_eq!(b.paragraph_spans("body").unwrap().len(), 1);
+        let split = a
             .split_paragraph(&local("A"), Position::new("body", 3))
             .unwrap();
+        a.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "image".into(),
+                payload: Vec::new(),
+                attrs: Attrs::new(),
+            }],
+            &local("A"),
+        )
+        .unwrap();
+        sync(&a, &b);
+        // "o", an inline image, "ne" | " two".
+        let spans = vec![(split.first_para_id, 4), (split.second_para_id, 4)];
+        assert_eq!(b.paragraph_spans("body").unwrap(), spans);
+
+        let mut undo = b.undo_manager();
+        b.split_paragraph(&local("B"), Position::new("body", 7))
+            .unwrap();
+        assert_eq!(b.paragraph_spans("body").unwrap().len(), 3);
+        assert!(undo.undo());
+        assert_eq!(b.paragraph_spans("body").unwrap(), spans);
+
+        // The spans are the cached index's: one put in its place is read.
+        let header = b.segment_index("header:rId7").unwrap();
+        let epoch = b.epoch.load(Ordering::Relaxed);
+        b.segment_indexes
+            .lock()
+            .unwrap()
+            .insert("body".into(), (epoch, header));
         assert_eq!(
-            doc.paragraph_spans("body").unwrap(),
-            vec![(split.first_para_id, 3), (split.second_para_id, 4)]
+            b.paragraph_spans("body").unwrap(),
+            b.paragraph_spans("header:rId7").unwrap()
         );
-        let epoch = doc.epoch.load(Ordering::Relaxed);
-        assert!(
-            doc.segment_indexes
-                .lock()
-                .unwrap()
-                .get("body")
-                .is_some_and(|(at, _)| *at == epoch)
-        );
+    }
+
+    /// A body whose first paragraph holds a REF field whose result keeps a
+    /// tracked insertion inside a hyperlink, then "tail".
+    fn field_change_doc() -> EditingDoc {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">para </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="a"><w:ins w:id="1" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:r><w:t>linked</w:t></w:r></w:ins></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:r><w:t>tail</w:t></w:r></w:p></w:body></w:document>"#;
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.as_bytes().to_vec())])
+                .unwrap();
+        let doc = EditingDoc::new(7);
+        seed::seed_from_docx(&doc, &bytes).unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_story_whose_fields_can_keep_changes_is_read_again_after_any_edit() {
+        let doc = field_change_doc();
+        let replica = EditingDoc::new(8);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert!(doc.has_field_changes() && replica.has_field_changes());
+        let kept = |doc: &EditingDoc| {
+            Arc::clone(&doc.kept_field_changes.lock().unwrap().entries["body"].1)
+        };
+        let before = kept(&doc);
+
+        // Plain typing in "tail": the field could keep a change, so it is read again.
+        let tail = doc.story_len("body").unwrap() - 1;
+        doc.insert_text(
+            &local("A"),
+            Position::new("body", tail),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert!(doc.has_field_changes());
+        assert!(!Arc::ptr_eq(&kept(&doc), &before));
+
+        // Accepting everything on the peer resolves the field's change here too.
+        doc.accept_change(&local("A"), &ChangeTarget::All).unwrap();
+        assert!(!doc.has_field_changes());
+        replica
+            .apply_update_v1(
+                &doc.encode_diff_v1(&replica.encode_state_vector_v1())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(!replica.has_field_changes());
     }
 
     #[test]

@@ -13,6 +13,13 @@ use crate::{
     ChangeInfo, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string, story_ref,
 };
 
+#[cfg(test)]
+thread_local! {
+    /// Selection reads that walked their story from its start: the mark
+    /// before the paragraph was gone from the segment index.
+    static STORY_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Preview cap for [`RevisionInfo::preview`], in Unicode scalar values.
 const PREVIEW_MAX_CHARS: usize = 80;
 
@@ -238,7 +245,11 @@ impl EditingDoc {
         let (lo, hi) = (start_para.start, range.end.max(start_para.pilcrow + 1));
         let chunks = match index.slot_start(story.as_ref(), &txn, index.slot_at(range.start)) {
             Some((next, at, attrs)) => chunks_from(&txn, next, at, attrs, lo, hi),
-            None => snapshot_range(&story, &txn, lo, hi),
+            None => {
+                #[cfg(test)]
+                STORY_WALKS.with(|walks| walks.set(walks.get() + 1));
+                snapshot_range(&story, &txn, lo, hi)
+            }
         };
 
         // Paragraph properties from the start paragraph's pilcrow map.
@@ -651,58 +662,114 @@ mod tests {
         assert!(!context(&doc, 1, 4).in_table);
     }
 
+    /// A one-cell table naming `cell_story`, as raw ops insert it.
+    fn table_rows(cell_story: &str) -> Any {
+        let cell = Any::Map(Arc::new(HashMap::from([(
+            "story".into(),
+            Any::from(cell_story),
+        )])));
+        let row = Any::Map(Arc::new(HashMap::from([(
+            "cells".into(),
+            Any::Array(Arc::from(vec![cell])),
+        )])));
+        Any::Array(Arc::from(vec![row]))
+    }
+
+    fn table_op(cell_story: &str) -> RawOp {
+        RawOp::InsertEmbed {
+            index: 0,
+            kind: "table".into(),
+            payload: vec![("rows".into(), table_rows(cell_story))],
+            attrs: yrs::types::Attrs::new(),
+        }
+    }
+
+    fn in_table(doc: &EditingDoc, story: &str) -> bool {
+        doc.selection_context(&StoryRange::new(story, 0, 0))
+            .unwrap()
+            .in_table
+    }
+
     #[test]
     fn table_cell_list_is_kept_until_a_table_changes() {
         let doc = seed("body text");
-        let table = |cell_story: &str| {
-            doc.create_story(cell_story, "cell", "Normal", "left")
-                .unwrap();
-            let cell = Any::Map(Arc::new(HashMap::from([(
-                "story".into(),
-                Any::from(cell_story),
-            )])));
-            let row = Any::Map(Arc::new(HashMap::from([(
-                "cells".into(),
-                Any::Array(Arc::from(vec![cell])),
-            )])));
-            doc.apply_raw_ops(
-                "body",
-                vec![RawOp::InsertEmbed {
-                    index: 0,
-                    kind: "table".into(),
-                    payload: vec![("rows".into(), Any::Array(Arc::from(vec![row])))],
-                    attrs: yrs::types::Attrs::new(),
-                }],
-                &local(),
-            )
-            .unwrap();
-        };
-        let in_table = |story: &str| {
-            doc.selection_context(&StoryRange::new(story, 0, 0))
-                .unwrap()
-                .in_table
-        };
-        table("body:t0:r0c0");
-        assert!(in_table("body:t0:r0c0"));
-        let read_at = |doc: &EditingDoc| {
+        for story in ["c0", "c1", "c2", "host"] {
+            doc.create_story(story, "cell", "Normal", "left").unwrap();
+        }
+        let raw = |story: &str, op: RawOp| doc.apply_raw_ops(story, vec![op], &local()).unwrap();
+        let read_at = || {
             doc.table_membership
                 .lock()
                 .unwrap()
                 .as_ref()
                 .map(|membership| membership.structure)
         };
-        let structure = read_at(&doc);
+        assert!(!in_table(&doc, "c0"));
 
-        // Typing keeps the list read before.
+        // A table embed on its own, naming a story read before as no cell.
+        raw("body", table_op("c0"));
+        assert!(in_table(&doc, "c0"));
+        let structure = read_at();
+
+        // Typing, Backspace, Delete, Enter and a join keep the list (Q808 A).
         doc.insert_text(&local(), Position::new("body", 3), "x", FormatPolicy::Plain)
             .unwrap();
-        assert!(!in_table("body"));
-        assert_eq!(read_at(&doc), structure);
+        for range in [(3, 4), (3, 4)] {
+            doc.delete_range(&local(), StoryRange::new("body", range.0, range.1))
+                .unwrap();
+        }
+        doc.split_paragraph(&local(), Position::new("body", 5))
+            .unwrap();
+        doc.delete_range(&local(), StoryRange::new("body", 5, 6))
+            .unwrap();
+        assert_eq!(doc.paragraph_spans("body").unwrap().len(), 1);
+        assert!(!in_table(&doc, "body") && in_table(&doc, "c0"));
+        assert_eq!(read_at(), structure);
+        // The check reads the kept list: one put in its place is what it answers.
+        let kept = doc.table_membership.lock().unwrap().take().unwrap();
+        *doc.table_membership.lock().unwrap() = Some(crate::TableMembership {
+            structure: kept.structure,
+            cells: HashSet::from(["body".to_owned()]),
+        });
+        assert!(in_table(&doc, "body"));
+        *doc.table_membership.lock().unwrap() = Some(kept);
 
-        // A new table is read again, with its cell.
-        table("body:t1:r0c0");
-        assert!(in_table("body:t1:r0c0"));
-        assert_ne!(read_at(&doc), structure);
+        // Its rows set without the cell, then with it again.
+        let rows = |value: Any| RawOp::SetEmbedAttr {
+            index: 0,
+            key: "rows".into(),
+            value,
+        };
+        raw("body", rows(Any::Array(Arc::from(Vec::new()))));
+        assert!(!in_table(&doc, "c0"));
+        raw("body", rows(table_rows("c0")));
+        assert!(in_table(&doc, "c0"));
+
+        // The embed deleted on its own, its cell story kept; Undo puts it back.
+        let mut undo = doc.undo_manager();
+        raw("body", RawOp::Delete { index: 0, len: 1 });
+        assert!(!in_table(&doc, "c0"));
+        assert!(undo.undo());
+        assert!(in_table(&doc, "c0"));
+
+        // A story deleted with the table it holds.
+        raw("host", table_op("c1"));
+        assert!(in_table(&doc, "c1"));
+        doc.delete_story("host").unwrap();
+        assert!(!in_table(&doc, "c1"));
+
+        // A peer's table, naming a story the replica read as no cell.
+        let replica = EditingDoc::new(8);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert!(!in_table(&replica, "c2"));
+        let before = replica.encode_state_vector_v1();
+        raw("body", table_op("c2"));
+        replica
+            .apply_update_v1(&doc.encode_diff_v1(&before).unwrap())
+            .unwrap();
+        assert!(in_table(&replica, "c2"));
     }
 
     #[test]
@@ -761,6 +828,45 @@ mod tests {
         let snapshots = doc.chunk_snapshots.lock().unwrap();
         assert!(snapshots.get("body", epoch).is_none());
         assert!(snapshots.get("body:t0:r0c0", epoch).is_none());
+        // Nor is the story walked from its start: the walk starts at the
+        // paragraph's mark.
+        assert_eq!(STORY_WALKS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn a_paragraph_reads_the_formatting_open_from_an_earlier_one_after_a_peers_edit() {
+        // "first" | "second" | "third", bold over "rst" | "sec".
+        let a = seed("firstsecondthird");
+        for at in [5, 12] {
+            a.split_paragraph(&local(), Position::new("body", at))
+                .unwrap();
+        }
+        a.toggle_format(&local(), StoryRange::new("body", 2, 9), SimpleFormat::Bold)
+            .unwrap();
+        let b = EditingDoc::new(8);
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        // b's index is read before the peer's edit and follows it.
+        assert_eq!(context(&b, 7, 7).italic, TriState::Off);
+
+        // The peer sets italic over "st" | "second" | "th".
+        let before = b.encode_state_vector_v1();
+        a.toggle_format(
+            &local(),
+            StoryRange::new("body", 3, 15),
+            SimpleFormat::Italic,
+        )
+        .unwrap();
+        b.apply_update_v1(&a.encode_diff_v1(&before).unwrap())
+            .unwrap();
+        let toggles = |start: u32, end: u32| {
+            let context = context(&b, start, end);
+            (context.bold, context.italic)
+        };
+        assert_eq!(toggles(7, 7), (TriState::On, TriState::On));
+        assert_eq!(toggles(6, 12), (TriState::Mixed, TriState::On));
+        assert_eq!(toggles(14, 14), (TriState::Off, TriState::On));
+        assert_eq!(toggles(13, 18), (TriState::Off, TriState::Mixed));
+        assert_eq!(STORY_WALKS.with(std::cell::Cell::get), 0);
     }
 
     #[test]
@@ -805,6 +911,103 @@ mod tests {
             Arc::ptr_eq(&kept("fn:1"), &note),
             "an empty list outlives plain typing"
         );
+
+        // It outlives Backspace, Delete, Enter and a join too (Q808 A), where
+        // a story holding changes is read again after plain typing.
+        for range in [(3, 4), (2, 3)] {
+            doc.delete_range(&local(), StoryRange::new("fn:1", range.0, range.1))
+                .unwrap();
+        }
+        doc.split_paragraph(&local(), Position::new("fn:1", 1))
+            .unwrap();
+        doc.delete_range(&local(), StoryRange::new("fn:1", 1, 2))
+            .unwrap();
+        let body = kept("body");
+        doc.insert_text(&local(), Position::new("body", 7), "x", FormatPolicy::Plain)
+            .unwrap();
+        assert_eq!(doc.list_revisions().unwrap().len(), 3);
+        assert_eq!(doc.paragraphs("fn:1").unwrap()[0].text, "nos");
+        assert!(Arc::ptr_eq(&kept("fn:1"), &note));
+        assert!(!Arc::ptr_eq(&kept("body"), &body));
+    }
+
+    #[test]
+    fn an_empty_revision_list_is_read_again_after_a_tracked_change() {
+        let doc = seed("alpha beta");
+        let changes = |doc: &EditingDoc| {
+            doc.list_revisions()
+                .unwrap()
+                .into_iter()
+                .map(|revision| (revision.change.kind, revision.change.author))
+                .collect::<Vec<_>>()
+        };
+        let insertion = |author: &str| (ChangeKind::Insertion, author.to_owned());
+        assert!(changes(&doc).is_empty());
+
+        // A suggestion, then rejected.
+        doc.insert_text(
+            &suggesting("Ann"),
+            Position::new("body", 5),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert_eq!(changes(&doc), [insertion("Ann")]);
+        doc.reject_change(&local(), &crate::ChangeTarget::All)
+            .unwrap();
+        assert!(changes(&doc).is_empty());
+
+        // Tracked formatting, as a seed or a peer writes it, then accepted.
+        let change = Any::Map(Arc::new(HashMap::from([
+            ("id".into(), Any::from("9")),
+            ("author".into(), Any::from("Bob")),
+            ("date".into(), Any::from(DATE)),
+        ])));
+        let record = Any::Map(Arc::new(HashMap::from([(
+            "changes".into(),
+            Any::Array(Arc::from(vec![change])),
+        )])));
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::Format {
+                index: 0,
+                len: 5,
+                attrs: yrs::types::Attrs::from([("rPrChange".into(), record)]),
+            }],
+            &local(),
+        )
+        .unwrap();
+        assert_eq!(
+            changes(&doc),
+            [(ChangeKind::RunPropertiesChanged, "Bob".to_owned())]
+        );
+        doc.accept_change(&local(), &crate::ChangeTarget::All)
+            .unwrap();
+        assert!(changes(&doc).is_empty());
+
+        // A peer's suggestion.
+        let peer = EditingDoc::new(8);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        let before = doc.encode_state_vector_v1();
+        peer.insert_text(
+            &suggesting("Cid"),
+            Position::new("body", 0),
+            "x",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        doc.apply_update_v1(&peer.encode_diff_v1(&before).unwrap())
+            .unwrap();
+        assert_eq!(changes(&doc), [insertion("Cid")]);
+
+        // The suggestion deleted outright, then put back by Undo.
+        let mut undo = doc.undo_manager();
+        doc.delete_range(&local(), StoryRange::new("body", 0, 1))
+            .unwrap();
+        assert!(changes(&doc).is_empty());
+        assert!(undo.undo());
+        assert_eq!(changes(&doc), [insertion("Cid")]);
     }
 
     #[test]
