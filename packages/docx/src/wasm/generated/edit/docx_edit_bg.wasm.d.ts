@@ -109,6 +109,7 @@ export const editsession_resolve_comment: (a: number, b: number, c: number) => [
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
+export const editsession_retained_region_layout_json: (a: number) => [number, number, number, number];
 export const editsession_search_text: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_seed_opaque_sequences: (a: number, b: number, c: number) => [number, number];

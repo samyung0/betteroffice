@@ -45,6 +45,8 @@ export type ResidentEngineSession = Pick<
   updateFontOutlines(fontId: number, bytes: Uint8Array): void;
   /** Counts committed transactions: it moves on with every document change. */
   docEpoch(): number;
+  /** Q791 prototype: the retained region layout JSON, without laying out again. */
+  retainedRegionLayoutJson(): string;
 };
 
 export async function createResidentEngineSession(
@@ -93,6 +95,7 @@ export async function createResidentEngineSession(
       session.build_display_list_frame(input, expectedFrameEpoch),
     relayoutFrame: (layoutInput, extras, expectedFrameEpoch) =>
       session.relayout_frame(layoutInput, extras, expectedFrameEpoch),
+    retainedRegionLayoutJson: () => session.retained_region_layout_json(),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,

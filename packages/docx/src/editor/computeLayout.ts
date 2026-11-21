@@ -201,6 +201,58 @@ export function getLayoutKernelInputs(layout: Layout):
   return kernelInputsByLayout.get(layout);
 }
 
+/**
+ * Layout tokens: a region request recorded for the resident worker (Q791
+ * prototype), which lays it out instead of the page. The token stands for the
+ * pass until the worker's layout arrives ({@link adoptResidentLayout}): it
+ * carries no pages and no measured arena, only the trigger for a worker frame.
+ */
+const pendingResidentLayouts = new WeakSet<Layout>();
+
+export function isPendingResidentLayout(layout: Layout | null | undefined): boolean {
+  return Boolean(layout && pendingResidentLayouts.has(layout));
+}
+
+export function recordResidentLayout(
+  inputs: Omit<ComputeLayoutInputs, 'session'> & {
+    session: { recordResidentLayout?(input: string): number };
+  }
+): Layout {
+  const request = buildResidentRegionLayoutRequest(
+    inputs.document,
+    inputs.pageGap,
+    inputs.renderEnv
+  );
+  request.measurement = inputs.measurement;
+  inputs.session.recordResidentLayout!(JSON.stringify(request));
+  const token = { pages: [] } as unknown as Layout;
+  pendingResidentLayouts.add(token);
+  kernelInputsByLayout.set(token, {
+    get measured(): MeasuredBlock[] {
+      throw new Error('A recorded resident layout has no measured arena on the page');
+    },
+    get options(): LayoutOptions {
+      throw new Error('A recorded resident layout has no options on the page');
+    },
+  });
+  return token;
+}
+
+/** The worker's retained region layout JSON as the page's layout. */
+export function adoptResidentLayout(json: string): LayoutComputation {
+  const output = JSON.parse(json) as ResidentRegionLayoutRetainedOutput;
+  kernelInputsByLayout.set(output.layout, {
+    get measured(): MeasuredBlock[] {
+      throw new Error('The worker keeps the measured arena');
+    },
+    get options(): LayoutOptions {
+      throw new Error('The worker keeps the layout options');
+    },
+    ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
+  });
+  return { layout: output.layout, notesConverged: output.notesConverged };
+}
+
 export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
   const request = buildResidentRegionLayoutRequest(
     inputs.document,

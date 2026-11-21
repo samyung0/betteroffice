@@ -1719,6 +1719,34 @@ impl EngineSession {
         .map_err(|error| format!("serialize: {error}"))
     }
 
+    /// The retained region layout as [`Self::layout_document_with_regions_retained_json`]
+    /// replies it, without laying out again: a resident worker that laid out
+    /// (a relayout, say) hands the page thread the layout it holds (Q791
+    /// prototype: the page thread lays out nothing).
+    pub fn retained_region_layout_json(&self) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let regions_state = self.regions.borrow();
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedRegionLayout<'a> {
+            layout: &'a Layout,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            headers_footers: Option<&'a serde_json::Value>,
+            notes_converged: bool,
+        }
+        serde_json::to_string(&RetainedRegionLayout {
+            layout: pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?,
+            headers_footers: regions_state
+                .as_ref()
+                .and_then(|state| state.headers_footers.as_ref()),
+            notes_converged: true,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
     /// The retained measured arena and layout options, for a host taking the
     /// main-thread display-list fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, String> {

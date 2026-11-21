@@ -78,6 +78,9 @@ let fontErrors: ResidentFontError[] = [];
 // The measurement's font chains from the latest frame request, by which list
 // markers and watermarks name their sliced faces.
 let fontChains: Record<string, number[]> = {};
+// Q791 prototype: the retained layout JSON the next frame reply carries, when
+// its request asked (the page lays out nothing and reads this layout).
+let replyLayoutJson: string | undefined;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -124,7 +127,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // replica, which holds every worker update it applied, and the replaced
     // worker's later replies are dropped, so no clock is taken twice.
     session = await createResidentEngineSession(request.snapshot.workerClientId);
-    hydrate(request.snapshot);
+    const layoutJson = hydrate(request.snapshot);
+    if (request.wantLayout) replyLayoutJson = layoutJson;
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -156,7 +160,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'sync') {
     unsubscribe?.();
     unsubscribe = null;
-    hydrate(request.snapshot);
+    const layoutJson = hydrate(request.snapshot);
+    if (request.wantLayout) replyLayoutJson = layoutJson;
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
@@ -200,6 +205,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       : session.relayoutFrame(request.layoutInput, request.extras, request.expectedFrameEpoch);
     laidOut = { input: request.layoutInput, docEpoch: session.docEpoch() };
     layoutRevision = request.layoutRevision;
+    if (request.wantLayout) replyLayoutJson = session.retainedRegionLayoutJson();
     await replyFrame(
       request.id,
       frame,
@@ -302,7 +308,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   }
 }
 
-function hydrate(snapshot: YrsResidentWorkerSnapshot) {
+function hydrate(snapshot: YrsResidentWorkerSnapshot): string | undefined {
   if (!session) throw new Error('Resident engine worker is not initialized');
   if (snapshot.media !== undefined) session.setMedia(snapshot.media);
   session.loadState(snapshot.state);
@@ -318,10 +324,11 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
+  let layoutJson: string | undefined;
   if (snapshot.layoutWithRegions) {
-    // the reply is discarded here; the full envelope would serialize the
-    // tens-of-MB measured arena
-    session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+    // the retained reply omits the tens-of-MB measured arena; the page reads
+    // it when it lays out nothing itself (Q791 prototype)
+    layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
@@ -331,6 +338,7 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
+  return layoutJson;
 }
 
 function setProgressiveFonts(next: ResidentProgressiveFonts | null): void {
@@ -490,6 +498,8 @@ async function replyFrame(
   const replayMs = performance.now() - replayStarted;
   const failedFonts = fontErrors;
   fontErrors = [];
+  const layoutJson = replyLayoutJson;
+  replyLayoutJson = undefined;
   const frame = exactBuffer(bytes);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
@@ -511,6 +521,7 @@ async function replyFrame(
       ...(stateVector ? { stateVector } : {}),
       ...(failedFonts.length > 0 ? { fontErrors: failedFonts } : {}),
       ...(paintError === undefined ? {} : { paintError }),
+      ...(layoutJson === undefined ? {} : { layoutJson }),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

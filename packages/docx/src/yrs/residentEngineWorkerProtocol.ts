@@ -14,6 +14,8 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
+      /** Q791 prototype: reply with the retained layout JSON (the page lays out nothing). */
+      wantLayout?: boolean;
     }
   | {
       id: number;
@@ -22,6 +24,7 @@ export type ResidentEngineWorkerRequest =
       extras: string;
       expectedFrameEpoch: number;
       paintCaret: boolean;
+      wantLayout?: boolean;
     }
   | {
       id: number;
@@ -41,6 +44,7 @@ export type ResidentEngineWorkerRequest =
       selection: YrsSelection | null;
       layoutRevision: number;
       paintCaret: boolean;
+      wantLayout?: boolean;
     }
   | {
       id: number;
@@ -111,6 +115,9 @@ export type ResidentEngineWorkerResponse =
       /** Painting an edit's frame failed; the edit's frame and updates above
        * still apply. */
       paintError?: string;
+      /** Q791 prototype: the retained `{ layout, headersFooters?, notesConverged }`
+       * JSON, when the request asked for it and laid out. */
+      layoutJson?: string;
     }
   | {
       id: number;

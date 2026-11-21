@@ -619,6 +619,18 @@ export interface YrsResidentWorkerSnapshot {
 }
 
 /**
+ * Q791 prototype: what the resident worker hands the page after it laid out:
+ * the retained `{ layout, headersFooters?, notesConverged }` JSON for the
+ * page's layout readers (page count, scroll height, TOC, table handles), or a
+ * switch back to laying out on the page (`page`).
+ *
+ * @internal
+ */
+export type YrsResidentLayoutReply =
+  | { kind: 'layout'; json: string; layoutRevision: number }
+  | { kind: 'page' };
+
+/**
  * {@link YrsSession.residentWorkerProbe}: enough to pick between a worker
  * relayout (the worker holds every update and the fonts) and a full sync.
  *
@@ -913,6 +925,19 @@ export interface YrsSession extends CollaborationReplica {
     direction: 'backward' | 'forward',
     expectedFrameEpoch: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
+  /**
+   * Q791 prototype: who lays the document out. `worker`: each region request
+   * is only recorded here ({@link recordResidentLayout}) and the resident
+   * worker lays it out and hands the page its layout; `page`: this engine lays
+   * out too (the worker failed, or no worker).
+   */
+  layoutOwner?: 'worker' | 'page';
+  /** Records a region layout request as laid out (revision and input) without
+   * laying it out here; the resident worker lays it out. */
+  recordResidentLayout?(input: string): number;
+  /** The resident worker's layout for the page's readers, or a switch to `page`. */
+  onResidentLayout?(listener: (reply: YrsResidentLayoutReply) => void): () => void;
+  publishResidentLayout?(reply: YrsResidentLayoutReply): void;
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
   /**
@@ -1372,6 +1397,9 @@ function wrapSession(
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  // Q791 prototype: the worker lays out unless it failed (see layoutOwner).
+  let layoutOwner: 'worker' | 'page' = 'worker';
+  const residentLayoutListeners = new Set<(reply: YrsResidentLayoutReply) => void>();
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
   // Fonts registered from sliced faces' skeletons: a page's outlines install
@@ -1650,6 +1678,28 @@ function wrapSession(
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
       return output;
+    },
+    get layoutOwner() {
+      return layoutOwner;
+    },
+    set layoutOwner(owner: 'worker' | 'page') {
+      layoutOwner = owner;
+    },
+    recordResidentLayout: (input) => {
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      return residentLayoutRevision;
+    },
+    onResidentLayout: (listener) => {
+      residentLayoutListeners.add(listener);
+      return () => {
+        residentLayoutListeners.delete(listener);
+      };
+    },
+    publishResidentLayout: (reply) => {
+      if (reply.kind === 'page') layoutOwner = 'page';
+      for (const listener of [...residentLayoutListeners]) listener(reply);
     },
     retainedKernelInputsJson: (expectedLayoutRevision) => {
       if (expectedLayoutRevision !== residentLayoutRevision) {
