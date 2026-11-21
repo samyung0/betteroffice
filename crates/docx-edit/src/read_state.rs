@@ -657,7 +657,8 @@ mod tests {
         assert!(in_cell.in_table);
         let epoch = doc.epoch.load(std::sync::atomic::Ordering::Relaxed);
         let snapshots = doc.chunk_snapshots.lock().unwrap();
-        assert!(snapshots.values().all(|(at, _)| *at != epoch));
+        assert!(snapshots.get("body", epoch).is_none());
+        assert!(snapshots.get("body:t0:r0c0", epoch).is_none());
     }
 
     #[test]
