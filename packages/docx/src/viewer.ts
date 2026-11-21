@@ -209,9 +209,9 @@ function slicedOutlines(faces: ReadonlyMap<number, SlicedFontFace>, chains: Read
     return true;
   };
   return {
-    /** Readies `pages`; resolves with the faces whose outlines grew. */
-    async add(pages: readonly DisplayPage[]): Promise<Omit<DocxViewerSlicedFace, 'files'>[]> {
-      if (wanted.size === 0) return [];
+    /** Names `pages`' fonts at once and resolves once their outlines are in. */
+    async add(pages: readonly DisplayPage[]): Promise<void> {
+      if (wanted.size === 0) return;
       const drawn = new Map<number, { glyphs: Set<number>; characters: Set<string> }>();
       for (const page of pages) drawnByFont(page, drawn);
       const needs = new Map([...wanted.keys()].map((face) => [face, { glyphs: new Set<number>(), characters: new Set<string>() }]));
@@ -239,6 +239,9 @@ function slicedOutlines(faces: ReadonlyMap<number, SlicedFontFace>, chains: Read
       for (const { node, font } of written.slice(from)) rewrite(node, font);
       await Promise.all([...needs].map(([face, { glyphs, characters }]) =>
         Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
+    },
+    /** The faces whose outlines grew since the last call, each with every outline loaded so far. */
+    grown(): Omit<DocxViewerSlicedFace, 'files'>[] {
       return [...wanted].flatMap(([face, entry]) => {
         if (entry.sent === face.revision) return [];
         entry.sent = face.revision;
@@ -308,13 +311,27 @@ export async function openDocumentViewer(
       const sizes = (JSON.parse(document.pageSizesJson()) as [number, number][]).map(([width, height]) => ({ width, height }));
       next = Math.max(1, Math.floor(progressive.firstPages(sizes)));
     }
+    // Batches go to `onPages` in order, each once its outlines are in. The
+    // first goes before anything else is built; a later one's chunk fetches
+    // overlap the next batch's build (Q804 A).
+    let delivered = Promise.resolve();
     // At least one call, so a document of no pages still gets its list.
     for (let start = 0; start < pageCount || !list; start = next, next += PAGE_BATCH) {
       const batch = JSON.parse(document.displayPagesJson(start, Math.min(next, pageCount))) as DisplayList;
       if (list) list.pages.push(...batch.pages);
       else list = { ...batch, pages: [...batch.pages] };
-      if (progressive) progressive.onPages({ pages: batch.pages, slicedFaces: await outlines.add(batch.pages) });
+      if (!progressive) continue;
+      const loaded = outlines.add(batch.pages);
+      // Reported through `delivered`, in order.
+      loaded.catch(() => {});
+      delivered = delivered
+        .then(() => loaded)
+        .then(() => progressive.onPages({ pages: batch.pages, slicedFaces: outlines.grown() }));
+      // A batch whose outlines are loaded goes before the next is built; one
+      // still fetching lets the next build meanwhile.
+      await (start === 0 ? delivered : Promise.race([delivered, new Promise((resolve) => setTimeout(resolve, 0))]));
     }
+    await delivered;
   } catch (error) {
     // A trap (out of memory) leaves the document borrowed, so free() throws
     // too; the trap's error is the one to report.
@@ -328,7 +345,7 @@ export async function openDocumentViewer(
   if (!options.progressive) await outlines.add(list!.pages);
   else {
     const renamed = outlines.finish();
-    if (renamed.length > 0) options.progressive.onPages({ pages: renamed, slicedFaces: [] });
+    if (renamed.length > 0) options.progressive.onPages({ pages: renamed, slicedFaces: outlines.grown() });
   }
   let sliced = outlines.faces();
   return {

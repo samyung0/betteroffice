@@ -365,7 +365,9 @@ export function CanvasPagesView({
     // diagnostic escape hatch, mirroring `offscreenReplay=0`
     return new URLSearchParams(window.location.search).get('pageWindow') !== '0';
   }, []);
-  const windowingEnabled = pageWindowAllowed && displayList.pages.length > PAGE_WINDOW_MIN_PAGES;
+  // Pages still to come count, so a long document is windowed from its first paint.
+  const windowingEnabled =
+    pageWindowAllowed && displayList.pages.length + (pendingPages?.length ?? 0) > PAGE_WINDOW_MIN_PAGES;
   const [pageWindow, setPageWindow] = useState<PageWindowRange | null>(null);
   const windowMeasuredRef = useRef(false);
   // Column-space page tops/bottoms from display-list geometry alone (no DOM

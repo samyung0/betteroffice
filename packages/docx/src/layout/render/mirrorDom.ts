@@ -369,6 +369,12 @@ function patchChildren(current: Element, next: Element, kept: Map<Node, Node>): 
       else if (sameAttributes(a, b)) {
         kept.set(b, a);
         patchChildren(a, b, kept);
+      } else if (sameChildren(a, b)) {
+        // Only attributes changed (a list marker's font, Q803 B): the node
+        // stays, so a screen reader's place, a find hit and a selection in it
+        // hold.
+        copyAttributes(a, b);
+        mapKept(a, b, kept);
       } else current.replaceChild(b, a);
     } else if (a.isEqualNode(b)) {
       mapKept(a, b, kept);
@@ -404,6 +410,27 @@ function sameAttributes(a: Element, b: Element): boolean {
     names.length === b.getAttributeNames().length &&
     names.every((name) => a.getAttribute(name) === b.getAttribute(name))
   );
+}
+
+function sameChildren(a: Node, b: Node): boolean {
+  if (a.childNodes.length !== b.childNodes.length) return false;
+  for (let x = a.firstChild, y = b.firstChild; x && y; x = x.nextSibling, y = y.nextSibling) {
+    if (!x.isEqualNode(y)) return false;
+  }
+  return true;
+}
+
+/** `next`'s attributes on `current`, in `next`'s order, as a fresh build writes them. */
+function copyAttributes(current: Element, next: Element): void {
+  const names = next.getAttributeNames();
+  const order = current.getAttributeNames();
+  if (order.length !== names.length || order.some((name, index) => name !== names[index])) {
+    for (const name of order) current.removeAttribute(name);
+  }
+  for (const name of names) {
+    const value = next.getAttribute(name)!;
+    if (current.getAttribute(name) !== value) current.setAttribute(name, value);
+  }
 }
 
 function mapKept(current: Node, next: Node, kept: Map<Node, Node>): void {

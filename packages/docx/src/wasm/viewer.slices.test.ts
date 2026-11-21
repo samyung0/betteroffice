@@ -8,6 +8,7 @@ import type { DisplayList } from '../layout/render';
 import { configureDefaultFonts, initWasm, openDocumentViewer } from '../viewer';
 import { preloadOpcWasm, rezipContainer } from './opc';
 import * as viewerModule from './viewer';
+import { DocxViewDocument } from './generated/viewer/docx_view_wasm.js';
 
 const root = resolve(import.meta.dir, '../../../..');
 const assets = resolve(root, 'packages/fonts-cjk/assets');
@@ -33,9 +34,9 @@ type Location = fonts.SliceLocation;
 /**
  * The fonts package's provider with its loaders' slices kept (`sliced`) or
  * dropped, recording the slice files and whole faces it reads; `swap` serves
- * another file's bytes for a slice file.
+ * another file's bytes for a slice file, and `hold` delays a file's request.
  */
-function recordingFonts(sliced: boolean, swap: Record<string, string> = {}) {
+function recordingFonts(sliced: boolean, swap: Record<string, string> = {}, hold?: (file: string) => Promise<void> | undefined) {
   const sliceFiles: string[] = [];
   const wholeFaces: string[] = [];
   // Nothing kept between opens, as a host keeps nothing: each open reads its files.
@@ -54,7 +55,7 @@ function recordingFonts(sliced: boolean, swap: Record<string, string> = {}) {
         slices: {
           ...location,
           // Noted once its URL resolves, when the request goes out.
-          url: (file: string) => location.url(swap[file] ?? file).then((url) => {
+          url: (file: string) => (hold?.(file) ?? Promise.resolve()).then(() => location.url(swap[file] ?? file)).then((url) => {
             sliceFiles.push(file);
             return url;
           }),
@@ -379,3 +380,51 @@ test('pages handed over as they are built end as a whole open\'s, a later page\'
   expect(faces.map((face) => new Uint8Array(face.bytes))).toEqual(whole.slicedFaces().map((face) => new Uint8Array(face.bytes)));
   expect([...outlines.values()]).toEqual(faces.map((face) => face.bytes.byteLength));
 });
+
+/** MS Gothic Japanese, one paragraph a page: `texts[i]` on page i + 1. */
+function pagesPackage(texts: string[]): Uint8Array {
+  const page = (text: string, index: number) =>
+    `<w:p><w:r><w:t>${text}</w:t></w:r>${index < texts.length - 1 ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+  return rezipContainer(Object.fromEntries(Object.entries({
+    '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${TYPE}.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="${TYPE}.styles+xml"/></Types>`,
+    '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+    'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/styles" Target="styles.xml"/></Relationships>`,
+    'word/styles.xml': `<w:styles ${W}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="MS Gothic" w:hAnsi="MS Gothic" w:eastAsia="MS Gothic"/><w:lang w:eastAsia="ja-JP"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`,
+    'word/document.xml': `<w:document ${W}><w:body>${texts.map(page).join('')}<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:body></w:document>`,
+  }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])));
+}
+
+test('a batch whose outline chunks are still loading lets the next batch build, and batches still arrive in order (Q804 A)', async () => {
+  const face = 'NotoSansJP-Regular';
+  const first = await chunkFiles(face, '本文');
+  // A chunk only page 2 draws.
+  const late = (await chunkFiles(face, HEADER)).filter((file) => !first.includes(file));
+  expect(late.length).toBeGreaterThan(0);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  // A viewer that waits for the chunk before building on would never release it.
+  const fallback = setTimeout(() => release(), 2000);
+  recordingFonts(true, {}, (file) => (late.includes(file) ? held : undefined));
+  const steps: string[] = [];
+  const build = DocxViewDocument.prototype.displayPagesJson;
+  DocxViewDocument.prototype.displayPagesJson = function (start, end) {
+    steps.push(`build ${start}-${end}`);
+    // The third batch builds while page 2's chunk is still on its way.
+    if (start === 9) release();
+    return build.call(this, start, end);
+  };
+  try {
+    await openDocumentViewer(pagesPackage(['本文', HEADER, ...Array.from({ length: 9 }, () => '本文')]), {
+      progressive: {
+        firstPages: () => 1,
+        onPages({ pages }) {
+          steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+        },
+      },
+    });
+  } finally {
+    DocxViewDocument.prototype.displayPagesJson = build;
+    clearTimeout(fallback);
+  }
+  expect(steps).toEqual(['build 0-1', 'pages 0-1', 'build 1-9', 'build 9-11', 'pages 1-9', 'pages 9-11']);
+}, 60_000);
