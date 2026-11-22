@@ -1666,9 +1666,12 @@ impl EngineSession {
     }
 
     /// The region pass with no reply, for a read-only view that then builds
-    /// its display list with [`Self::display_pages_json`]. Returns the page
-    /// count.
-    pub fn layout_document_with_regions(&self, input_json: &str) -> Result<usize, String> {
+    /// its display list with [`Self::display_pages_json`]. Returns each page's
+    /// size, width and height.
+    pub fn layout_document_with_regions(
+        &self,
+        input_json: &str,
+    ) -> Result<Vec<(f64, f64)>, String> {
         self.layout_document_with_regions_value(input_json)?;
         Ok(self
             .pagination
@@ -1677,7 +1680,9 @@ impl EngineSession {
             .as_ref()
             .expect("layout retained after successful pagination")
             .pages
-            .len())
+            .iter()
+            .map(|page| (page.size.w, page.size.h))
+            .collect())
     }
 
     /// Full region pass whose reply omits the measured arena — tens of MB of

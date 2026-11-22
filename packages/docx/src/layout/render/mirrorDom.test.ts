@@ -671,6 +671,26 @@ describe('patchMirrorPage', () => {
     expect(moved?.dataset.docStart).toBe('28');
   });
 
+  // Progressive DOCX View's final pass names a sliced face after a list
+  // marker's family on a page already shown (Q803 B).
+  for (const [name, build] of [
+    ['positioned (Edit, the screen-reader layer)', buildMirrorPage],
+    ['text layer', (page: DisplayPage, options: typeof labels) => buildMirrorPage(page, { ...options, clusters: true })],
+    ['plain-text', buildMirrorTextPage],
+  ] as const) {
+    test(`a ${name} mirror keeps every node when a list marker's font changes, and equals a fresh build`, () => {
+      const mirror = build(paragraphPage, labels);
+      const nodes = [...mirror.querySelectorAll('*')];
+      const next = structuredClone(paragraphPage);
+      (next.primitives[0] as { font: string }).font = '400 16px "Calibri", "BetterOffice Sliced 1.0"';
+      const fresh = build(next, labels);
+      expect(patchMirrorPage(mirror, build(next, labels))).toBe(true);
+      expect(mirror.isEqualNode(fresh)).toBe(true);
+      expect(mirror.outerHTML).toBe(fresh.outerHTML);
+      expect([...mirror.querySelectorAll('*')].every((node, index) => node === nodes[index])).toBe(true);
+    });
+  }
+
   // A page with the header above and one line per paragraph: each entry is a
   // block id and its runs (text, or text with extra fields), numbered from
   // `start` with one position between paragraphs.

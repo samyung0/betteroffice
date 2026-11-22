@@ -4,7 +4,7 @@ import {
   createRustMeasureSource,
   type ResidentFontRequirement,
 } from './layout/measure/rustMeasureSource';
-import type { DisplayList } from './layout/render';
+import type { DisplayList, DisplayPage } from './layout/render';
 import { withFontFamilies } from './layout/render/canvasBackend';
 import { drawnByFont, forEachTextPrimitive, slicedFontFamilies, textSlicedFaces } from './yrs/residentProgressiveFonts';
 
@@ -47,8 +47,38 @@ export interface DocxReadingLayout {
   padding: number;
 }
 
+/** A page's size in CSS px, known from the layout before its page is built. */
+export interface DocxPageSize {
+  width: number;
+  height: number;
+}
+
+/** Pages as they are built (`DocxViewerOptions.progressive`). */
+export interface DocxViewerPages {
+  /**
+   * In order, each at its `pageIndex`; a page that comes again replaces the
+   * one before (a later page's list markers renamed its sliced face).
+   */
+  pages: DisplayPage[];
+  /**
+   * The sliced faces whose outlines grew for these pages (every one with the
+   * first pages), each holding every outline the pages so far draw.
+   */
+  slicedFaces: Omit<DocxViewerSlicedFace, 'files'>[];
+}
+
 export interface DocxViewerOptions {
   reading?: DocxReadingLayout;
+  /**
+   * Shows pages before the whole document is built: with every page's size
+   * from the layout, `firstPages` says how many to build first; those, then
+   * the rest `PAGE_BATCH` at a time, go to `onPages` once their sliced faces
+   * hold their outlines. The handle resolves after the last.
+   */
+  progressive?: {
+    firstPages(sizes: readonly DocxPageSize[]): number;
+    onPages(batch: DocxViewerPages): void;
+  };
 }
 
 export interface DocxViewerAnalysis {
@@ -150,56 +180,85 @@ function readingRequest(request: ViewRequest, { width, padding }: DocxReadingLay
   };
 }
 
-/**
- * The faces of `faces` with the outline of every glyph `list` draws: chunks by
- * the glyph ids the layout shaped, and by the characters, whose chunks hold
- * every glyph another shaper (the painter's) can draw for them. Text the
- * painter shapes itself (list markers, watermarks) counts for the face it
- * paints with (`textSlicedFaces`, by `chains`), and its CSS font is rewritten
- * to name that face by its private family.
- */
 // Opens so far: each names its sliced faces' private families apart from another open's.
 let opens = 0;
 
-async function outlineSlicedFaces(
-  faces: ReadonlyMap<number, SlicedFontFace>,
-  list: DisplayList,
-  chains: Readonly<Record<string, number[]>>
-): Promise<DocxViewerSlicedFace[]> {
-  if (faces.size === 0) return [];
-  const drawn = new Map<number, { glyphs: Set<number>; characters: Set<string> }>();
-  for (const page of list.pages) drawnByFont(page, drawn);
-  const wanted = new Map<ProgressiveFontFace, { slices: SliceLocation; glyphs: Set<number>; characters: Set<string> }>();
-  for (const [id, { face, slices }] of faces) {
-    let entry = wanted.get(face);
-    if (!entry) wanted.set(face, entry = { slices, glyphs: new Set(), characters: new Set() });
-    const used = drawn.get(id);
-    for (const glyph of used?.glyphs ?? []) entry.glyphs.add(glyph);
-    for (const character of used?.characters ?? []) entry.characters.add(character);
-  }
-  opens += 1;
+/**
+ * Readies `faces` for the pages added to it, a batch at a time: each face gets
+ * the outline of every glyph the pages draw, by the glyph ids the layout
+ * shaped and by the characters, whose chunks hold every glyph another shaper
+ * (the painter's) can draw for them. Text the painter shapes itself (list
+ * markers, watermarks) counts for the face it paints with (`textSlicedFaces`,
+ * by `chains`), and its CSS font is rewritten to name that face by its private
+ * family, as the families of the pages so far give it; `finish` rewrites the
+ * earlier pages a later one's text renamed.
+ */
+function slicedOutlines(faces: ReadonlyMap<number, SlicedFontFace>, chains: Readonly<Record<string, number[]>>) {
+  // Each face once, with the revision a batch last returned it at.
+  const wanted = new Map<ProgressiveFontFace, { slices: SliceLocation; sent: number }>();
+  for (const { face, slices } of faces.values()) if (!wanted.has(face)) wanted.set(face, { slices, sent: 0 });
+  if (wanted.size > 0) opens += 1;
   const names = new Map([...wanted.keys()].map((face, index) => [face, `BetterOffice Sliced ${opens}.${index}`]));
   const families = new Map<string, string | string[]>();
-  for (const page of list.pages) {
-    const painted = textSlicedFaces(page, chains, (id) => faces.has(id));
-    for (const [id, { characters }] of painted) {
-      const entry = wanted.get(faces.get(id)!.face)!;
-      for (const character of characters) entry.characters.add(character);
-    }
-    slicedFontFamilies(painted, (id) => names.get(faces.get(id)!.face), families);
-  }
-  if (families.size > 0) {
-    for (const page of list.pages) {
-      forEachTextPrimitive(page, (text) => {
-        text.font = withFontFamilies(text.font, families);
-        const leader = text.leaderGlyphs;
-        if (typeof leader?.font === 'string') leader.font = withFontFamilies(leader.font, families);
+  // Every rewritable font as the layout wrote it, to rewrite again under the final families.
+  const written: Array<{ page: DisplayPage; node: { font: string }; font: string }> = [];
+  const rewrite = (node: { font: string }, font: string) => {
+    const next = withFontFamilies(font, families);
+    if (next === node.font) return false;
+    node.font = next;
+    return true;
+  };
+  return {
+    /** Names `pages`' fonts at once and resolves once their outlines are in. */
+    async add(pages: readonly DisplayPage[]): Promise<void> {
+      if (wanted.size === 0) return;
+      const drawn = new Map<number, { glyphs: Set<number>; characters: Set<string> }>();
+      for (const page of pages) drawnByFont(page, drawn);
+      const needs = new Map([...wanted.keys()].map((face) => [face, { glyphs: new Set<number>(), characters: new Set<string>() }]));
+      for (const [id, { face }] of faces) {
+        const need = needs.get(face)!;
+        for (const glyph of drawn.get(id)?.glyphs ?? []) need.glyphs.add(glyph);
+        for (const character of drawn.get(id)?.characters ?? []) need.characters.add(character);
+      }
+      for (const page of pages) {
+        const painted = textSlicedFaces(page, chains, (id) => faces.has(id));
+        for (const [id, { characters }] of painted) {
+          const need = needs.get(faces.get(id)!.face)!;
+          for (const character of characters) need.characters.add(character);
+        }
+        slicedFontFamilies(painted, (id) => names.get(faces.get(id)!.face), families);
+      }
+      const from = written.length;
+      for (const page of pages) {
+        forEachTextPrimitive(page, (text) => {
+          written.push({ page, node: text, font: text.font });
+          const leader = text.leaderGlyphs;
+          if (typeof leader?.font === 'string') written.push({ page, node: leader as { font: string }, font: leader.font });
+        });
+      }
+      for (const { node, font } of written.slice(from)) rewrite(node, font);
+      await Promise.all([...needs].map(([face, { glyphs, characters }]) =>
+        Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
+    },
+    /** The faces whose outlines grew since the last call, each with every outline loaded so far. */
+    grown(): Omit<DocxViewerSlicedFace, 'files'>[] {
+      return [...wanted].flatMap(([face, entry]) => {
+        if (entry.sent === face.revision) return [];
+        entry.sent = face.revision;
+        return [{ slices: entry.slices, family: names.get(face)!, bytes: face.bytes() }];
       });
-    }
-  }
-  await Promise.all([...wanted].map(([face, { glyphs, characters }]) =>
-    Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
-  return [...wanted].map(([face, { slices }]) => ({ slices, family: names.get(face)!, bytes: face.bytes(), files: face.files() }));
+    },
+    /** The pages added before the families took their final names whose fonts those names change, rewritten. */
+    finish(): DisplayPage[] {
+      const changed = new Set<DisplayPage>();
+      for (const { page, node, font } of written) if (rewrite(node, font)) changed.add(page);
+      return [...changed];
+    },
+    /** Every face with all its outlines so far. */
+    faces(): DocxViewerSlicedFace[] {
+      return [...wanted].map(([face, { slices }]) => ({ slices, family: names.get(face)!, bytes: face.bytes(), files: face.files() }));
+    },
+  };
 }
 
 /**
@@ -215,8 +274,8 @@ export async function openDocumentViewer(
   const module = await loadModule();
   const document = module.openViewDocument(bytes);
   let pageGap: number;
-  let list: DisplayList | null;
-  let fontChains: Record<string, number[]> = {};
+  let list: DisplayList | null = null;
+  let outlines!: ReturnType<typeof slicedOutlines>;
   // A registry per open: its failures and sliced faces are this open's. The
   // engine answers bytes it already holds with their first id.
   const failures: Error[] = [];
@@ -239,23 +298,40 @@ export async function openDocumentViewer(
     source.setCompat(request.regions.settings?.compatibilityFlags);
     const measurement = source.measurementConfigForRequirements(requirements);
     if (!measurement) throw new Error('DOCX viewer fonts did not load');
-    fontChains = measurement.fontChains;
     // The face that paints East Asian text first loads its core while layout
     // runs, no sooner, so it never shares the link with the engine or the
     // skeletons layout waits for (Q769 A). A task boundary lets the requests
     // go out before layout holds the thread.
     if (await source.startEastAsianCores(requirements)) await new Promise((resolve) => setTimeout(resolve, 0));
     const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
-    const displayList = JSON.parse(
-      document.displayPagesJson(0, Math.min(PAGE_BATCH, pageCount))
-    ) as DisplayList;
-    for (let start = PAGE_BATCH; start < pageCount; start += PAGE_BATCH) {
-      const batch = JSON.parse(
-        document.displayPagesJson(start, Math.min(start + PAGE_BATCH, pageCount))
-      ) as DisplayList;
-      displayList.pages.push(...batch.pages);
+    const progressive = options.progressive;
+    outlines = slicedOutlines(source.progressiveFaces(), measurement.fontChains);
+    let next = PAGE_BATCH;
+    if (progressive) {
+      const sizes = (JSON.parse(document.pageSizesJson()) as [number, number][]).map(([width, height]) => ({ width, height }));
+      next = Math.max(1, Math.floor(progressive.firstPages(sizes)));
     }
-    list = displayList;
+    // Batches go to `onPages` in order, each once its outlines are in. The
+    // first goes before anything else is built; a later one's chunk fetches
+    // overlap the next batch's build (Q804 A).
+    let delivered = Promise.resolve();
+    // At least one call, so a document of no pages still gets its list.
+    for (let start = 0; start < pageCount || !list; start = next, next += PAGE_BATCH) {
+      const batch = JSON.parse(document.displayPagesJson(start, Math.min(next, pageCount))) as DisplayList;
+      if (list) list.pages.push(...batch.pages);
+      else list = { ...batch, pages: [...batch.pages] };
+      if (!progressive) continue;
+      const loaded = outlines.add(batch.pages);
+      // Reported through `delivered`, in order.
+      loaded.catch(() => {});
+      delivered = delivered
+        .then(() => loaded)
+        .then(() => progressive.onPages({ pages: batch.pages, slicedFaces: outlines.grown() }));
+      // A batch whose outlines are loaded goes before the next is built; one
+      // still fetching lets the next build meanwhile.
+      await (start === 0 ? delivered : Promise.race([delivered, new Promise((resolve) => setTimeout(resolve, 0))]));
+    }
+    await delivered;
   } catch (error) {
     // A trap (out of memory) leaves the document borrowed, so free() throws
     // too; the trap's error is the one to report.
@@ -266,7 +342,12 @@ export async function openDocumentViewer(
   }
   // Every page is built: the engine goes now, not on dispose.
   document.free();
-  let sliced = await outlineSlicedFaces(source.progressiveFaces(), list!, fontChains);
+  if (!options.progressive) await outlines.add(list!.pages);
+  else {
+    const renamed = outlines.finish();
+    if (renamed.length > 0) options.progressive.onPages({ pages: renamed, slicedFaces: outlines.grown() });
+  }
+  let sliced = outlines.faces();
   return {
     displayList(gap) {
       if (!list) throw new Error('DOCX viewer handle is disposed');

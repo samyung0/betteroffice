@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   openDocumentViewer,
+  type DocxPageSize,
   type DocxViewerAnalysis,
 } from '@betteroffice/docx/viewer';
 import {
@@ -34,6 +35,8 @@ export interface DocxDisplayListViewerProps {
   onZoomChange?: (zoom: number) => void;
   /** Pages abut with no gap, padding or shadow, as a reading layout's do. */
   flush?: boolean;
+  /** The sizes of the pages still to come after `displayList`'s, held as blank space. */
+  pendingPages?: readonly DocxPageSize[];
 }
 
 /**
@@ -46,6 +49,7 @@ export function DocxDisplayListViewer({
   pinchZoom = false,
   onZoomChange,
   flush = false,
+  pendingPages,
 }: DocxDisplayListViewerProps) {
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -57,9 +61,10 @@ export function DocxDisplayListViewer({
     paneRef.current = hostRef.current && scrollerOf(hostRef.current);
   }, []);
   const paneWidth = usePaneWidth(paneRef, zoom === 'fit');
+  // Pages still to come count, so the fit holds as they arrive.
   const pageWidth = useMemo(
-    () => Math.max(0, ...displayList.pages.map((page) => page.width)),
-    [displayList]
+    () => Math.max(0, ...[...displayList.pages, ...(pendingPages ?? [])].map((page) => page.width)),
+    [displayList, pendingPages]
   );
   // 100% only until the pane is first measured, before anything paints.
   const level = zoom === 'fit' ? (fitZoom(paneWidth, pageWidth) ?? 1) : zoom;
@@ -77,6 +82,7 @@ export function DocxDisplayListViewer({
       glyphOutlineProvider={false}
       hostRef={hostRef}
       interactive={false}
+      pendingPages={pendingPages}
       resolveImage={resolveImage}
       selectableText
       zoom={level}

@@ -12,6 +12,8 @@ interface CanvasPresentation {
   pageId: bigint | undefined;
   revision: number | undefined;
   environment: CanvasRasterEnvironment;
+  /** With no retained frame, the page drawn and its revision. */
+  page?: { drawn: object; revision: number };
 }
 
 export class CanvasReplayState {
@@ -43,18 +45,28 @@ export class CanvasReplayState {
     this.pageRevisions = revisions;
   }
 
+  /**
+   * Null when `canvas` already shows this page in this environment: by its
+   * frame revision, or with no frame by `page`, the same page object at the
+   * same revision (a viewer's pages arriving in batches leave those shown).
+   */
   prepare(
     canvas: HTMLCanvasElement,
     pageId: bigint | undefined,
-    environment: CanvasRasterEnvironment
+    environment: CanvasRasterEnvironment,
+    page?: { drawn: object; revision: number }
   ): CanvasPresentation | null {
     const revision = pageId === undefined ? undefined : this.pageRevisions.get(pageId);
     const previous = this.presented.get(canvas);
+    const unchanged =
+      revision !== undefined
+        ? previous?.pageId === pageId && previous?.revision === revision
+        : page !== undefined &&
+          previous?.page?.drawn === page.drawn &&
+          previous.page.revision === page.revision;
     if (
-      revision !== undefined &&
+      unchanged &&
       previous !== undefined &&
-      previous.pageId === pageId &&
-      previous.revision === revision &&
       previous.environment.dpr === environment.dpr &&
       previous.environment.zoom === environment.zoom &&
       previous.environment.glyphCache === environment.glyphCache &&
@@ -62,7 +74,7 @@ export class CanvasReplayState {
     ) {
       return null;
     }
-    return { canvas, pageId, revision, environment };
+    return { canvas, pageId, revision, environment, page };
   }
 
   didPresent(presentation: CanvasPresentation): void {
