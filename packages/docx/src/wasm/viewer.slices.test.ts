@@ -428,3 +428,38 @@ test('a batch whose outline chunks are still loading lets the next batch build, 
   }
   expect(steps).toEqual(['build 0-1', 'pages 0-1', 'build 1-9', 'build 9-11', 'pages 1-9', 'pages 9-11']);
 }, 60_000);
+
+// Q801 B: a body cut after its first pages hands them over, sliced faces and all,
+// before the rest is laid out; later batches grow the faces as a whole open's.
+test('a body cut after its first pages hands them over before the rest is laid out and ends as a whole open\'s', async () => {
+  const bytes = pagesPackage(Array.from({ length: 40 }, (_, index) => (index % 9 === 5 ? HEADER : '本文')));
+  recordingFonts(true);
+  const whole = await openDocumentViewer(bytes);
+  recordingFonts(true);
+  const steps: string[] = [];
+  const received: unknown[] = [];
+  const layout = DocxViewDocument.prototype.layout;
+  DocxViewDocument.prototype.layout = function (request) {
+    steps.push('layout');
+    return layout.call(this, request);
+  };
+  try {
+    const handle = await openDocumentViewer(bytes, {
+      progressive: {
+        firstPages: () => 2,
+        onPages({ pages }) {
+          steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+          for (const page of pages) received[page.pageIndex] = structuredClone(page);
+        },
+      },
+    });
+    expect(steps.slice(0, 3)).toEqual(['pages 0-2', 'layout', 'pages 2-10']);
+    expect(samePages(received)).toBe(samePages(whole.displayList().pages));
+    expect(samePages(handle.displayList().pages)).toBe(samePages(whole.displayList().pages));
+    expect(handle.slicedFaces().map((face) => new Uint8Array(face.bytes))).toEqual(
+      whole.slicedFaces().map((face) => new Uint8Array(face.bytes))
+    );
+  } finally {
+    DocxViewDocument.prototype.layout = layout;
+  }
+}, 60_000);

@@ -14,7 +14,8 @@ const DEFAULT_PAGE_GAP: f64 = 24.0;
 /// Opens in steps so the host registers the fonts the layout needs first:
 /// `open`, `layoutRequestJson`, `fontRequirementsJson`, `layout`, then
 /// `displayPagesJson` a batch of pages at a time (`pageSizesJson` sizes them
-/// all before any is built).
+/// all before any is built). `layoutFirst` before `layout` lays out the first
+/// pages alone, to build them while `layout` lays out the rest.
 #[wasm_bindgen]
 pub struct DocxViewDocument {
     engine: EngineSession,
@@ -23,6 +24,8 @@ pub struct DocxViewDocument {
     display: Option<ResidentDisplayInput>,
     /// Each laid-out page's `[width, height]`, as its display page gives them.
     page_sizes: Vec<[serde_json::Number; 2]>,
+    /// The widest page of the whole body, while only its first pages are laid out.
+    document_width: f64,
 }
 
 #[wasm_bindgen]
@@ -38,6 +41,7 @@ impl DocxViewDocument {
             request,
             display: None,
             page_sizes: Vec::new(),
+            document_width: 0.0,
         })
     }
 
@@ -59,6 +63,40 @@ impl DocxViewDocument {
     /// The measurement's font chains go to the display list too, so measured
     /// text becomes joined glyph runs as in the editor.
     pub fn layout(&mut self, request: &str) -> Result<u32, JsValue> {
+        let sizes = self
+            .engine
+            .layout_document_with_regions(request)
+            .map_err(js_error)?;
+        self.laid_out(request, sizes)
+    }
+
+    /// Lays out only the body's first `pages` pages, each as [`Self::layout`]
+    /// lays it out, with page-count fields showing their saved results, and
+    /// returns `pages`; 0 when the body can't be cut after them, leaving
+    /// nothing laid out. `layout` lays out the whole body after either.
+    #[wasm_bindgen(js_name = layoutFirst)]
+    pub fn layout_first(&mut self, request: &str, pages: u32) -> Result<u32, JsValue> {
+        let Some(first) = self
+            .engine
+            .layout_document_with_regions_first_pages(request, pages as usize)
+            .map_err(js_error)?
+        else {
+            self.display = None;
+            return Ok(0);
+        };
+        self.document_width = first.document_width;
+        self.laid_out(request, first.sizes)
+    }
+
+    /// The widest page of the whole body, once [`Self::layout_first`] laid out
+    /// its first pages.
+    #[wasm_bindgen(js_name = documentWidth)]
+    pub fn document_width(&self) -> f64 {
+        self.document_width
+    }
+
+    /// Readies the pages just laid out for display.
+    fn laid_out(&mut self, request: &str, sizes: Vec<(f64, f64)>) -> Result<u32, JsValue> {
         let extras = match serde_json::from_str::<Value>(request)
             .map_err(js_error)?
             .pointer("/measurement/fontChains")
@@ -66,10 +104,6 @@ impl DocxViewDocument {
             Some(chains) => json!({ "fontChains": chains }),
             None => json!({}),
         };
-        let sizes = self
-            .engine
-            .layout_document_with_regions(request)
-            .map_err(js_error)?;
         self.display = Some(
             self.engine
                 .region_display_input(&extras.to_string())
@@ -471,6 +505,226 @@ mod tests {
                 assert!(paged == round_trip, "{name}");
             }
         }
+    }
+
+    /// `document`'s request measuring every font it requires with `font`, as
+    /// the host registers the faces it requires.
+    fn measured_request(document: &DocxViewDocument, font: u32) -> String {
+        let mut request: Value = serde_json::from_str(&document.layout_request_json()).unwrap();
+        let requirements: Vec<Value> = serde_json::from_str(
+            &document
+                .font_requirements_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let chains = requirements
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement["key"].as_str().unwrap().to_owned(),
+                    json!([font]),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        request["measurement"] = json!({
+            "fontChains": chains,
+            "defaults": { "fontSize": 11, "fontFamily": "Calibri" },
+            "authoritativeShaping": true,
+        });
+        request.to_string()
+    }
+
+    const LIBERATION: &[u8] =
+        include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    /// A 1×1 PNG.
+    const PIXEL: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    /// About a dozen pages whose paragraphs carry footnotes, with floating
+    /// tables beside their paragraph and on the page, pictures wrapped at
+    /// their paragraph, keep-with-next headings and a footer whose page count
+    /// saves a stale 99, so notes and floats fall on both sides of a cut.
+    fn notes_and_floats_docx() -> Vec<u8> {
+        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture""#;
+        const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        const TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
+        const TEXT: &str = "The committee reviews every application against the published criteria before the spring deadline, and late submissions wait for the autumn round while the panel settles the budget.";
+        let floating = |anchor: &str, y: u32| {
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="{anchor}" w:horzAnchor="margin" w:tblpXSpec="right" w:tblpY="{y}"/><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Floating {anchor} table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let picture = |id: usize| {
+            format!(
+                r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="{id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1371600" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="{id}" name="Picture {id}"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="{id}" name="pixel.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="rIdPixel"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1371600" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+            )
+        };
+        let mut body = String::new();
+        let mut notes = String::new();
+        for index in 1..=90 {
+            if index % 9 == 1 {
+                body += &format!(
+                    r#"<w:p><w:pPr><w:keepNext/><w:spacing w:before="240"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>Part {index}</w:t></w:r></w:p>"#
+                );
+            }
+            let mut runs = String::new();
+            if index % 8 == 4 {
+                runs += &picture(index);
+            }
+            runs +=
+                &format!(r#"<w:r><w:t xml:space="preserve">{index}. {TEXT} {TEXT}</w:t></w:r>"#);
+            if index % 3 == 0 {
+                let id = index / 3;
+                runs += &format!(
+                    r#"<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="{id}"/></w:r>"#
+                );
+                notes += &format!(
+                    r#"<w:footnote w:id="{id}"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteRef/></w:r><w:r><w:t xml:space="preserve"> Note {id}: {TEXT}</w:t></w:r></w:p></w:footnote>"#
+                );
+            }
+            body += &format!("<w:p>{runs}</w:p>");
+            if index % 5 == 0 {
+                body += &floating(if index % 10 == 0 { "page" } else { "text" }, 400);
+            }
+        }
+        body += r#"<w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#;
+        let parts = [
+            (
+                "[Content_Types].xml",
+                format!(
+                    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="{TYPE}.document.main+xml"/><Override PartName="/word/footnotes.xml" ContentType="{TYPE}.footnotes+xml"/><Override PartName="/word/footer1.xml" ContentType="{TYPE}.footer+xml"/></Types>"#
+                ),
+            ),
+            (
+                "_rels/.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{RELS}/officeDocument" Target="word/document.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNotes" Type="{RELS}/footnotes" Target="footnotes.xml"/><Relationship Id="rIdFooter" Type="{RELS}/footer" Target="footer1.xml"/><Relationship Id="rIdPixel" Type="{RELS}/image" Target="media/pixel.png"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/footnotes.xml",
+                format!(
+                    r#"<w:footnotes {NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>{notes}</w:footnotes>"#
+                ),
+            ),
+            (
+                "word/footer1.xml",
+                format!(
+                    r#"<w:ftr {NS}><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>99</w:t></w:r></w:fldSimple></w:p></w:ftr>"#
+                ),
+            ),
+            (
+                "word/document.xml",
+                format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#),
+            ),
+        ];
+        let mut entries = parts
+            .into_iter()
+            .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+            .collect::<Vec<_>>();
+        entries.push(("word/media/pixel.png".to_owned(), PIXEL.to_vec()));
+        ooxml_opc::rezip_parts(&entries).unwrap()
+    }
+
+    /// The text of the page-count (NUMPAGES) fields on a page, its header and
+    /// footer included.
+    fn page_counts(page: &Value) -> Vec<String> {
+        [
+            &page["primitives"],
+            &page["header"]["primitives"],
+            &page["footer"]["primitives"],
+        ]
+        .into_iter()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter(|primitive| primitive["field"]["category"] == "NUMPAGES")
+        .map(|primitive| primitive["text"].as_str().unwrap().to_owned())
+        .collect()
+    }
+
+    /// A body cut after its first pages lays them out as the whole body does,
+    /// its page-count fields showing the saved count, and the whole layout
+    /// after it is a fresh one's: notes, floats, pictures, keep-with-next
+    /// chains and section breaks on both sides of the cut included.
+    #[test]
+    fn first_pages_are_the_whole_layouts() {
+        docx_layout::clear_measure_fonts();
+        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let fixtures: [(&str, Vec<u8>, Option<&str>); 4] = [
+            ("notes-and-floats", notes_and_floats_docx(), Some("99")),
+            (
+                "long-handbook",
+                include_bytes!("../../../poc/fixtures/long-handbook.docx").to_vec(),
+                Some("60"),
+            ),
+            (
+                "book-30p",
+                include_bytes!("../../../poc/fixtures/book-30p.docx").to_vec(),
+                None,
+            ),
+            (
+                "exchange-plan",
+                include_bytes!("../../../poc/fixtures/exchange-plan.docx").to_vec(),
+                None,
+            ),
+        ];
+        for (name, bytes, saved) in fixtures {
+            let mut cut = DocxViewDocument::open(&bytes).unwrap();
+            let request = measured_request(&cut, font);
+            assert_eq!(cut.layout_first(&request, 3).unwrap(), 3, "{name}");
+            let first: Value =
+                serde_json::from_str(&cut.display_pages_json(0, 3).unwrap()).unwrap();
+            let after = paged_display_list(&mut cut, &request, 8);
+            let mut fresh = DocxViewDocument::open(&bytes).unwrap();
+            let whole = paged_display_list(&mut fresh, &request, 8);
+            assert!(after == whole, "{name}: the whole layout after the cut");
+            let whole: Value = serde_json::from_str(&whole).unwrap();
+            let total = whole["pages"].as_array().unwrap().len().to_string();
+            for index in 0..3 {
+                let (shown, last) = (&first["pages"][index], &whole["pages"][index]);
+                match saved {
+                    None => assert_eq!(shown, last, "{name} page {index}"),
+                    Some(saved) => {
+                        assert_eq!(page_counts(shown), [saved], "{name} page {index}");
+                        assert_eq!(page_counts(last), [total.as_str()], "{name} page {index}");
+                        // Only the header and footer lines holding the count move.
+                        let bare = |page: &Value| {
+                            let mut page = page.clone();
+                            let page = page.as_object_mut().unwrap();
+                            page.remove("header");
+                            page.remove("footer");
+                            Value::Object(page.clone())
+                        };
+                        assert_eq!(bare(shown), bare(last), "{name} page {index}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A body too short to lay out two pages past the ones asked for is not
+    /// cut: the caller lays it out whole.
+    #[test]
+    fn a_short_body_is_not_cut() {
+        let mut document = DocxViewDocument::open(include_bytes!(
+            "../../docx-edit/tests/fixtures/footnote-anchor.docx"
+        ))
+        .unwrap();
+        let request = document.layout_request_json();
+        assert_eq!(document.layout_first(&request, 3).unwrap(), 0);
+        assert!(document.layout(&request).unwrap() > 0);
     }
 
     /// With real fonts the viewer writes the list the editor's resident

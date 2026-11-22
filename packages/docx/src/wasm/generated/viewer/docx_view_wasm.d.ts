@@ -5,7 +5,8 @@
  * Opens in steps so the host registers the fonts the layout needs first:
  * `open`, `layoutRequestJson`, `fontRequirementsJson`, `layout`, then
  * `displayPagesJson` a batch of pages at a time (`pageSizesJson` sizes them
- * all before any is built).
+ * all before any is built). `layoutFirst` before `layout` lays out the first
+ * pages alone, to build them while `layout` lays out the rest.
  */
 export class DocxViewDocument {
     private constructor();
@@ -17,6 +18,11 @@ export class DocxViewDocument {
      */
     displayPagesJson(start: number, end: number): string;
     /**
+     * The widest page of the whole body, once [`Self::layout_first`] laid out
+     * its first pages.
+     */
+    documentWidth(): number;
+    /**
      * Font families and scripts `request` measures with.
      */
     fontRequirementsJson(request: string): string;
@@ -26,6 +32,13 @@ export class DocxViewDocument {
      * text becomes joined glyph runs as in the editor.
      */
     layout(request: string): number;
+    /**
+     * Lays out only the body's first `pages` pages, each as [`Self::layout`]
+     * lays it out, with page-count fields showing their saved results, and
+     * returns `pages`; 0 when the body can't be cut after them, leaving
+     * nothing laid out. `layout` lays out the whole body after either.
+     */
+    layoutFirst(request: string, pages: number): number;
     /**
      * The region-layout request without `measurement`.
      */
@@ -206,8 +219,10 @@ export interface InitOutput {
     readonly clear_measure_fonts: () => [number, number];
     readonly close_display_list: (a: number) => void;
     readonly docxviewdocument_displayPagesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly docxviewdocument_documentWidth: (a: number) => number;
     readonly docxviewdocument_fontRequirementsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly docxviewdocument_layout: (a: number, b: number, c: number) => [number, number, number];
+    readonly docxviewdocument_layoutFirst: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly docxviewdocument_layoutRequestJson: (a: number) => [number, number];
     readonly docxviewdocument_open: (a: number, b: number) => [number, number, number];
     readonly docxviewdocument_pageSizesJson: (a: number) => [number, number];
