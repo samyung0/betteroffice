@@ -119,6 +119,15 @@ function yrsCore(session: YrsSession): YrsCoreSession {
   };
 }
 
+/** The props `renderPagedEditor` renders with: a real session, its fonts, no document. */
+export function pagedEditorProps(session: YrsSession) {
+  return {
+    document: null,
+    yrsCore: yrsCore(session),
+    measurementFontProvider: { resolve: () => () => Promise.resolve(fontBytes!) },
+  };
+}
+
 /**
  * Stands in for the canvas renderer's resident worker: lays out each pass
  * `session` records in an engine of its own and hands the page that layout,

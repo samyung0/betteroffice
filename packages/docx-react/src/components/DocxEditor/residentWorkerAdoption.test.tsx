@@ -1,0 +1,134 @@
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { resolve } from 'node:path';
+
+const ownsDom = !GlobalRegistrator.isRegistered;
+if (ownsDom) GlobalRegistrator.register();
+
+import { createRef } from 'react';
+import type { YrsSession } from '@betteroffice/docx/yrs';
+import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
+import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { useCanvasRenderer } from './hooks/useDisplayList';
+import {
+  destroySessions,
+  docxPackage,
+  loadEditor,
+  openSession,
+  pagedEditorProps,
+} from './pagedEditor.testing';
+
+const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+
+// The resident engine worker's own code, run in this process on a real engine
+// session (the wasm this test loaded); it paints nothing, as no canvas is attached.
+let startWorker: (scope: unknown, canvas: unknown, harness: unknown) => void;
+const originalWorker = globalThis.Worker;
+
+beforeAll(async () => {
+  await loadEditor();
+  const stubs: Record<string, string> = {
+    './residentEngineSession':
+      'export const createResidentEngineSession = (clientId) => testHarness.createSession(clientId);',
+    '../layout/render/glyphCache': 'export class GlyphCache {}',
+    '../layout/render/canvasBackend':
+      'export const rasterizeDisplayPageToBackBuffer = () => {}; export const presentOffscreenPageBackBuffer = () => {}; export const presentOffscreenPageBackBufferWithCaret = () => {};',
+    '../wasm/fontDecoder': 'export const decodeFontFace = () => { throw new Error("no decoder"); };',
+    // No sliced faces here (bundling the fonts package's dist trips Bun on Windows paths).
+    './residentProgressiveFonts':
+      'export class FontSliceUnavailableError extends Error {} export class ResidentProgressiveFonts {} export const glyphsByFont = () => new Map(); export const sliceFaceOpener = () => null;',
+  };
+  const result = await Bun.build({
+    entrypoints: [resolve(import.meta.dir, '../../../../docx/src/yrs/residentEngineWorker.ts')],
+    target: 'bun',
+    format: 'iife',
+    plugins: [
+      {
+        name: 'in-process-worker',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, ({ path, importer }) =>
+            importer.replaceAll('\\', '/').endsWith('/residentEngineWorker.ts') && path in stubs
+              ? { path, namespace: 'in-process-worker' }
+              : undefined
+          );
+          build.onLoad({ filter: /.*/, namespace: 'in-process-worker' }, ({ path }) => ({
+            contents: stubs[path],
+            loader: 'js',
+          }));
+        },
+      },
+    ],
+  });
+  if (!result.success) throw new AggregateError(result.logs, 'Worker bundle failed');
+  startWorker = new Function(
+    'self',
+    'OffscreenCanvas',
+    'testHarness',
+    await result.outputs[0].text()
+  ) as typeof startWorker;
+});
+
+afterEach(async () => {
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 50));
+  });
+  cleanup();
+  destroySessions();
+  globalThis.Worker = originalWorker;
+});
+afterAll(async () => {
+  if (ownsDom) await GlobalRegistrator.unregister();
+});
+
+/** A Worker whose messages reach the worker's code in this process, asynchronously. */
+class InProcessWorker {
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onerror = null;
+  onmessageerror = null;
+  private readonly scope: { onmessage: ((event: { data: unknown }) => void) | null; postMessage(data: unknown): void };
+  constructor() {
+    this.scope = {
+      onmessage: null,
+      postMessage: (data) => queueMicrotask(() => this.onmessage?.({ data })),
+    };
+    startWorker(this.scope, class {}, { createSession: createResidentEngineSession });
+  }
+  postMessage(data: unknown): void {
+    queueMicrotask(() => this.scope.onmessage?.({ data }));
+  }
+  terminate(): void {}
+}
+
+/** The editor as DocxEditor wires it: the canvas renderer's resident worker lays out every pass. */
+function CanvasEditor({ session, editor }: { session: YrsSession; editor: React.Ref<PagedEditorRef> }) {
+  const canvas = useCanvasRenderer();
+  return (
+    <PagedEditor
+      ref={editor}
+      {...pagedEditorProps(session)}
+      residentWorkerLayout
+      onLayoutComputed={canvas.onLayoutComputed}
+    />
+  );
+}
+
+const BODY = Array.from(
+  { length: 90 },
+  (_, index) =>
+    `<w:p w14:paraId="${(0x10000000 + index).toString(16).toUpperCase()}"><w:r><w:t>Line ${index}</w:t></w:r></w:p>`
+).join('');
+
+test('the worker lays the pass out and its reply hands the page its layout; the page lays out nothing', async () => {
+  globalThis.Worker = InProcessWorker as unknown as typeof Worker;
+  const session = await openSession(docxPackage(BODY), 7401);
+  let pageLayouts = 0;
+  const layOut = session.layoutDocumentWithRegionsRetainedJson.bind(session);
+  session.layoutDocumentWithRegionsRetainedJson = (input) => {
+    pageLayouts += 1;
+    return layOut(input);
+  };
+  const editor = createRef<PagedEditorRef>();
+  render(<CanvasEditor session={session} editor={editor} />);
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  expect(pageLayouts).toBe(0);
+});
