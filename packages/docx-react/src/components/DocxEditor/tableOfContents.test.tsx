@@ -17,6 +17,7 @@ import { yrsToDocument } from '@betteroffice/docx/yrs/yrsToDocument';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 import { samePages, tocLayout } from './tableOfContents';
+import { residentWorker } from './pagedEditor.testing';
 
 const { act, cleanup, render } = await import('@testing-library/react');
 
@@ -155,26 +156,26 @@ const documentXml = async (session: YrsSession) => {
   return { saved, xml: new TextDecoder().decode(unzipContainer(saved)['word/document.xml']) };
 };
 
-async function editor(session: YrsSession) {
+/** The editor, its passes laid out on the page or, `worker`, by a resident worker. */
+async function editor(session: YrsSession, worker = false) {
   const ref = createRef<PagedEditorRef>();
-  const layouts: Layout[] = [];
+  const resident = worker ? residentWorker(session) : undefined;
   render(
     <PagedEditor
       ref={ref}
       document={null}
       yrsCore={yrsCore(session)}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
-      onLayoutComputed={(layout) => {
-        if (layout) layouts.push(layout);
-      }}
+      residentWorkerLayout={worker}
+      onLayoutComputed={(layout) => resident?.build(layout)}
     />
   );
   const deadline = Date.now() + 2000;
-  while (layouts.length === 0 && Date.now() < deadline)
+  while (!ref.current?.getLayout() && Date.now() < deadline)
     await act(async () => {
       await new Promise((done) => setTimeout(done, 10));
     });
-  expect(layouts.length).toBeGreaterThan(0);
+  expect(ref.current?.getLayout()).toBeTruthy();
   return ref;
 }
 
@@ -250,9 +251,9 @@ test('Update table of contents rebuilds the entries after a heading is renamed',
   expect(reopened.storySegments('body')).toEqual(session.storySegments('body'));
 });
 
-test('the second pass reads the page a heading the table pushed on starts', async () => {
+async function secondPass(worker: boolean, clientId: number) {
   // How many fillers the first page holds; the heading then takes the last one's line.
-  const probe = await open(source(filled(80)), 7105);
+  const probe = await open(source(filled(80)), clientId);
   const measured = (await editor(probe)).current?.getLayout();
   const fillers =
     measured?.pages[0]!.fragments.filter(
@@ -262,8 +263,8 @@ test('the second pass reads the page a heading the table pushed on starts', asyn
   expect(fillers).toBeGreaterThan(10);
   cleanup();
 
-  const session = await open(source(filled(fillers - 1)), 7106);
-  const ref = await editor(session);
+  const session = await open(source(filled(fillers - 1)), clientId + 1);
+  const ref = await editor(session, worker);
   const pageOf = (paraId: string) =>
     ref.current
       ?.getLayout()
@@ -283,7 +284,13 @@ test('the second pass reads the page a heading the table pushed on starts', asyn
   );
   expect(session.undo()).toBe(true);
   expect(units(session)).not.toContain('TOC');
-});
+}
+
+test('the second pass reads the page a heading the table pushed on starts', () =>
+  secondPass(false, 7105));
+
+test('with the worker laying out passes, the table lays out on the page for its second pass', () =>
+  secondPass(true, 7107));
 
 test('a heading without a fragment takes the page before it, and the tab the text width', () => {
   const page = (number: number, ids: string[], pageLabel?: string) => ({

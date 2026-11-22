@@ -98,14 +98,24 @@ export interface UseLayoutPipelineOptions {
   /** Receives each computed layout and resets with null. */
   onLayoutComputed?: (layout: Layout | null) => void;
   onAnchorPositionsChange?: (positions: Map<string, number>) => void;
-  /** Q791 prototype: the canvas renderer's resident worker lays out every pass. */
+  /**
+   * The canvas renderer's resident worker lays out every pass: the page only
+   * records it and adopts the worker's layout. A table of contents (which
+   * reads its pages at once) and every pass after the worker failed lay out
+   * on the page.
+   */
   residentWorkerLayout?: boolean;
+}
+
+export interface LayoutPipelineOptions {
+  /** Lay out on the page even when the worker lays out passes. */
+  onPage?: boolean;
 }
 
 export interface UseLayoutPipelineReturn {
   layout: Layout | null;
   layoutUpdateOrigin: LayoutUpdateOrigin;
-  runLayoutPipeline: () => void;
+  runLayoutPipeline: (options?: LayoutPipelineOptions) => void;
   /** The layout the last pass computed, before React renders it. */
   getLatestLayout: () => Layout | null;
   scheduleLayout: (origin?: LayoutUpdateOrigin) => void;
@@ -139,21 +149,24 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
   const [layout, setLayout] = useState<Layout | null>(null);
   const latestLayoutRef = useRef<Layout | null>(null);
-  // Q791 prototype: the pass recorded for the resident worker (a token, no
-  // pages), forwarded to the display list, which asks the worker to lay it out;
-  // the worker's layout then replaces `layout` for the page's readers.
-  const [requestedPass, setRequestedPass] = useState<{
-    token: Layout;
+  // The latest pass recorded for the resident worker: the canvas renderer
+  // builds it in the worker, whose layout then becomes `layout` for the page's
+  // readers. Null once a pass lays out on the page.
+  const [recordedPass, setRecordedPassState] = useState<{
+    layout: Layout;
     session: YrsSession;
   } | null>(null);
-  // A token recorded for an earlier session is not this one's pass.
-  const requested = requestedPass?.session === session ? requestedPass.token : null;
-  const setRequested = useCallback(
-    (token: Layout | null) =>
-      setRequestedPass(token && session ? { token, session } : null),
+  const recordedPassRef = useRef(recordedPass);
+  const setRecordedPass = useCallback(
+    (recorded: Layout | null) => {
+      const next = recorded && session ? { layout: recorded, session } : null;
+      recordedPassRef.current = next;
+      setRecordedPassState(next);
+    },
     [session]
   );
-  const pendingWorkerPassRef = useRef<{ start: number } | null>(null);
+  // The session whose worker failed: its passes lay out on the page.
+  const workerFailedSessionRef = useRef<YrsSession | null>(null);
 
   // Callback refs — parent may hand in a fresh closure every render. Mirroring
   // these in refs keeps `runLayoutPipeline`'s dep array stable; otherwise
@@ -182,8 +195,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Total-pages notifier — fires only when count changes (including N → 0).
   const lastTotalPagesRef = useRef<number>(0);
   useEffect(() => {
-    onLayoutComputedRef.current?.(requested ?? layout);
-  }, [requested, layout]);
+    // A pass recorded for an earlier session leaves this one nothing to build.
+    const recorded = recordedPass?.session === session ? recordedPass.layout : null;
+    onLayoutComputedRef.current?.(recorded ?? (recordedPass ? null : layout));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recordedPass, layout]);
   useEffect(() => {
     const total = layout?.pages.length ?? 0;
     if (total === lastTotalPagesRef.current) return;
@@ -261,7 +277,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // =========================================================================
 
   const runLayoutPipeline = useCallback(
-    () => {
+    (options?: LayoutPipelineOptions) => {
       const layoutUpdateOrigin = layoutPassOrigin(pendingLayoutOriginRef.current);
       pendingLayoutOriginRef.current = null;
       if (layoutUpdateOrigin === 'local') scrollRestoreController.cancel();
@@ -341,21 +357,29 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       };
       const applyComputation = (computation: LayoutComputation) => {
         captureAnchor();
-        commitLayoutRef.current(computation.layout, pipelineStart);
+        commitLayoutRef.current(computation.layout);
+        setRecordedPass(null);
+        const totalTime = performance.now() - pipelineStart;
+        if (totalTime > 2000) {
+          console.warn(
+            `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
+              `(${computation.layout.pages.length} pages)`
+          );
+        }
       };
 
-      // Q791 prototype: the resident worker lays the pass out; the page only
-      // records it (no layout here) and hands the display list a token.
+      // The resident worker lays the pass out: the page records it for the
+      // canvas renderer and adopts the worker's layout when it arrives.
       if (
         residentWorkerLayout &&
-        session.layoutOwner === 'worker' &&
+        !options?.onPage &&
+        workerFailedSessionRef.current !== session &&
         session.recordResidentLayout &&
         canUseResidentEngineWorker()
       ) {
         try {
           captureAnchor();
-          pendingWorkerPassRef.current = { start: pipelineStart };
-          setRequested(recordResidentLayout(computeInputs));
+          setRecordedPass(recordResidentLayout(computeInputs));
         } catch (error) {
           console.error('[PagedEditor] Resident layout request error:', error);
           onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
@@ -363,7 +387,6 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         syncCoordinator.onLayoutComplete(currentEpoch);
         return;
       }
-      setRequested(null);
 
       // Every pagination pass performs a full relayout.
       try {
@@ -388,14 +411,14 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       pagesContainerRef,
       viewportLayoutRef,
       scrollRestoreController,
-      setRequested,
+      setRecordedPass,
       residentWorkerLayout,
     ]
   );
 
   // The layout the page's readers see, and the scroll height it gives.
   const commitLayout = useCallback(
-    (newLayout: Layout, pipelineStart: number) => {
+    (newLayout: Layout) => {
       latestLayoutRef.current = newLayout;
       setLayout(newLayout);
       const vp = viewportLayoutRef.current;
@@ -404,46 +427,11 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         vp.style.minHeight = `${mh}px`;
         vp.style.marginBottom = zoom !== 1 ? `${mh * (zoom - 1)}px` : '';
       }
-      const totalTime = performance.now() - pipelineStart;
-      if (totalTime > 2000) {
-        console.warn(
-          `[PagedEditor] Layout pipeline took ${Math.round(totalTime)}ms total ` +
-            `(${newLayout.pages.length} pages)`
-        );
-      }
     },
     [pageGap, zoom, viewportLayoutRef]
   );
   const commitLayoutRef = useRef(commitLayout);
   commitLayoutRef.current = commitLayout;
-
-  // Q791 prototype: the resident worker's layout reaches the page's readers;
-  // a worker that failed hands layout back to the page.
-  useEffect(() => {
-    if (!session?.onResidentLayout) return;
-    return session.onResidentLayout((reply) => {
-      if (reply.kind === 'page') {
-        setRequested(null);
-        pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
-          pendingLayoutOriginRef.current,
-          'remote'
-        );
-        requestAnimationFrame(() => runRef.current());
-        return;
-      }
-      try {
-        const computation = adoptResidentLayout(reply.json);
-        commitLayoutRef.current(
-          computation.layout,
-          pendingWorkerPassRef.current?.start ?? performance.now()
-        );
-        pendingWorkerPassRef.current = null;
-      } catch (error) {
-        console.error('[PagedEditor] Resident layout reply error:', error);
-        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
-  }, [session, setRequested]);
 
   // Hold the exact scrollTop while the next display-list commit is built.
   useLayoutEffect(() => {
@@ -624,6 +612,26 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
       if (pendingLayoutOriginRef.current) runRef.current();
     });
   }, [scrollRestoreController]);
+
+  // The resident worker's layout reaches the page's readers. A worker that
+  // failed hands layout back: a pass it was to lay out is laid out here, as a
+  // peer's is (the view stays).
+  useEffect(() => {
+    if (!session?.onResidentLayout) return;
+    return session.onResidentLayout((reply) => {
+      if (reply.kind === 'layout') {
+        try {
+          commitLayoutRef.current(adoptResidentLayout(reply.json));
+        } catch (error) {
+          console.error('[PagedEditor] Resident layout reply error:', error);
+          onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        }
+        return;
+      }
+      workerFailedSessionRef.current = session;
+      if (recordedPassRef.current?.session === session) scheduleLayout('remote');
+    });
+  }, [session, scheduleLayout]);
 
   // Clean up pending rAF on unmount
   useEffect(() => {

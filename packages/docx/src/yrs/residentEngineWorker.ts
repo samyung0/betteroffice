@@ -78,8 +78,8 @@ let fontErrors: ResidentFontError[] = [];
 // The measurement's font chains from the latest frame request, by which list
 // markers and watermarks name their sliced faces.
 let fontChains: Record<string, number[]> = {};
-// Q791 prototype: the retained layout JSON the next frame reply carries, when
-// its request asked (the page lays out nothing and reads this layout).
+// The retained layout JSON this request's frame reply carries, when the page
+// recorded the pass without laying it out (`wantLayout`).
 let replyLayoutJson: string | undefined;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
@@ -111,6 +111,7 @@ scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
 };
 
 async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
+  replyLayoutJson = undefined;
   if ('extras' in request) fontChains = chainsOf(request.extras);
   if (request.type === 'destroy') {
     destroySession();
@@ -326,8 +327,8 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot): string | undefined {
   for (const input of snapshot.measureInputs) session.measureParagraphJson(input);
   let layoutJson: string | undefined;
   if (snapshot.layoutWithRegions) {
-    // the retained reply omits the tens-of-MB measured arena; the page reads
-    // it when it lays out nothing itself (Q791 prototype)
+    // the retained reply omits the tens-of-MB measured arena; it is the
+    // page's layout when the page recorded the pass
     layoutJson = session.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);

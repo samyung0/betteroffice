@@ -30,7 +30,7 @@ export interface ResidentEngineWorkerFrame {
   fontErrors: ResidentFontError[];
   /** The worker committed the edit but could not paint its frame. */
   paintError?: string;
-  /** Q791 prototype: the worker's retained layout JSON, when asked for. */
+  /** The worker's retained layout JSON, when the request asked for it. */
   layoutJson?: string;
 }
 

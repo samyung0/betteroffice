@@ -1560,8 +1560,8 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
-    /// The retained `{ layout, headersFooters?, notesConverged }` without laying
-    /// out again (see [`EngineSession::retained_region_layout_json`]).
+    /// The retained `{ layout, headersFooters? }` without laying out again
+    /// (see [`EngineSession::retained_region_layout_json`]).
     pub fn retained_region_layout_json(&self) -> Result<String, JsValue> {
         self.engine
             .retained_region_layout_json()

@@ -199,7 +199,7 @@ export function DocxEditorPagedArea({
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
-  /** Q791 prototype: see PagedEditor's prop. */
+  /** The resident worker lays out every pass (see PagedEditor's prop). */
   residentWorkerLayout?: boolean;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (

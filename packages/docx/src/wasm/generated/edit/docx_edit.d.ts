@@ -690,8 +690,8 @@ export class EditSession {
      */
     retained_kernel_inputs_json(): string;
     /**
-     * The retained `{ layout, headersFooters?, notesConverged }` without laying
-     * out again (see [`EngineSession::retained_region_layout_json`]).
+     * The retained `{ layout, headersFooters? }` without laying out again
+     * (see [`EngineSession::retained_region_layout_json`]).
      */
     retained_region_layout_json(): string;
     search_text(query: string, case_sensitive: boolean, limit?: number | null): string;

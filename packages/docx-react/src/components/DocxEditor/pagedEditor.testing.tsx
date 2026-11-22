@@ -1,12 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createRef } from 'react';
+import { isRecordedResidentLayout } from '@betteroffice/docx/editor';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { repackDocx } from '@betteroffice/docx/docx/rezip';
 import { rezipPartsToArrayBuffer, toBytes } from '@betteroffice/docx/docx/rezip/parts';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { unzipContainer } from '@betteroffice/docx/wasm/opc';
 import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
+import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import { yrsToDocument } from '@betteroffice/docx/yrs/yrsToDocument';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
@@ -117,9 +119,37 @@ function yrsCore(session: YrsSession): YrsCoreSession {
   };
 }
 
-/** Renders a PagedEditor on `session` and waits for its first layout. */
+/**
+ * Stands in for the canvas renderer's resident worker: lays out each pass
+ * `session` records in an engine of its own and hands the page that layout,
+ * or, `failing`, hands layout back to the page as a failed worker does.
+ */
+export function residentWorker(session: YrsSession, failing = false) {
+  const passes: Layout[] = [];
+  const build = (layout: Layout | null) => {
+    if (!layout || !isRecordedResidentLayout(layout)) return;
+    passes.push(layout);
+    setTimeout(async () => {
+      if (failing) {
+        session.publishResidentLayout?.({ kind: 'page' });
+        return;
+      }
+      // The font store is module-wide: the page's faces serve this engine too.
+      const snapshot = session.residentWorkerSnapshot()!;
+      const worker = await createResidentEngineSession(9901);
+      worker.loadState(snapshot.state);
+      const json = worker.layoutDocumentWithRegionsRetainedJson(snapshot.layoutInput);
+      worker.destroy();
+      session.publishResidentLayout?.({ kind: 'layout', json });
+    });
+  };
+  return { passes, build };
+}
+
+/** Renders a PagedEditor on `session` and waits for its first layout (or recorded pass). */
 export async function renderPagedEditor(
-  session: YrsSession
+  session: YrsSession,
+  worker?: ReturnType<typeof residentWorker>
 ): Promise<React.RefObject<PagedEditorRef | null>> {
   const { act, render } = await import('@testing-library/react');
   const ref = createRef<PagedEditorRef>();
@@ -130,8 +160,10 @@ export async function renderPagedEditor(
       document={null}
       yrsCore={yrsCore(session)}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes!) }}
+      residentWorkerLayout={Boolean(worker)}
       onLayoutComputed={(layout) => {
         if (layout) layouts.push(layout);
+        worker?.build(layout);
       }}
     />
   );

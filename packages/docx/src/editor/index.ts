@@ -5,7 +5,7 @@ export {
   computeLayout,
   getLayoutKernelInputs,
   adoptResidentLayout,
-  isPendingResidentLayout,
+  isRecordedResidentLayout,
   recordResidentLayout,
 } from './computeLayout';
 export type { ComputeLayoutInputs, LayoutComputation } from './computeLayout';

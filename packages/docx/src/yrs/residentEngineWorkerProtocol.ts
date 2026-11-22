@@ -14,7 +14,7 @@ export type ResidentEngineWorkerRequest =
       snapshot: YrsResidentWorkerSnapshot;
       extras: string;
       expectedFrameEpoch: number;
-      /** Q791 prototype: reply with the retained layout JSON (the page lays out nothing). */
+      /** Reply with the retained layout JSON: the page recorded the pass without laying it out. */
       wantLayout?: boolean;
     }
   | {
@@ -115,8 +115,8 @@ export type ResidentEngineWorkerResponse =
       /** Painting an edit's frame failed; the edit's frame and updates above
        * still apply. */
       paintError?: string;
-      /** Q791 prototype: the retained `{ layout, headersFooters?, notesConverged }`
-       * JSON, when the request asked for it and laid out. */
+      /** The retained `{ layout, headersFooters? }` JSON, when the request
+       * asked for it. */
       layoutJson?: string;
     }
   | {

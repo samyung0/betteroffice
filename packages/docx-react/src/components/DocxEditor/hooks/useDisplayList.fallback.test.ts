@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
+import { recordResidentLayout } from '@betteroffice/docx/editor';
+import type { ResidentMeasurementConfig } from '@betteroffice/docx/layout';
+import type { YrsResidentLayoutReply, YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 
@@ -654,5 +656,49 @@ test('keeps editing on the main thread when the worker fails before the host eng
   } finally {
     errors.mockRestore();
     native.free();
+  }
+});
+
+test('a worker that fails on a pass the page recorded hands layout back to the page and builds nothing', async () => {
+  const replies: YrsResidentLayoutReply[] = [];
+  const engine = {
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: '{}' }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onFontSlicesRetry: () => () => {},
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+    recordResidentLayout: () => 1,
+    publishResidentLayout: (reply: YrsResidentLayoutReply) => replies.push(reply),
+  } as unknown as YrsSession;
+  const recorded = recordResidentLayout({
+    document: null,
+    pageGap: 0,
+    renderEnv: {},
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } } as ResidentMeasurementConfig,
+    session: engine,
+  });
+  class FailingWorker extends InputFakeWorker {
+    constructor() {
+      super(new Uint8Array(), (request) =>
+        queueMicrotask(() =>
+          this.onmessage?.({
+            data: { id: request.id, ok: false, error: 'worker failed' },
+          } as MessageEvent<ResidentEngineWorkerResponse>)
+        )
+      );
+    }
+  }
+  globalThis.Worker = FailingWorker as unknown as typeof Worker;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(recorded, undefined, undefined, undefined, engine)
+    );
+    await waitFor(() => expect(replies).toEqual([{ kind: 'page' }]));
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    errors.mockRestore();
   }
 });

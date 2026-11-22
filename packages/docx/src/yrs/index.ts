@@ -619,16 +619,15 @@ export interface YrsResidentWorkerSnapshot {
 }
 
 /**
- * Q791 prototype: what the resident worker hands the page after it laid out:
- * the retained `{ layout, headersFooters?, notesConverged }` JSON for the
- * page's layout readers (page count, scroll height, TOC, table handles), or a
- * switch back to laying out on the page (`page`).
+ * What the resident worker hands the page after it laid out a recorded pass
+ * (see {@link YrsSession.recordResidentLayout}): its retained
+ * `{ layout, headersFooters? }` JSON for the page's layout readers (page
+ * count, scroll height, the table of contents, table handles), or `page`
+ * when the worker failed and the page lays out from now on.
  *
  * @internal
  */
-export type YrsResidentLayoutReply =
-  | { kind: 'layout'; json: string; layoutRevision: number }
-  | { kind: 'page' };
+export type YrsResidentLayoutReply = { kind: 'layout'; json: string } | { kind: 'page' };
 
 /**
  * {@link YrsSession.residentWorkerProbe}: enough to pick between a worker
@@ -925,17 +924,11 @@ export interface YrsSession extends CollaborationReplica {
     direction: 'backward' | 'forward',
     expectedFrameEpoch: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
-  /**
-   * Q791 prototype: who lays the document out. `worker`: each region request
-   * is only recorded here ({@link recordResidentLayout}) and the resident
-   * worker lays it out and hands the page its layout; `page`: this engine lays
-   * out too (the worker failed, or no worker).
-   */
-  layoutOwner?: 'worker' | 'page';
-  /** Records a region layout request as laid out (revision and input) without
-   * laying it out here; the resident worker lays it out. */
+  /** Records a region layout request as this engine's latest pass (its input
+   * and a new revision) without laying it out: the resident worker lays it
+   * out and hands its layout back through {@link publishResidentLayout}. */
   recordResidentLayout?(input: string): number;
-  /** The resident worker's layout for the page's readers, or a switch to `page`. */
+  /** The resident worker's replies to recorded passes (canvas renderer to editor). */
   onResidentLayout?(listener: (reply: YrsResidentLayoutReply) => void): () => void;
   publishResidentLayout?(reply: YrsResidentLayoutReply): void;
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
@@ -1397,8 +1390,6 @@ function wrapSession(
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
-  // Q791 prototype: the worker lays out unless it failed (see layoutOwner).
-  let layoutOwner: 'worker' | 'page' = 'worker';
   const residentLayoutListeners = new Set<(reply: YrsResidentLayoutReply) => void>();
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
@@ -1679,12 +1670,6 @@ function wrapSession(
       residentLayoutRevision += 1;
       return output;
     },
-    get layoutOwner() {
-      return layoutOwner;
-    },
-    set layoutOwner(owner: 'worker' | 'page') {
-      layoutOwner = owner;
-    },
     recordResidentLayout: (input) => {
       residentLayoutInput = input;
       residentLayoutWithRegions = true;
@@ -1698,7 +1683,6 @@ function wrapSession(
       };
     },
     publishResidentLayout: (reply) => {
-      if (reply.kind === 'page') layoutOwner = 'page';
       for (const listener of [...residentLayoutListeners]) listener(reply);
     },
     retainedKernelInputsJson: (expectedLayoutRevision) => {

@@ -17,7 +17,7 @@ import {
   type RetainedFrame,
   type ResidentDisplayListQueryEngine,
 } from '@betteroffice/docx/layout/render';
-import { getLayoutKernelInputs, isPendingResidentLayout } from '@betteroffice/docx/editor';
+import { getLayoutKernelInputs, isRecordedResidentLayout } from '@betteroffice/docx/editor';
 import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
@@ -126,8 +126,8 @@ interface MainThreadBuild {
 interface WorkerFrameRequest {
   hostEngine: YrsSession;
   extras: string;
-  /** Q791 prototype: the page recorded this pass without laying it out, so
-   * the worker's reply carries its layout for the page's readers. */
+  /** The page recorded this pass without laying it out: the worker's reply
+   * carries its layout for the page's readers. */
   wantLayout: boolean;
   /** Leave the worker for the main-thread engine and build there instead. */
   fallback(cause: unknown): void;
@@ -164,6 +164,8 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
@@ -416,10 +418,11 @@ export function useRustDisplayList(
         }
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
-        if (hostEngine.layoutOwner === 'worker') {
-          hostEngine.publishResidentLayout?.({ kind: 'page' });
-          return null;
-        }
+        // The page lays out from now on. A pass the worker laid out has no
+        // current layout in this engine: the edit takes the structural path,
+        // whose pass lays out here.
+        hostEngine.publishResidentLayout?.({ kind: 'page' });
+        if (isRecordedResidentLayout(layoutRef.current)) return null;
         let encoded: Uint8Array;
         suppressWorkerInvalidationRef.current += 1;
         try {
@@ -695,14 +698,20 @@ export function useRustDisplayList(
       (workerFrameRequestRef.current ?? request).fallback(cause);
       return;
     }
-    // Q791 prototype: the worker's layout for the page's readers, parsed after
-    // its frame paints (the pages come from the frame, not from this layout).
+    // The worker's layout for the page's readers, parsed after its frame
+    // paints (the pages come from the frame). A pass recorded or laid out on
+    // the page since then supersedes it.
     if (result.layoutJson !== undefined) {
       const json = result.layoutJson;
-      const layoutRevision = result.layoutRevision;
+      const { layoutRevision } = result;
       setTimeout(() => {
-        if (workerRef.current?.client !== client) return;
-        hostEngine.publishResidentLayout?.({ kind: 'layout', json, layoutRevision });
+        if (
+          workerRef.current?.client !== client ||
+          hostEngine.residentWorkerProbe()?.layoutRevision !== layoutRevision
+        ) {
+          return;
+        }
+        hostEngine.publishResidentLayout?.({ kind: 'layout', json });
       }, 0);
     }
     if (workerFrameQueuedRef.current) {
@@ -885,12 +894,10 @@ export function useRustDisplayList(
         workerFrameRequestRef.current = null;
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
-        // Q791 prototype: the page laid nothing out; it lays out again itself,
-        // and that layout builds here.
-        if (hostEngine.layoutOwner === 'worker') {
-          hostEngine.publishResidentLayout?.({ kind: 'page' });
-          return;
-        }
+        // The page lays out from now on; a recorded pass is laid out there
+        // again, and that layout builds here.
+        hostEngine.publishResidentLayout?.({ kind: 'page' });
+        if (isRecordedResidentLayout(layout)) return;
         finish(buildOnMainThread(), ++generationRef.current);
       };
       try {
@@ -905,7 +912,7 @@ export function useRustDisplayList(
         workerFrameRequestRef.current = {
           hostEngine,
           extras: encodeDisplayListFrameExtras(buildInputs),
-          wantLayout: isPendingResidentLayout(layout),
+          wantLayout: isRecordedResidentLayout(layout),
           fallback,
         };
         if (!workerFrameQueuedRef.current) {
@@ -919,7 +926,7 @@ export function useRustDisplayList(
       } catch (error) {
         fallback(error);
       }
-    } else if (isPendingResidentLayout(layout)) {
+    } else if (isRecordedResidentLayout(layout)) {
       // A recorded pass with no worker to lay it out: the page lays out.
       residentEngine?.publishResidentLayout?.({ kind: 'page' });
     } else {

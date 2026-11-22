@@ -1719,10 +1719,9 @@ impl EngineSession {
         .map_err(|error| format!("serialize: {error}"))
     }
 
-    /// The retained region layout as [`Self::layout_document_with_regions_retained_json`]
-    /// replies it, without laying out again: a resident worker that laid out
-    /// (a relayout, say) hands the page thread the layout it holds (Q791
-    /// prototype: the page thread lays out nothing).
+    /// The retained `{ layout, headersFooters? }` without laying out again: a
+    /// resident worker that laid out a pass (a relayout, an edit) hands the
+    /// page thread, which lays out nothing, the layout it holds.
     pub fn retained_region_layout_json(&self) -> Result<String, String> {
         let pagination = self.pagination.borrow();
         let regions_state = self.regions.borrow();
@@ -1732,7 +1731,6 @@ impl EngineSession {
             layout: &'a Layout,
             #[serde(skip_serializing_if = "Option::is_none")]
             headers_footers: Option<&'a serde_json::Value>,
-            notes_converged: bool,
         }
         serde_json::to_string(&RetainedRegionLayout {
             layout: pagination
@@ -1742,7 +1740,6 @@ impl EngineSession {
             headers_footers: regions_state
                 .as_ref()
                 .and_then(|state| state.headers_footers.as_ref()),
-            notes_converged: true,
         })
         .map_err(|error| format!("serialize: {error}"))
     }

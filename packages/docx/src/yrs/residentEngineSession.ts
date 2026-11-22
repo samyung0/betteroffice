@@ -45,7 +45,7 @@ export type ResidentEngineSession = Pick<
   updateFontOutlines(fontId: number, bytes: Uint8Array): void;
   /** Counts committed transactions: it moves on with every document change. */
   docEpoch(): number;
-  /** Q791 prototype: the retained region layout JSON, without laying out again. */
+  /** The retained `{ layout, headersFooters? }` JSON, without laying out again. */
   retainedRegionLayoutJson(): string;
 };
 

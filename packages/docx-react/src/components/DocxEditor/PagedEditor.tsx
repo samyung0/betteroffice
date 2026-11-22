@@ -299,8 +299,8 @@ export interface PagedEditorProps {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
-  /** Q791 prototype: the canvas renderer's resident worker lays out every pass;
-   * this editor records each pass for it and reads the worker's layout. */
+  /** The canvas renderer's resident worker lays out every pass: this editor
+   * records each pass for it and reads the worker's layout. */
   residentWorkerLayout?: boolean;
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
@@ -1178,15 +1178,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               // A local edit, even when a font load queued a peer-style pass
               // this frame: the caret is scrolled to.
               scheduleLayout('local');
-              // Q791 prototype: the TOC reads this pass's pages at once, so it
-              // lays out on the page (the worker lays out every other pass).
-              const owner = session.layoutOwner;
-              if (owner) session.layoutOwner = 'page';
-              try {
-                runLayoutPipeline();
-              } finally {
-                if (owner) session.layoutOwner = owner;
-              }
+              // Its page numbers read this pass's pages at once: it lays out
+              // on the page, not in the worker.
+              runLayoutPipeline({ onPage: true });
               const laidOut = getLatestLayout();
               const after =
                 laidOut && laidOut !== current
