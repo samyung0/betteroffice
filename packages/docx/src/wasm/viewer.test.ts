@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { buildResidentRegionLayoutRequest } from '../editor/computeLayout';
-import type { DisplayList } from '../layout/render';
+import type { DisplayList, DisplayPage } from '../layout/render';
 import { configureDefaultFonts, type DocxPageSize, initWasm, openDocumentViewer } from '../viewer';
 import { createYrsSession } from '../yrs';
 import { preloadEditWasm } from './edit';
@@ -54,6 +54,13 @@ function sectionedPackage(): Uint8Array {
   );
 }
 
+/** A page's text: forty pages hold the text a body needs before the viewer
+ * lays its first pages out alone (Q822 A). */
+const PAGE_TEXT =
+  'The committee reviews every application against the published criteria before the spring deadline, and late submissions wait for the autumn round. '.repeat(
+    8
+  );
+
 /** `count` pages, each a paragraph ending in a page break. */
 function pagedPackage(count: number): Uint8Array {
   const W =
@@ -61,7 +68,7 @@ function pagedPackage(count: number): Uint8Array {
   const R =
     'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const page = (index: number) =>
-    `<w:p><w:r><w:t>Page ${index}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+    `<w:p><w:r><w:t>Page ${index}. ${PAGE_TEXT}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
   return rezipContainer(
     Object.fromEntries(
       Object.entries({
@@ -71,6 +78,39 @@ function pagedPackage(count: number): Uint8Array {
       }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])
     )
   );
+}
+
+/** `count` pages as `pagedPackage` gives them, under a footer whose page
+ * count (NUMPAGES) saves a stale 99. */
+function countedPackage(count: number): Uint8Array {
+  const W =
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const R =
+    'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  const type = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
+  const page = (index: number) =>
+    `<w:p><w:r><w:t>Page ${index}. ${PAGE_TEXT}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+  return rezipContainer(
+    Object.fromEntries(
+      Object.entries({
+        '[Content_Types].xml': `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}.document.main+xml"/><Override PartName="/word/footer1.xml" ContentType="${type}.footer+xml"/></Types>`,
+        '_rels/.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${R}/officeDocument" Target="word/document.xml"/></Relationships>`,
+        'word/_rels/document.xml.rels': `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdFooter" Type="${R}/footer" Target="footer1.xml"/></Relationships>`,
+        'word/footer1.xml': `<w:ftr ${W}><w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>99</w:t></w:r></w:fldSimple></w:p></w:ftr>`,
+        'word/document.xml': `<w:document ${W}><w:body>${Array.from({ length: count }, (_, index) => page(index + 1)).join('')}<w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/></w:sectPr></w:body></w:document>`,
+      }).map(([path, xml]) => [path, new TextEncoder().encode(xml)])
+    )
+  );
+}
+
+/** The text of the page-count (NUMPAGES) fields on a page, its header and footer included. */
+function pageCounts(page: DisplayPage): string[] {
+  return [page.primitives, page.header?.primitives ?? [], page.footer?.primitives ?? []]
+    .flat()
+    .flatMap((primitive) => {
+      const field = primitive as { field?: { category?: string }; text?: string };
+      return field.field?.category === 'NUMPAGES' ? [field.text ?? ''] : [];
+    });
 }
 
 /** Glyph runs past the first line of their block: measured text that wrapped. */
@@ -138,7 +178,7 @@ describe('DOCX viewer wasm', () => {
     }
   });
 
-  test('hands over the first pages before building the rest, then the rest in batches', async () => {
+  test('a body too short to cut hands over the first pages before building the rest, then the rest in batches', async () => {
     const steps: string[] = [];
     const build = DocxViewDocument.prototype.displayPagesJson;
     DocxViewDocument.prototype.displayPagesJson = function (start, end) {
@@ -147,10 +187,11 @@ describe('DOCX viewer wasm', () => {
     };
     try {
       let sizes: DocxPageSize[] = [];
-      const viewer = await openDocumentViewer(pagedPackage(20), {
+      const viewer = await openDocumentViewer(pagedPackage(12), {
         progressive: {
-          firstPages(all) {
+          firstPages(all, width) {
             sizes = [...all];
+            expect(width).toBe(Math.max(...all.map((size) => size.width)));
             return 2;
           },
           onPages({ pages }) {
@@ -163,10 +204,8 @@ describe('DOCX viewer wasm', () => {
         'pages 0-2',
         'build 2-10',
         'pages 2-10',
-        'build 10-18',
-        'pages 10-18',
-        'build 18-20',
-        'pages 18-20',
+        'build 10-12',
+        'pages 10-12',
       ]);
       const { pages } = viewer.displayList();
       viewer.dispose();
@@ -174,6 +213,111 @@ describe('DOCX viewer wasm', () => {
     } finally {
       DocxViewDocument.prototype.displayPagesJson = build;
     }
+  });
+
+  // Q801 B: the first screen's pages are laid out alone and shown while the rest is laid out.
+  test('lays out and hands over the first pages before laying out the rest, ending as a whole open', async () => {
+    const bytes = pagedPackage(40);
+    const whole = (await openDocumentViewer(bytes)).displayList().pages;
+    const steps: string[] = [];
+    const layoutFirst = DocxViewDocument.prototype.layoutFirst;
+    const layout = DocxViewDocument.prototype.layout;
+    DocxViewDocument.prototype.layoutFirst = function (request, pages) {
+      const first = layoutFirst.call(this, request, pages);
+      steps.push(`layout first ${pages}: ${first}`);
+      return first;
+    };
+    DocxViewDocument.prototype.layout = function (request) {
+      steps.push('layout');
+      return layout.call(this, request);
+    };
+    try {
+      const received: DisplayPage[] = [];
+      let width = 0;
+      const viewer = await openDocumentViewer(bytes, {
+        progressive: {
+          firstPages(sizes) {
+            steps.push(`first pages of ${sizes.length}`);
+            // The first screen wants a fourth page: it is laid out too.
+            return 4;
+          },
+          onPages({ pages, width: widest }) {
+            width = widest;
+            steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+            for (const page of pages) received[page.pageIndex] = page;
+          },
+        },
+      });
+      expect(steps.slice(0, 7)).toEqual([
+        'layout first 3: 3',
+        'first pages of 3',
+        'layout first 4: 4',
+        'first pages of 4',
+        'pages 0-4',
+        'layout',
+        'pages 4-12',
+      ]);
+      expect(width).toBe(whole[0]!.width);
+      expect(received).toEqual(whole);
+      expect(viewer.displayList().pages).toEqual(whole);
+    } finally {
+      DocxViewDocument.prototype.layoutFirst = layoutFirst;
+      DocxViewDocument.prototype.layout = layout;
+    }
+  });
+
+  // Q823 A: a citation or a print waits for every page, so it skips the first pages' layout.
+  test('lays the whole body out first for an open that waits for every page', async () => {
+    const steps: string[] = [];
+    const layoutFirst = DocxViewDocument.prototype.layoutFirst;
+    const layout = DocxViewDocument.prototype.layout;
+    DocxViewDocument.prototype.layoutFirst = function (request, pages) {
+      steps.push('layout first');
+      return layoutFirst.call(this, request, pages);
+    };
+    DocxViewDocument.prototype.layout = function (request) {
+      steps.push('layout');
+      return layout.call(this, request);
+    };
+    try {
+      const viewer = await openDocumentViewer(pagedPackage(40), {
+        progressive: {
+          firstPages: () => 2,
+          onPages({ pages }) {
+            steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+          },
+          whole: true,
+        },
+      });
+      expect(steps.slice(0, 3)).toEqual(['layout', 'pages 0-2', 'pages 2-10']);
+      expect(viewer.displayList().pages).toHaveLength(40);
+    } finally {
+      DocxViewDocument.prototype.layoutFirst = layoutFirst;
+      DocxViewDocument.prototype.layout = layout;
+    }
+  });
+
+  test('shows the saved page count on the first pages, then sends them again with the real one', async () => {
+    const sent: { counts: string[]; index: number }[] = [];
+    const viewer = await openDocumentViewer(countedPackage(40), {
+      progressive: {
+        firstPages: () => 3,
+        onPages({ pages }) {
+          for (const page of pages) sent.push({ counts: pageCounts(page), index: page.pageIndex });
+        },
+      },
+    });
+    const pages = viewer.displayList().pages;
+    expect(pages).toHaveLength(40);
+    expect(pages.map(pageCounts)).toEqual(pages.map(() => ['40']));
+    expect(sent.slice(0, 6)).toEqual([
+      { counts: ['99'], index: 0 },
+      { counts: ['99'], index: 1 },
+      { counts: ['99'], index: 2 },
+      { counts: ['40'], index: 0 },
+      { counts: ['40'], index: 1 },
+      { counts: ['40'], index: 2 },
+    ]);
   });
 
   test('builds the layout request the editor builds', async () => {
