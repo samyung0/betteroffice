@@ -537,6 +537,13 @@ mod tests {
     const LIBERATION: &[u8] =
         include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
 
+    const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+    const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
+    const TEXT: &str = "The committee reviews every application against the published criteria before the spring deadline, and late submissions wait for the autumn round while the panel settles the budget.";
+    /// Letter pages with one-inch margins.
+    const LETTER: &str = r#"<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>"#;
+
     /// A 1×1 PNG.
     const PIXEL: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
@@ -546,15 +553,11 @@ mod tests {
         0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
 
-    /// About a dozen pages whose paragraphs carry footnotes, with floating
+    /// About fifteen pages whose paragraphs carry footnotes, with floating
     /// tables beside their paragraph and on the page, pictures wrapped at
     /// their paragraph, keep-with-next headings and a footer whose page count
     /// saves a stale 99, so notes and floats fall on both sides of a cut.
     fn notes_and_floats_docx() -> Vec<u8> {
-        const NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture""#;
-        const RELS: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-        const TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml";
-        const TEXT: &str = "The committee reviews every application against the published criteria before the spring deadline, and late submissions wait for the autumn round while the panel settles the budget.";
         let floating = |anchor: &str, y: u32| {
             format!(
                 r#"<w:tbl><w:tblPr><w:tblpPr w:leftFromText="180" w:rightFromText="180" w:vertAnchor="{anchor}" w:horzAnchor="margin" w:tblpXSpec="right" w:tblpY="{y}"/><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="2400" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Floating {anchor} table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
@@ -567,7 +570,7 @@ mod tests {
         };
         let mut body = String::new();
         let mut notes = String::new();
-        for index in 1..=90 {
+        for index in 1..=120 {
             if index % 9 == 1 {
                 body += &format!(
                     r#"<w:p><w:pPr><w:keepNext/><w:spacing w:before="240"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>Part {index}</w:t></w:r></w:p>"#
@@ -654,15 +657,227 @@ mod tests {
         .collect()
     }
 
-    /// A body cut after its first pages lays them out as the whole body does,
-    /// its page-count fields showing the saved count, and the whole layout
-    /// after it is a fresh one's: notes, floats, pictures, keep-with-next
-    /// chains and section breaks on both sides of the cut included.
+    /// Body paragraphs `range`, each two sentences long.
+    fn text_paragraphs(range: std::ops::Range<usize>) -> String {
+        range
+            .map(|index| {
+                format!(
+                    r#"<w:p><w:r><w:t xml:space="preserve">{index}. {TEXT} {TEXT}</w:t></w:r></w:p>"#
+                )
+            })
+            .collect()
+    }
+
+    /// A paragraph ending a section with the letter pages under the page-number
+    /// footer, with `more` (columns, say).
+    fn letter_section_end(more: &str) -> String {
+        format!(
+            r#"<w:p><w:pPr><w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/>{LETTER}{more}</w:sectPr></w:pPr></w:p>"#
+        )
+    }
+
+    /// The final section's properties: letter pages under the page-number
+    /// footer, with `more`.
+    fn final_section(more: &str) -> String {
+        format!(
+            r#"<w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/>{LETTER}{more}</w:sectPr>"#
+        )
+    }
+
+    /// A package whose body is `body` (its final `w:sectPr` included), with a
+    /// footer showing the page number and `endnotes` (`w:endnote` elements).
+    fn body_docx(body: &str, endnotes: &str) -> Vec<u8> {
+        let parts = [
+            (
+                "[Content_Types].xml",
+                format!(
+                    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="{TYPE}.document.main+xml"/><Override PartName="/word/endnotes.xml" ContentType="{TYPE}.endnotes+xml"/><Override PartName="/word/footer1.xml" ContentType="{TYPE}.footer+xml"/></Types>"#
+                ),
+            ),
+            (
+                "_rels/.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{RELS}/officeDocument" Target="word/document.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdNotes" Type="{RELS}/endnotes" Target="endnotes.xml"/><Relationship Id="rIdFooter" Type="{RELS}/footer" Target="footer1.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "word/endnotes.xml",
+                format!(
+                    r#"<w:endnotes {NS}><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote>{endnotes}</w:endnotes>"#
+                ),
+            ),
+            (
+                "word/footer1.xml",
+                format!(
+                    r#"<w:ftr {NS}><w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:ftr>"#
+                ),
+            ),
+            (
+                "word/document.xml",
+                format!(r#"<w:document {NS}><w:body>{body}</w:body></w:document>"#),
+            ),
+        ];
+        let entries = parts
+            .into_iter()
+            .map(|(path, xml)| (path.to_owned(), xml.into_bytes()))
+            .collect::<Vec<_>>();
+        ooxml_opc::rezip_parts(&entries).unwrap()
+    }
+
+    /// Liberation Sans, the font measuring every font a request requires.
+    fn measure_font() -> u32 {
+        docx_layout::clear_measure_fonts();
+        docx_layout::register_measure_font(LIBERATION).unwrap()
+    }
+
+    /// Cuts `bytes` after three pages, which must lay out as the whole body
+    /// does, page-count fields showing `saved` (the file's count) until the
+    /// whole layout; the whole layout after the cut must be a fresh one's.
+    fn assert_cut_as_whole(name: &str, bytes: &[u8], saved: Option<&str>, font: u32) {
+        let mut cut = DocxViewDocument::open(bytes).unwrap();
+        let request = measured_request(&cut, font);
+        assert_eq!(cut.layout_first(&request, 3).unwrap(), 3, "{name}");
+        let first: Value = serde_json::from_str(&cut.display_pages_json(0, 3).unwrap()).unwrap();
+        let after = paged_display_list(&mut cut, &request, 8);
+        let mut fresh = DocxViewDocument::open(bytes).unwrap();
+        let whole = paged_display_list(&mut fresh, &request, 8);
+        assert!(after == whole, "{name}: the whole layout after the cut");
+        let whole: Value = serde_json::from_str(&whole).unwrap();
+        let total = whole["pages"].as_array().unwrap().len().to_string();
+        for index in 0..3 {
+            let (shown, last) = (&first["pages"][index], &whole["pages"][index]);
+            match saved {
+                None => assert_eq!(shown, last, "{name} page {index}"),
+                Some(saved) => {
+                    assert_eq!(page_counts(shown), [saved], "{name} page {index}");
+                    assert_eq!(page_counts(last), [total.as_str()], "{name} page {index}");
+                    // Only the header and footer lines holding the count move.
+                    let bare = |page: &Value| {
+                        let mut page = page.clone();
+                        let page = page.as_object_mut().unwrap();
+                        page.remove("header");
+                        page.remove("footer");
+                        Value::Object(page.clone())
+                    };
+                    assert_eq!(bare(shown), bare(last), "{name} page {index}");
+                }
+            }
+        }
+    }
+
+    /// `bytes`, several pages long, is not cut: the caller lays it out whole.
+    fn assert_not_cut(name: &str, bytes: &[u8], font: u32) {
+        let mut document = DocxViewDocument::open(bytes).unwrap();
+        let request = measured_request(&document, font);
+        assert_eq!(document.layout_first(&request, 3).unwrap(), 0, "{name}");
+        assert!(document.layout(&request).unwrap() > 5, "{name}");
+    }
+
+    /// A cut inside a landscape section between portrait ones, its pages
+    /// numbered from 5, lays the section out with its own page size, margins
+    /// and numbering, not the final section's.
+    #[test]
+    fn a_cut_between_sections_is_the_whole_layouts() {
+        let font = measure_font();
+        let body = [
+            text_paragraphs(0..8),
+            letter_section_end(""),
+            text_paragraphs(8..128),
+            r#"<w:p><w:pPr><w:sectPr><w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/><w:pgMar w:top="1080" w:right="1080" w:bottom="1080" w:left="1080" w:header="720" w:footer="720" w:gutter="0"/><w:pgNumType w:start="5"/></w:sectPr></w:pPr></w:p>"#.to_owned(),
+            text_paragraphs(128..168),
+            r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="2160" w:right="2160" w:bottom="2160" w:left="2160" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>"#.to_owned(),
+        ]
+        .concat();
+        assert_cut_as_whole("sections", &body_docx(&body, ""), None, font);
+    }
+
+    /// The endnotes of a body cut after its first pages land past them, as
+    /// the whole body's land at its end.
+    #[test]
+    fn endnotes_stay_off_the_first_pages() {
+        let font = measure_font();
+        let mut body = String::new();
+        let mut endnotes = String::new();
+        for index in 1..=150 {
+            let mut runs =
+                format!(r#"<w:r><w:t xml:space="preserve">{index}. {TEXT} {TEXT}</w:t></w:r>"#);
+            if index % 4 == 0 {
+                let id = index / 4;
+                runs += &format!(
+                    r#"<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteReference w:id="{id}"/></w:r>"#
+                );
+                endnotes += &format!(
+                    r#"<w:endnote w:id="{id}"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:endnoteRef/></w:r><w:r><w:t xml:space="preserve"> Note {id}: {TEXT}</w:t></w:r></w:p></w:endnote>"#
+                );
+            }
+            body += &format!("<w:p>{runs}</w:p>");
+        }
+        body += &final_section("");
+        assert_cut_as_whole("endnotes", &body_docx(&body, &endnotes), None, font);
+    }
+
+    /// Columns are balanced over their whole section: a cut skips a section
+    /// in columns (the first prefix ends inside it, the second in the
+    /// one-column section after it) and a body all in columns is laid out
+    /// whole.
+    #[test]
+    fn a_cut_skips_sections_in_columns() {
+        let font = measure_font();
+        let columns = r#"<w:cols w:num="2" w:space="720"/>"#;
+        let body = [
+            text_paragraphs(0..60),
+            letter_section_end(columns),
+            text_paragraphs(60..180),
+            final_section(""),
+        ]
+        .concat();
+        assert_cut_as_whole("columns then one", &body_docx(&body, ""), None, font);
+        let body = text_paragraphs(0..300) + &final_section(columns);
+        assert_not_cut("all columns", &body_docx(&body, ""), font);
+    }
+
+    /// A shape wrapped on the side of an inside margin is settled over the
+    /// whole body, and a section break inside a content control has no
+    /// request section: both bodies are laid out whole.
+    #[test]
+    fn margin_side_shapes_and_sections_in_controls_lay_out_whole() {
+        let font = measure_font();
+        let shape = r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="insideMargin"><wp:align>left</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="914400" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Shape 1"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
+        let body = [
+            text_paragraphs(0..100),
+            format!(r#"<w:p>{shape}<w:r><w:t>Beside the shape</w:t></w:r></w:p>"#),
+            text_paragraphs(100..200),
+            final_section(""),
+        ]
+        .concat();
+        assert_not_cut("inside margin shape", &body_docx(&body, ""), font);
+        let body = [
+            text_paragraphs(0..100),
+            format!(
+                r#"<w:sdt><w:sdtPr><w:alias w:val="Part"/></w:sdtPr><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+                letter_section_end("")
+            ),
+            text_paragraphs(100..200),
+            final_section(""),
+        ]
+        .concat();
+        assert_not_cut("section in a control", &body_docx(&body, ""), font);
+    }
+
+    /// Single-section bodies cut after their first pages lay them out as the
+    /// whole body does: footnotes, floating tables, wrapped pictures and
+    /// keep-with-next chains on both sides of the cut, page-count fields
+    /// showing the saved count until the whole layout.
     #[test]
     fn first_pages_are_the_whole_layouts() {
-        docx_layout::clear_measure_fonts();
-        let font = docx_layout::register_measure_font(LIBERATION).unwrap();
-        let fixtures: [(&str, Vec<u8>, Option<&str>); 4] = [
+        let font = measure_font();
+        let fixtures: [(&str, Vec<u8>, Option<&str>); 3] = [
             ("notes-and-floats", notes_and_floats_docx(), Some("99")),
             (
                 "long-handbook",
@@ -674,44 +889,21 @@ mod tests {
                 include_bytes!("../../../poc/fixtures/book-30p.docx").to_vec(),
                 None,
             ),
-            (
-                "exchange-plan",
-                include_bytes!("../../../poc/fixtures/exchange-plan.docx").to_vec(),
-                None,
-            ),
         ];
         for (name, bytes, saved) in fixtures {
-            let mut cut = DocxViewDocument::open(&bytes).unwrap();
-            let request = measured_request(&cut, font);
-            assert_eq!(cut.layout_first(&request, 3).unwrap(), 3, "{name}");
-            let first: Value =
-                serde_json::from_str(&cut.display_pages_json(0, 3).unwrap()).unwrap();
-            let after = paged_display_list(&mut cut, &request, 8);
-            let mut fresh = DocxViewDocument::open(&bytes).unwrap();
-            let whole = paged_display_list(&mut fresh, &request, 8);
-            assert!(after == whole, "{name}: the whole layout after the cut");
-            let whole: Value = serde_json::from_str(&whole).unwrap();
-            let total = whole["pages"].as_array().unwrap().len().to_string();
-            for index in 0..3 {
-                let (shown, last) = (&first["pages"][index], &whole["pages"][index]);
-                match saved {
-                    None => assert_eq!(shown, last, "{name} page {index}"),
-                    Some(saved) => {
-                        assert_eq!(page_counts(shown), [saved], "{name} page {index}");
-                        assert_eq!(page_counts(last), [total.as_str()], "{name} page {index}");
-                        // Only the header and footer lines holding the count move.
-                        let bare = |page: &Value| {
-                            let mut page = page.clone();
-                            let page = page.as_object_mut().unwrap();
-                            page.remove("header");
-                            page.remove("footer");
-                            Value::Object(page.clone())
-                        };
-                        assert_eq!(bare(shown), bare(last), "{name} page {index}");
-                    }
-                }
-            }
+            assert_cut_as_whole(name, &bytes, saved, font);
         }
+    }
+
+    /// A short file, here 15 pages of pictures, tables and little text, is
+    /// laid out whole: its first pages would come no sooner (Q822 A).
+    #[test]
+    fn a_short_file_is_laid_out_whole() {
+        assert_not_cut(
+            "exchange-plan",
+            include_bytes!("../../../poc/fixtures/exchange-plan.docx"),
+            measure_font(),
+        );
     }
 
     /// A body too short to lay out two pages past the ones asked for is not

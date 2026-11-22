@@ -6,10 +6,10 @@
 
 use docx_layout::measure_blocks::FloatFlow;
 use docx_layout::regions::{
-    DocumentRegions, advances_region_section, apply_section_geometry_to_blocks,
+    DocumentRegions, RegionSection, advances_region_section, apply_section_geometry_to_blocks,
 };
 use docx_layout::types::{
-    BlockExtent, Input as LayoutInput, LayoutBlock, LayoutOptions, MeasuredBlock, Size,
+    BlockExtent, Input as LayoutInput, LayoutBlock, LayoutOptions, MeasuredBlock, Run, Size,
 };
 
 use super::{
@@ -33,6 +33,14 @@ const MARGIN_PAGES: usize = 2;
 
 /// Body blocks the first prefix measures; each next prefix adds twice as many.
 const FIRST_STEP: usize = 32;
+
+/// Characters of body text under which the body is laid out whole: a short
+/// file's first pages come no sooner than its whole layout's (Q822 A). The
+/// text is what measuring costs, and it is known before anything is measured.
+/// Measured 2026-11-22: a 24-page file of 37,000 characters showed its first
+/// pages about 80 ms sooner and every page 180 ms later; one of 50,000
+/// characters (31 pages) showed them 185 ms sooner.
+const MIN_TEXT: usize = 40_000;
 
 /// The page size pagination takes when a request names none.
 const DEFAULT_PAGE_SIZE: Size = Size {
@@ -59,8 +67,10 @@ impl EngineSession {
     /// then page-count fields (NUMPAGES) show the file's saved result. Retains
     /// those pages for display only.
     ///
-    /// `None`, retaining nothing to display, when no cut leaves them so: the
-    /// body ends before it lays out two pages past them, or holds a section
+    /// `None`, retaining nothing to display, when the body is too short for
+    /// the first pages to come sooner ([`MIN_TEXT`]) or no cut leaves them
+    /// so: the body ends before it lays out two pages past them, is in
+    /// columns from where it would be cut to its end, or holds a section
     /// break inside a content control (which no request section describes) or
     /// a shape wrapped on the side of an inside or outside margin (settled
     /// over the whole body). The caller then lays out the whole body.
@@ -120,13 +130,16 @@ fn measure_first_pages(
     request: &RegionRequest,
     pages: usize,
 ) -> Result<Option<Cut>, String> {
-    if lowered.iter().any(|block| {
-        margin_side_shape(block)
-            || matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
-    }) {
+    let regions = &request.regions;
+    if text_chars(lowered) < MIN_TEXT
+        || regions.sections.iter().all(columned)
+        || lowered.iter().any(|block| {
+            margin_side_shape(block)
+                || matches!(block, LayoutBlock::SectionBreak(section) if section.is_self_describing())
+        })
+    {
         return Ok(None);
     }
-    let regions = &request.regions;
     let measurement = &request.measurement;
     let mut blocks = lowered.to_vec();
     let mut options = request.input.options.clone();
@@ -140,23 +153,24 @@ fn measure_first_pages(
         if end == blocks.len() {
             return Ok(None);
         }
-        flow.measure_until(&mut blocks, &widths, measurement, end)?;
         let section = blocks[..end]
             .iter()
             .filter(|block| advances_region_section(block))
             .count();
-        if section >= regions.sections.len() {
+        // Sections are counted before measuring, so a body whose rest is all
+        // in columns is laid out whole without measuring it twice.
+        if regions
+            .sections
+            .get(section..)
+            .is_none_or(|rest| rest.iter().all(columned))
+        {
             return Ok(None);
         }
-        let through = options_through_section(&request.input.options, regions, section);
-        // Columns are balanced over their whole section, so no cut ends inside one.
-        if through
-            .columns
-            .as_ref()
-            .is_some_and(|columns| columns.count > 1.0)
-        {
+        flow.measure_until(&mut blocks, &widths, measurement, end)?;
+        if columned(&regions.sections[section]) {
             continue;
         }
+        let through = options_through_section(&request.input.options, regions, section);
         // Pagination rewrites the spacing it reads, so the cut takes the
         // measured blocks as they were.
         let measured = measured_prefix(&blocks[..end], flow.extents());
@@ -175,6 +189,39 @@ fn measure_first_pages(
             }));
         }
     }
+}
+
+/// The characters of text in `blocks`, their tables' cells included.
+fn text_chars(blocks: &[LayoutBlock]) -> usize {
+    blocks
+        .iter()
+        .map(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph
+                .runs
+                .iter()
+                .map(|run| match run {
+                    Run::Text(run) => run.text.chars().count(),
+                    _ => 0,
+                })
+                .sum(),
+            LayoutBlock::Table(table) => table
+                .rows
+                .iter()
+                .flat_map(|row| &row.cells)
+                .map(|cell| text_chars(&cell.blocks))
+                .sum(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Columns are balanced over their whole section, so no cut ends inside a
+/// section with more than one.
+fn columned(section: &RegionSection) -> bool {
+    section
+        .columns
+        .as_ref()
+        .is_some_and(|columns| columns.count > 1.0)
 }
 
 fn measured_prefix(blocks: &[LayoutBlock], extents: &[BlockExtent]) -> Vec<MeasuredBlock> {

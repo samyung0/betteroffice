@@ -54,6 +54,13 @@ function sectionedPackage(): Uint8Array {
   );
 }
 
+/** A page's text: forty pages hold the text a body needs before the viewer
+ * lays its first pages out alone (Q822 A). */
+const PAGE_TEXT =
+  'The committee reviews every application against the published criteria before the spring deadline, and late submissions wait for the autumn round. '.repeat(
+    8
+  );
+
 /** `count` pages, each a paragraph ending in a page break. */
 function pagedPackage(count: number): Uint8Array {
   const W =
@@ -61,7 +68,7 @@ function pagedPackage(count: number): Uint8Array {
   const R =
     'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const page = (index: number) =>
-    `<w:p><w:r><w:t>Page ${index}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+    `<w:p><w:r><w:t>Page ${index}. ${PAGE_TEXT}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
   return rezipContainer(
     Object.fromEntries(
       Object.entries({
@@ -82,7 +89,7 @@ function countedPackage(count: number): Uint8Array {
     'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
   const type = 'application/vnd.openxmlformats-officedocument.wordprocessingml';
   const page = (index: number) =>
-    `<w:p><w:r><w:t>Page ${index}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
+    `<w:p><w:r><w:t>Page ${index}. ${PAGE_TEXT}</w:t></w:r>${index < count ? '<w:r><w:br w:type="page"/></w:r>' : ''}</w:p>`;
   return rezipContainer(
     Object.fromEntries(
       Object.entries({
@@ -253,6 +260,37 @@ describe('DOCX viewer wasm', () => {
       expect(width).toBe(whole[0]!.width);
       expect(received).toEqual(whole);
       expect(viewer.displayList().pages).toEqual(whole);
+    } finally {
+      DocxViewDocument.prototype.layoutFirst = layoutFirst;
+      DocxViewDocument.prototype.layout = layout;
+    }
+  });
+
+  // Q823 A: a citation or a print waits for every page, so it skips the first pages' layout.
+  test('lays the whole body out first for an open that waits for every page', async () => {
+    const steps: string[] = [];
+    const layoutFirst = DocxViewDocument.prototype.layoutFirst;
+    const layout = DocxViewDocument.prototype.layout;
+    DocxViewDocument.prototype.layoutFirst = function (request, pages) {
+      steps.push('layout first');
+      return layoutFirst.call(this, request, pages);
+    };
+    DocxViewDocument.prototype.layout = function (request) {
+      steps.push('layout');
+      return layout.call(this, request);
+    };
+    try {
+      const viewer = await openDocumentViewer(pagedPackage(40), {
+        progressive: {
+          firstPages: () => 2,
+          onPages({ pages }) {
+            steps.push(`pages ${pages[0]!.pageIndex}-${pages.at(-1)!.pageIndex + 1}`);
+          },
+          whole: true,
+        },
+      });
+      expect(steps.slice(0, 3)).toEqual(['layout', 'pages 0-2', 'pages 2-10']);
+      expect(viewer.displayList().pages).toHaveLength(40);
     } finally {
       DocxViewDocument.prototype.layoutFirst = layoutFirst;
       DocxViewDocument.prototype.layout = layout;

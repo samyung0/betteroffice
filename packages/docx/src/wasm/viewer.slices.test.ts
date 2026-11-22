@@ -432,7 +432,8 @@ test('a batch whose outline chunks are still loading lets the next batch build, 
 // Q801 B: a body cut after its first pages hands them over, sliced faces and all,
 // before the rest is laid out; later batches grow the faces as a whole open's.
 test('a body cut after its first pages hands them over before the rest is laid out and ends as a whole open\'s', async () => {
-  const bytes = pagesPackage(Array.from({ length: 40 }, (_, index) => (index % 9 === 5 ? HEADER : '本文')));
+  // Long enough pages that the body's first pages are laid out alone (Q822 A).
+  const bytes = pagesPackage(Array.from({ length: 40 }, (_, index) => (index % 9 === 5 ? HEADER : '本文'.repeat(600))));
   recordingFonts(true);
   const whole = await openDocumentViewer(bytes);
   recordingFonts(true);

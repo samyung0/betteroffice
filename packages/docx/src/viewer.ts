@@ -87,6 +87,10 @@ export interface DocxViewerOptions {
   progressive?: {
     firstPages(sizes: readonly DocxPageSize[], width: number): number;
     onPages(batch: DocxViewerPages): void;
+    /** Lays the whole body out first, for an open that waits for every page
+     * anyway (a citation, a print), which the first pages alone would only
+     * delay (Q823 A). */
+    whole?: boolean;
   };
 }
 
@@ -344,7 +348,7 @@ export async function openDocumentViewer(
     // shows more than were laid out has more laid out.
     let first = 0;
     let firstJson: string[] = [];
-    for (let pages = FIRST_LAYOUT_PAGES; progressive; ) {
+    for (let pages = FIRST_LAYOUT_PAGES; progressive && !progressive.whole; ) {
       const laidOut = document.layoutFirst(measured, pages);
       if (!laidOut) break;
       width = document.documentWidth();
