@@ -285,6 +285,28 @@ fn a_changed_layout_request_takes_the_full_region_pass() {
     fixture.assert_same_as_fresh(&worker);
 }
 
+/// A web-font load's pass: the worker skips the relayout of an unchanged
+/// input and only builds a frame, which reuses the list the full pass built
+/// (Q813 A).
+#[test]
+fn a_frame_with_nothing_laid_out_since_the_last_rebuilds_no_page() {
+    let fixture = Fixture::new();
+    let (worker, _) = fixture.worker();
+    let before = worker.stats();
+    let frame = worker
+        .build_display_list_frame(&fixture.extras, before.frame_epoch)
+        .unwrap();
+    let after = worker.stats();
+    assert_eq!(after.layout_epoch, before.layout_epoch);
+    assert_eq!(
+        after.incremental_display_builds - before.incremental_display_builds,
+        1
+    );
+    assert_eq!(after.rebuilt_display_pages, before.rebuilt_display_pages);
+    assert_eq!(frame_ops(&frame), (false, 0, 0));
+    fixture.assert_same_as_fresh(&worker);
+}
+
 /// Chart block keys and content-control group ids in the retained display list.
 fn embed_ids(worker: &EngineSession) -> Vec<String> {
     fn walk(value: &serde_json::Value, out: &mut Vec<String>) {

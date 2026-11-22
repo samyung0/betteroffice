@@ -711,6 +711,8 @@ struct DisplayState {
     /// the next key must not patch.
     extras_fingerprint: Option<u64>,
     extras_json: Option<String>,
+    /// The layout epoch the retained list was built from on the resident path.
+    layout_epoch: Option<u64>,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
 }
@@ -3094,8 +3096,15 @@ impl EngineSession {
                 .as_ref()
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
+            // Nothing laid out since the retained list was built from these
+            // extras (a relayout whose input had not changed): it is current,
+            // and the frame rebuilds no page.
+            let current = display.list.is_some()
+                && display.layout_epoch == Some(pagination.layout_epoch)
+                && display.extras_fingerprint == Some(extras_fingerprint);
             let rebuilt = pagination.rebuilt_page_start..pagination.rebuilt_page_end;
-            let incremental = pagination.last_incremental
+            let incremental = !current
+                && pagination.last_incremental
                 && display.extras_fingerprint == Some(extras_fingerprint)
                 && rebuilt.start <= rebuilt.end
                 && rebuilt.end <= layout.pages.len()
@@ -3111,7 +3120,10 @@ impl EngineSession {
                     )?,
                     None => false,
                 };
-            if incremental {
+            if current {
+                observe_display_phase();
+                (true, 0, 0, 0)
+            } else if incremental {
                 (true, rebuilt.len(), rebuilt.start, rebuilt.end)
             } else {
                 display.list = Some(docx_layout::build_resident_display_pages_observed(
@@ -3140,6 +3152,7 @@ impl EngineSession {
         let binary_frame_epoch = display.binary_frame_epoch;
         let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
+        display.layout_epoch = Some(layout_epoch);
         let mut next_page_id = display.next_page_id;
         // Split borrows: the encoder reads the retained list and the previous
         // snapshots in place — no per-frame deep clone of the snapshot set.

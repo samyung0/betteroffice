@@ -40,6 +40,11 @@ let session: ResidentEngineSession | null = null;
 let unsubscribe: (() => void) | null = null;
 let pendingUpdates: Uint8Array[] = [];
 let layoutRevision = 0;
+// The input the retained layout was laid out from: the region request and the
+// replica's document epoch, which moves on with every change it applies or
+// makes. A relayout of the same input lays out nothing (a web-font load's
+// pass: measuring reads font files in Rust, so the load changes neither).
+let laidOut: { input: string; docEpoch: number } | null = null;
 // -1 = no fonts applied yet (fresh session); hydrate skips re-registration
 // when the snapshot's revision matches what this session already holds.
 let fontsRevision = -1;
@@ -187,11 +192,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.selection) session.setSelection(request.selection.anchor, request.selection.head);
     pendingUpdates = [];
     const started = performance.now();
-    const frame = session.relayoutFrame(
-      request.layoutInput,
-      request.extras,
-      request.expectedFrameEpoch
-    );
+    const unchanged =
+      laidOut?.input === request.layoutInput && laidOut.docEpoch === session.docEpoch();
+    laidOut = null;
+    const frame = unchanged
+      ? session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch)
+      : session.relayoutFrame(request.layoutInput, request.extras, request.expectedFrameEpoch);
+    laidOut = { input: request.layoutInput, docEpoch: session.docEpoch() };
     layoutRevision = request.layoutRevision;
     await replyFrame(
       request.id,
@@ -261,6 +268,8 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
               frame: session.applyInput(request.text, request.expectedFrameEpoch),
               profile: undefined,
             };
+    // The edit laid itself out against the retained request.
+    if (laidOut) laidOut.docEpoch = session.docEpoch();
     await replyFrame(
       request.id,
       applied.frame,
@@ -316,6 +325,9 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
   } else {
     session.layoutDocumentJson(snapshot.layoutInput);
   }
+  laidOut = snapshot.layoutWithRegions
+    ? { input: snapshot.layoutInput, docEpoch: session.docEpoch() }
+    : null;
   if (snapshot.selection) session.setSelection(snapshot.selection.anchor, snapshot.selection.head);
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
@@ -393,6 +405,7 @@ function destroySession(): void {
   session = null;
   pendingUpdates = [];
   layoutRevision = 0;
+  laidOut = null;
   fontsRevision = -1;
   retainedFrame = null;
   setProgressiveFonts(null);

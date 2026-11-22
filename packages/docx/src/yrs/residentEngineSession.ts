@@ -43,6 +43,8 @@ export type ResidentEngineSession = Pick<
   relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number): Uint8Array;
   /** Replaces a sliced face's outlines with those of `bytes`, the face with more chunks. */
   updateFontOutlines(fontId: number, bytes: Uint8Array): void;
+  /** Counts committed transactions: it moves on with every document change. */
+  docEpoch(): number;
 };
 
 export async function createResidentEngineSession(
@@ -80,6 +82,7 @@ export async function createResidentEngineSession(
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
+    docEpoch: () => session.doc_epoch(),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
