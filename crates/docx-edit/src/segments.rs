@@ -272,6 +272,11 @@ impl SegmentIndex {
         &self.paras
     }
 
+    /// The story's length in units, as its chunks end.
+    pub(crate) fn len(&self) -> u32 {
+        self.len
+    }
+
     /// The first field in `[from, to)` whose code continues into the next paragraph.
     pub(crate) fn code_continues_in(&self, from: u32, to: u32) -> Option<u32> {
         self.segs[self.segs.partition_point(|seg| seg.start < from)..]

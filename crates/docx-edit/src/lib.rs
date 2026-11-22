@@ -54,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
-use yrs::types::{Attrs, Delta};
+use yrs::types::{Attrs, DeepObservable, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
@@ -309,6 +309,318 @@ impl fmt::Display for EditError {
 
 impl std::error::Error for EditError {}
 
+/// Per-story values built at one committed epoch. Older values are never served, so the
+/// first value of a newer epoch drops them all at once (upstream #908): reading every
+/// story once after an edit stays linear in the story count.
+struct EpochCache<T> {
+    epoch: u64,
+    entries: HashMap<Box<str>, Arc<T>>,
+}
+
+impl<T> Default for EpochCache<T> {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<T> EpochCache<T> {
+    fn get(&self, story_id: &str, epoch: u64) -> Option<Arc<T>> {
+        if self.epoch != epoch {
+            return None;
+        }
+        self.entries.get(story_id).cloned()
+    }
+
+    fn insert(&mut self, story_id: &str, epoch: u64, value: Arc<T>) {
+        if epoch < self.epoch {
+            return;
+        }
+        if epoch > self.epoch {
+            self.entries.clear();
+            self.epoch = epoch;
+        }
+        self.entries.insert(story_id.into(), value);
+    }
+}
+
+/// The revision each story last changed at (upstream #912, #1530). Every
+/// committed change to the stories map stamps the stories it touched
+/// (content, embedded maps, the story entry itself) with the next revision.
+/// `marked` is the revision each story last changed at by anything that can
+/// add a tracked change or a field keeping one ([`item_change`]); typing,
+/// deleting and paragraph breaks outside tracked changes leave it.
+/// `structure` moves on with each change that can add, remove or reshape a
+/// table: a table embed inserted or deleted, a table's keys set, a story
+/// added or removed.
+#[derive(Default)]
+struct StoryRevisions {
+    current: u64,
+    structure: u64,
+    stamped: HashMap<Arc<str>, u64>,
+    marked: HashMap<Arc<str>, u64>,
+}
+
+/// A story's revisions in [`StoryRevisions`]: `(stamped, marked)`.
+type StoryStamp = (u64, u64);
+
+/// The format keys whose ranges are tracked changes.
+const TRACKED_FORMATS: [&str; 3] = [INS, DEL, "rPrChange"];
+
+/// The paragraph mark keys holding tracked changes, as `list_changes` reads
+/// them.
+const MARK_CHANGE_KEYS: [&str; 4] = [PPR_INS, PPR_DEL, PPR_CHANGE, "_originalRunBoundaries"];
+
+/// The kind an embed's map names, read also from a map this commit deleted
+/// (its entries keep their content until the commit's garbage collection).
+fn embed_kind(item: yrs::block::ItemPtr) -> Option<Arc<str>> {
+    let yrs::block::ItemContent::Type(branch) = item.content() else {
+        return None;
+    };
+    let entry = branch.entry_item(KIND_KEY)?;
+    if entry.is_deleted() && !item.is_deleted() {
+        return None;
+    }
+    match entry.content() {
+        yrs::block::ItemContent::Any(values) => match values.last() {
+            Some(Any::String(kind)) => Some(Arc::clone(kind)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a tracked-change format is open right before `item`: the format
+/// markers left of it back to a paragraph mark `index` knows, then the
+/// formats open after that mark; back to the story's start without one.
+/// `index` is the story's segment index in step with the state before the
+/// commit: a tracked format the commit inserted or deleted left of that mark
+/// marks the story by itself.
+fn tracked_format_open_before(item: yrs::block::ItemPtr, index: Option<&SegmentIndex>) -> bool {
+    let mut decided = [false; TRACKED_FORMATS.len()];
+    let mut left = item.left();
+    while let Some(prev) = left {
+        left = prev.left();
+        if prev.is_deleted() {
+            continue;
+        }
+        match prev.content() {
+            yrs::block::ItemContent::Format(key, value) => {
+                if let Some(at) = TRACKED_FORMATS
+                    .iter()
+                    .position(|tracked| **key == **tracked)
+                    && !decided[at]
+                {
+                    if **value != Any::Null {
+                        return true;
+                    }
+                    decided[at] = true;
+                    if decided.iter().all(|decided| *decided) {
+                        return false;
+                    }
+                }
+            }
+            yrs::block::ItemContent::Type(_) => {
+                if let Some(index) = index
+                    && let Some(slot) = index.slot_of(prev.id())
+                {
+                    let after = &index.paras()[slot].after;
+                    return TRACKED_FORMATS.iter().zip(decided).any(|(key, decided)| {
+                        !decided && after.get(*key).is_some_and(|value| *value != Any::Null)
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// What `item`, inserted (`added`) or deleted by a commit, did to its story:
+/// `(story, marks, structure)`, `None` outside the stories. It marks the
+/// story when it can add a tracked change or a field keeping one: a tracked
+/// format inserted or deleted, content inserted where a tracked format is
+/// open, an embed other than a paragraph mark inserted, a tracked-change key
+/// of a paragraph mark set, any key of another embed set. Deleting content
+/// and inserting plain text and paragraph marks does not. Tables and story
+/// entries mark the story and the structure.
+fn item_change(
+    item: yrs::block::ItemPtr,
+    added: bool,
+    stories: yrs::branch::BranchPtr,
+    inserted: &yrs::IdSet,
+    index_of: &mut impl FnMut(&str) -> Option<Arc<SegmentIndex>>,
+) -> Option<(Arc<str>, bool, bool)> {
+    use yrs::block::ItemContent;
+    let (story, level) = segments::story_level(item, stories)?;
+    let Some(level) = level else {
+        // A story added, removed or replaced.
+        return Some((story, true, true));
+    };
+    // Inserted and deleted again, or arrived deleted: nothing of it stands.
+    if (added && item.is_deleted()) || (!added && inserted.contains(item.id())) {
+        return Some((story, false, false));
+    }
+    let tracked = |key: &str| TRACKED_FORMATS.contains(&key);
+    if level != item {
+        let kind_entry = item.parent_sub().is_some_and(|key| &**key == KIND_KEY)
+            && matches!(item.content(), ItemContent::Any(values)
+                if matches!(values.last(), Some(Any::String(kind)) if &**kind == "table"));
+        let direct = item.parent_branch().and_then(|parent| parent.item()) == Some(level);
+        let (marks, structure) = if kind_entry || !direct {
+            (true, true)
+        } else if level.is_deleted() {
+            // Removed with its embed, which tells by itself.
+            (false, false)
+        } else {
+            match embed_kind(level).as_deref() {
+                Some("table") | None => (true, true),
+                // A new mark's kind is told by the mark itself; an old one's
+                // changing kind marks.
+                Some(PILCROW_KIND) => (
+                    item.parent_sub().is_some_and(|key| {
+                        MARK_CHANGE_KEYS.contains(&&**key)
+                            || (&**key == KIND_KEY && !inserted.contains(level.id()))
+                    }),
+                    false,
+                ),
+                Some(_) => (true, false),
+            }
+        };
+        return Some((story, marks, structure));
+    }
+    // A run of inserted items reads the formats open before it from its first.
+    let mut open = || {
+        added
+            && item
+                .left()
+                .is_none_or(|left| left.is_deleted() || !inserted.contains(left.id()))
+            && tracked_format_open_before(item, index_of(&story).as_deref())
+    };
+    let (marks, structure) = match item.content() {
+        ItemContent::Format(key, _) => (tracked(key) || open(), false),
+        ItemContent::String(_) => (open(), false),
+        ItemContent::Type(_) => match embed_kind(item).as_deref() {
+            Some("table") => (true, true),
+            Some(PILCROW_KIND) => (open(), false),
+            _ => (added, false),
+        },
+        _ => (true, true),
+    };
+    Some((story, marks, structure))
+}
+
+impl StoryRevisions {
+    /// Stamps the stories a commit touched, read from its inserted and
+    /// deleted items rather than its events' deltas, which walk whole
+    /// stories (Q807 A). `indexes` at `epoch` are the segment indexes in step
+    /// with the state before the commit.
+    fn stamp(
+        &mut self,
+        txn: &yrs::TransactionMut,
+        events: &yrs::types::Events,
+        indexes: &Mutex<segments::Indexes>,
+        epoch: u64,
+    ) {
+        self.current += 1;
+        if self.stamp_items(txn, indexes, epoch).is_none() {
+            // A block the commit names is gone (a peer's update carrying a
+            // collected range): every story an event names changed in every way.
+            self.structure += 1;
+            for event in events.iter() {
+                let stories: Vec<Arc<str>> = match (event.path().front(), event) {
+                    (Some(yrs::types::PathSegment::Key(story)), _) => vec![Arc::clone(story)],
+                    (None, yrs::types::Event::Map(entries)) => {
+                        entries.keys(txn).keys().cloned().collect()
+                    }
+                    _ => Vec::new(),
+                };
+                for story in stories {
+                    self.stamped.insert(Arc::clone(&story), self.current);
+                    self.marked.insert(story, self.current);
+                }
+            }
+        }
+    }
+
+    fn stamp_items(
+        &mut self,
+        txn: &yrs::TransactionMut,
+        indexes: &Mutex<segments::Indexes>,
+        epoch: u64,
+    ) -> Option<()> {
+        let stories = txn.get_map(STORIES)?;
+        let stories = yrs::branch::BranchPtr::from(AsRef::<yrs::branch::Branch>::as_ref(&stories));
+        let inserted = txn.insert_set();
+        let mut index_of = |story: &str| {
+            indexes
+                .lock()
+                .unwrap()
+                .get(story)
+                .filter(|(at, _)| *at == epoch)
+                .map(|(_, index)| Arc::clone(index))
+        };
+        let mut structure = false;
+        for (set, added) in [(inserted, true), (txn.delete_set(), false)] {
+            for (client, ranges) in set.iter() {
+                for range in ranges.iter() {
+                    for (_, item) in txn.store().blocks_in(client, range.clone()) {
+                        let Some((story, marks, reshapes)) =
+                            item_change(item?, added, stories, inserted, &mut index_of)
+                        else {
+                            continue;
+                        };
+                        if marks {
+                            self.marked.insert(Arc::clone(&story), self.current);
+                        }
+                        self.stamped.insert(story, self.current);
+                        structure |= reshapes;
+                    }
+                }
+            }
+        }
+        if structure {
+            self.structure += 1;
+        }
+        Some(())
+    }
+}
+
+/// Per-story values kept across edits, each read at the story's revisions and
+/// served while the story is unchanged, or while it only had plain text
+/// inserted and the value says that cannot change it. A removed story's entry
+/// is never served again: removing it stamped and marked a newer revision.
+struct StoryCache<T> {
+    entries: HashMap<Box<str>, (StoryStamp, Arc<T>)>,
+}
+
+impl<T> Default for StoryCache<T> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<T> StoryCache<T> {
+    fn get(&self, story_id: &str, now: StoryStamp, keeps: impl Fn(&T) -> bool) -> Option<Arc<T>> {
+        let (at, value) = self.entries.get(story_id)?;
+        (at.0 == now.0 || (at.1 == now.1 && keeps(value))).then(|| Arc::clone(value))
+    }
+
+    fn insert(&mut self, story_id: &str, at: StoryStamp, value: Arc<T>) {
+        self.entries.insert(story_id.into(), (at, value));
+    }
+}
+
+/// The table cell stories, read at one `structure` revision.
+struct TableMembership {
+    structure: u64,
+    cells: std::collections::HashSet<String>,
+}
+
 /// A single yrs replica of the DOCX editing model.
 pub struct EditingDoc {
     doc: Doc,
@@ -320,10 +632,15 @@ pub struct EditingDoc {
     /// Each commit's changes are followed into the segment indexes in step
     /// with the epoch before it ([`segments::follow_commit`]).
     segment_indexes: Arc<Mutex<segments::Indexes>>,
-    chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
+    chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    story_revisions: Arc<Mutex<StoryRevisions>>,
+    table_membership: Mutex<Option<TableMembership>>,
+    revision_lists: Mutex<StoryCache<Vec<RevisionInfo>>>,
+    kept_field_changes: Mutex<StoryCache<ops::resolve::FieldChanges>>,
     /// What reseeding a field needs from the source package.
     package: Mutex<Option<Arc<seed::PackageContext>>>,
     _update_sub: Subscription,
+    _story_revision_sub: Subscription,
 }
 
 impl EditingDoc {
@@ -357,16 +674,40 @@ impl EditingDoc {
                 }
             })
             .expect("a fresh doc accepts an update observer");
+        let story_revisions = Arc::new(Mutex::new(StoryRevisions::default()));
+        let stamped = Arc::clone(&story_revisions);
+        let (indexes, epoch_now) = (Arc::clone(&segment_indexes), Arc::clone(&epoch));
+        // Deep observers run before the update observer above moves the epoch
+        // on, so the indexes at the current epoch are the pre-commit ones.
+        let story_revision_sub = doc
+            .get_or_insert_map(STORIES)
+            .observe_deep(move |txn, events| {
+                let before = epoch_now.load(Ordering::Relaxed);
+                stamped.lock().unwrap().stamp(txn, events, &indexes, before);
+            });
         Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
             epoch,
             segment_indexes,
-            chunk_snapshots: Mutex::new(HashMap::new()),
+            chunk_snapshots: Mutex::default(),
+            story_revisions,
+            table_membership: Mutex::new(None),
+            revision_lists: Mutex::default(),
+            kept_field_changes: Mutex::default(),
             package: Mutex::new(None),
             _update_sub: update_sub,
+            _story_revision_sub: story_revision_sub,
         }
+    }
+
+    /// The revisions `story_id` last changed at: by anything, and by anything
+    /// but inserting plain text.
+    pub(crate) fn story_revision(&self, story_id: &str) -> StoryStamp {
+        let revisions = self.story_revisions.lock().unwrap();
+        let at = |stamps: &HashMap<Arc<str>, u64>| stamps.get(story_id).copied().unwrap_or(0);
+        (at(&revisions.stamped), at(&revisions.marked))
     }
 
     /// Records what reseeding a field needs from the source package.
@@ -544,20 +885,14 @@ impl EditingDoc {
         txn: &T,
     ) -> Arc<Vec<ops::Chunk>> {
         let epoch = self.epoch.load(Ordering::Relaxed);
-        {
-            let cache = self.chunk_snapshots.lock().unwrap();
-            if let Some((cached_epoch, chunks)) = cache.get(story_id)
-                && *cached_epoch == epoch
-            {
-                return Arc::clone(chunks);
-            }
+        if let Some(chunks) = self.chunk_snapshots.lock().unwrap().get(story_id, epoch) {
+            return chunks;
         }
         let chunks = Arc::new(ops::snapshot(story, txn));
-        let mut cache = self.chunk_snapshots.lock().unwrap();
-        if let Some(stories) = txn.get_map(STORIES) {
-            cache.retain(|key, _| &**key == story_id || stories.get(txn, key).is_some());
-        }
-        cache.insert(story_id.into(), (epoch, Arc::clone(&chunks)));
+        self.chunk_snapshots
+            .lock()
+            .unwrap()
+            .insert(story_id, epoch, Arc::clone(&chunks));
         chunks
     }
 
@@ -675,7 +1010,11 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         if stories.remove(&mut txn, story_id).is_some() {
-            self.chunk_snapshots.lock().unwrap().remove(story_id);
+            self.chunk_snapshots
+                .lock()
+                .unwrap()
+                .entries
+                .remove(story_id);
             Ok(())
         } else {
             Err(EditError::StoryNotFound(story_id.to_owned()))
@@ -807,6 +1146,17 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         Ok(story.len(&txn))
+    }
+
+    /// Each paragraph of `story_id` as `(paraId, length in units)`, in story
+    /// order, read from the committed segment index.
+    pub fn paragraph_spans(&self, story_id: &str) -> EditResult<Vec<(String, u32)>> {
+        Ok(self
+            .segment_index(story_id)?
+            .paras()
+            .iter()
+            .map(|para| (para.para_id.to_string(), para.pilcrow - para.start))
+            .collect())
     }
 
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
@@ -1354,6 +1704,277 @@ mod tests {
             );
         }
         assert_eq!(doc.encode_state_as_update_v1(), state);
+    }
+
+    #[test]
+    fn epoch_cache_serves_only_the_current_epoch() {
+        let mut cache = EpochCache::default();
+        cache.insert("body", 1, Arc::new(1));
+        cache.insert("hdr", 1, Arc::new(2));
+        assert_eq!(cache.get("body", 1).as_deref(), Some(&1));
+        assert_eq!(cache.get("body", 2), None);
+        cache.insert("body", 2, Arc::new(3));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a newer epoch drops the older values"
+        );
+        cache.insert("hdr", 1, Arc::new(4));
+        assert_eq!(
+            cache.get("hdr", 2),
+            None,
+            "a value built before a commit is not kept"
+        );
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn field_change_answers_are_read_again_only_for_changed_stories() {
+        let doc = seed("alpha");
+        assert!(!doc.has_field_changes());
+        let kept = |story: &str| doc.kept_field_changes.lock().unwrap().entries[story].0;
+        let (header, body) = (kept("header:rId7"), kept("body"));
+
+        // Plain typing reads neither story again: no field there could keep a change.
+        doc.insert_text(
+            &local("A"),
+            Position::new("body", 5),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert!(!doc.has_field_changes());
+        assert_eq!((kept("header:rId7"), kept("body")), (header, body));
+
+        // Nor do Enter, Backspace, Delete and a join (Q808 A).
+        // "al" | "pha!": Backspace, the mark (a join), Delete.
+        doc.split_paragraph(&local("A"), Position::new("body", 2))
+            .unwrap();
+        for _ in 0..3 {
+            doc.delete_range(&local("A"), StoryRange::new("body", 1, 2))
+                .unwrap();
+        }
+        assert_eq!(doc.paragraphs("body").unwrap()[0].text, "aha!");
+        assert!(!doc.has_field_changes());
+        assert_eq!((kept("header:rId7"), kept("body")), (header, body));
+
+        // A suggestion reads the body again, and only the body.
+        doc.insert_text(
+            &suggesting("A"),
+            Position::new("body", 1),
+            "s",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert!(!doc.has_field_changes());
+        assert_eq!(
+            kept("header:rId7"),
+            header,
+            "an untouched story's answer is kept"
+        );
+        assert!(kept("body") > body);
+    }
+
+    #[test]
+    fn paragraph_spans_are_read_from_the_segment_index() {
+        let (a, b) = peers("one two", 1, 2);
+        // b's index, read before the peer's edits, follows them.
+        assert_eq!(b.paragraph_spans("body").unwrap().len(), 1);
+        let split = a
+            .split_paragraph(&local("A"), Position::new("body", 3))
+            .unwrap();
+        a.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "image".into(),
+                payload: Vec::new(),
+                attrs: Attrs::new(),
+            }],
+            &local("A"),
+        )
+        .unwrap();
+        sync(&a, &b);
+        // "o", an inline image, "ne" | " two".
+        let spans = vec![(split.first_para_id, 4), (split.second_para_id, 4)];
+        assert_eq!(b.paragraph_spans("body").unwrap(), spans);
+
+        let mut undo = b.undo_manager();
+        b.split_paragraph(&local("B"), Position::new("body", 7))
+            .unwrap();
+        assert_eq!(b.paragraph_spans("body").unwrap().len(), 3);
+        assert!(undo.undo());
+        assert_eq!(b.paragraph_spans("body").unwrap(), spans);
+
+        // The spans are the cached index's: one put in its place is read.
+        let header = b.segment_index("header:rId7").unwrap();
+        let epoch = b.epoch.load(Ordering::Relaxed);
+        b.segment_indexes
+            .lock()
+            .unwrap()
+            .insert("body".into(), (epoch, header));
+        assert_eq!(
+            b.paragraph_spans("body").unwrap(),
+            b.paragraph_spans("header:rId7").unwrap()
+        );
+    }
+
+    /// A body whose first paragraph holds a REF field whose result keeps a
+    /// tracked insertion inside a hyperlink, then "tail".
+    fn field_change_doc() -> EditingDoc {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">para </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> REF a \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="a"><w:ins w:id="1" w:author="Ann" w:date="2026-01-01T00:00:00Z"><w:r><w:t>linked</w:t></w:r></w:ins></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:r><w:t>tail</w:t></w:r></w:p></w:body></w:document>"#;
+        let bytes =
+            ooxml_opc::rezip_parts(&[("word/document.xml".into(), xml.as_bytes().to_vec())])
+                .unwrap();
+        let doc = EditingDoc::new(7);
+        seed::seed_from_docx(&doc, &bytes).unwrap();
+        doc
+    }
+
+    #[test]
+    fn a_story_whose_fields_can_keep_changes_is_read_again_after_any_edit() {
+        let doc = field_change_doc();
+        let replica = EditingDoc::new(8);
+        replica
+            .apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        assert!(doc.has_field_changes() && replica.has_field_changes());
+        let kept = |doc: &EditingDoc| {
+            Arc::clone(&doc.kept_field_changes.lock().unwrap().entries["body"].1)
+        };
+        let before = kept(&doc);
+
+        // Plain typing in "tail": the field could keep a change, so it is read again.
+        let tail = doc.story_len("body").unwrap() - 1;
+        doc.insert_text(
+            &local("A"),
+            Position::new("body", tail),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        assert!(doc.has_field_changes());
+        assert!(!Arc::ptr_eq(&kept(&doc), &before));
+
+        // Accepting everything on the peer resolves the field's change here too.
+        doc.accept_change(&local("A"), &ChangeTarget::All).unwrap();
+        assert!(!doc.has_field_changes());
+        replica
+            .apply_update_v1(
+                &doc.encode_diff_v1(&replica.encode_state_vector_v1())
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(!replica.has_field_changes());
+    }
+
+    #[test]
+    fn story_revisions_name_the_stories_each_change_touched() {
+        let (a, b) = peers("one two", 1, 2);
+        // The stories changed after `since`, sorted, with the current revision.
+        let changed_since = |since: u64| {
+            let revisions = b.story_revisions.lock().unwrap();
+            let mut stories: Vec<String> = revisions
+                .stamped
+                .iter()
+                .filter(|(_, revision)| **revision > since)
+                .map(|(story, _)| story.to_string())
+                .collect();
+            stories.sort();
+            (revisions.current, revisions.structure, stories)
+        };
+        let (since, structure, stories) = changed_since(0);
+        assert_eq!(stories, ["body", "header:rId7"]);
+
+        a.insert_text(
+            &local("A"),
+            Position::new("body", 3),
+            "!",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        b.apply_update_v1(&a.encode_state_as_update_v1()).unwrap();
+        let (since, typed, stories) = changed_since(since);
+        assert_eq!(stories, ["body"], "a remote text edit");
+        assert_eq!(typed, structure, "typing moves no table");
+        let marked = |story: &str| {
+            let revisions = b.story_revisions.lock().unwrap();
+            revisions.marked.get(story).copied().unwrap_or(0)
+        };
+        assert!(marked("body") < since, "plain typing marks nothing");
+
+        // Remote Backspace, Delete, Enter and a join (Q808 A): "on!" | "two".
+        let mut since = since;
+        for edit in 0..4 {
+            let before = a.encode_state_vector_v1();
+            match edit {
+                0 => a.delete_range(&local("A"), StoryRange::new("body", 2, 3)),
+                1 => a.delete_range(&local("A"), StoryRange::new("body", 3, 4)),
+                2 => a
+                    .split_paragraph(&local("A"), Position::new("body", 3))
+                    .map(|_| Receipt::default()),
+                _ => a.delete_range(&local("A"), StoryRange::new("body", 3, 4)),
+            }
+            .unwrap();
+            b.apply_update_v1(&a.encode_diff_v1(&before).unwrap())
+                .unwrap();
+            let (now, moved, stories) = changed_since(since);
+            assert_eq!(stories, ["body"], "edit {edit}");
+            assert_eq!(moved, structure, "edit {edit} moves no table");
+            since = now;
+        }
+        assert_eq!(b.paragraphs("body").unwrap()[0].text, "on!two");
+        assert!(marked("body") < since, "nor do they mark it");
+
+        // A paragraph property stamps its story; a suggestion marks it.
+        let header = b.paragraphs("header:rId7").unwrap()[0].para_id.clone();
+        b.set_paragraph_attr(&header, "keepNext", Any::Bool(true))
+            .unwrap();
+        let (since, _, stories) = changed_since(since);
+        assert_eq!(stories, ["header:rId7"], "a pilcrow property");
+        assert!(marked("header:rId7") < since);
+        b.insert_text(
+            &suggesting("B"),
+            Position::new("header:rId7", 0),
+            "s",
+            FormatPolicy::Plain,
+        )
+        .unwrap();
+        let (since, _, _) = changed_since(since);
+        assert_eq!(marked("header:rId7"), since, "a suggestion marks its story");
+
+        // A table embed inserted, its rows set and the embed deleted each move
+        // the structure on, as do a story added and one removed.
+        let rows = |cells: usize| Any::Array(Arc::from(vec![Any::Null; cells]));
+        let mut structure = typed;
+        for op in [
+            RawOp::InsertEmbed {
+                index: 0,
+                kind: "table".into(),
+                payload: vec![("rows".into(), rows(0))],
+                attrs: Attrs::new(),
+            },
+            RawOp::SetEmbedAttr {
+                index: 0,
+                key: "rows".into(),
+                value: rows(1),
+            },
+            RawOp::Delete { index: 0, len: 1 },
+        ] {
+            b.apply_raw_ops("body", vec![op], &local("B")).unwrap();
+            let moved = changed_since(since).1;
+            assert!(moved > structure);
+            structure = moved;
+        }
+        b.create_story("fn:1", "note", "Normal", "left").unwrap();
+        b.delete_story("header:rId7").unwrap();
+        let (_, created, stories) = changed_since(since);
+        assert_eq!(
+            stories,
+            ["body", "fn:1", "header:rId7"],
+            "created and deleted stories"
+        );
+        assert!(created > structure + 1, "a story added or removed");
     }
 
     fn peers(text: &str, a_id: u64, b_id: u64) -> (EditingDoc, EditingDoc) {

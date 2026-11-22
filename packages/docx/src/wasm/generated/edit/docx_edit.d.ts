@@ -591,7 +591,7 @@ export class EditSession {
      */
     outline_glyph_json(font_id: number, glyph_id: number): string;
     /**
-     * Compact paragraph-position projection built in one story traversal:
+     * Compact paragraph-position projection from the committed segment index:
      * `[{"paraId","length"}, …]` in document order, where `length` counts the
      * UTF-16 text and inline embed units before that paragraph's pilcrow —
      * exactly the `offset` domain of a Loc in it. One call replaces crossing

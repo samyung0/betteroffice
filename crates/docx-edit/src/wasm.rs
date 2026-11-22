@@ -3928,31 +3928,20 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
-    /// Compact paragraph-position projection built in one story traversal:
+    /// Compact paragraph-position projection from the committed segment index:
     /// `[{"paraId","length"}, …]` in document order, where `length` counts the
     /// UTF-16 text and inline embed units before that paragraph's pilcrow —
     /// exactly the `offset` domain of a Loc in it. One call replaces crossing
     /// the boundary once per paragraph. Errors on an unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
-        let mut items = Vec::new();
-        let mut cursor = 0_u32;
-        let mut paragraph_start = 0_u32;
-        for segment in self.engine.doc().story_segments(story).map_err(js_err)? {
-            match segment.content {
-                SegmentContent::Text(text) => {
-                    cursor += text.encode_utf16().count() as u32;
-                }
-                SegmentContent::Pilcrow(properties) => {
-                    items.push(json!({
-                        "paraId": properties.para_id,
-                        "length": cursor - paragraph_start,
-                    }));
-                    cursor += 1;
-                    paragraph_start = cursor;
-                }
-                SegmentContent::OtherEmbed { .. } => cursor += 1,
-            }
-        }
+        let items: Vec<Value> = self
+            .engine
+            .doc()
+            .paragraph_spans(story)
+            .map_err(js_err)?
+            .into_iter()
+            .map(|(para_id, length)| json!({ "paraId": para_id, "length": length }))
+            .collect();
         serde_json::to_string(&items).map_err(js_err)
     }
 
