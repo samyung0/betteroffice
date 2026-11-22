@@ -246,6 +246,14 @@ export interface PptxEditorProps {
   onPresenterNotesSizeChange?: (size: number) => void;
   /** Called as a show starts and ends, e.g. for a host to give its frame the page. */
   onPresentingChange?: (presenting: boolean) => void;
+  /**
+   * A text story the host marks (a citation): its lines on the slide on screen
+   * are filled in `color` while its text still `holds` what it marks (checked
+   * on every change; the mark never moves with the text), and a zoomed slide
+   * scrolls the first into view once per mark. Display only: no edit, no
+   * selection, nothing peers see.
+   */
+  textMark?: { storyId: string; color: string; holds: (text: string) => boolean } | null;
 }
 
 interface EditorModel {
@@ -470,6 +478,7 @@ function PptxEditorContent({
   defaultPresenterNotesSize,
   onPresenterNotesSizeChange,
   onPresentingChange,
+  textMark,
 }: Omit<PptxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   const decodeImageError = t('errors.decodeSlideImage');
@@ -800,7 +809,8 @@ function PptxEditorContent({
       }
       clearSelection();
       if (!refreshAt(slide - 1)) return false;
-      stageRef.current?.focus();
+      // A host's move (a citation from the app) leaves the focus where it is.
+      if (document.hasFocus()) stageRef.current?.focus();
       return true;
     },
     [clearSelection, refreshAt]
@@ -1111,6 +1121,46 @@ function PptxEditorContent({
     const shape = slide ? findShape(slide.shapes, selection.shapeId) : null;
     return shape ? frameBoundsForShape(model.snapshot, model.frame, shape) : null;
   }, [model, selectedShapeBounds, selection]);
+
+  // The marked story's lines on the slide on screen; each new mark scrolls
+  // its first line into view once, unless it already shows (as the viewer).
+  const markLines = useMemo(
+    () =>
+      textMark && model?.frame
+        ? model.frame.primitives.flatMap((primitive) =>
+            primitive.kind === 'textBox' &&
+            primitive.storyId === textMark.storyId &&
+            textMark.holds(
+              primitive.paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n')
+            )
+              ? primitive.lines
+              : []
+          )
+        : [],
+    [model?.frame, textMark]
+  );
+  const firstMarkRef = useRef<HTMLSpanElement>(null);
+  const scrolledMarkRef = useRef<unknown>(null);
+  useLayoutEffect(() => {
+    const host = canvasHostRef.current;
+    const first = firstMarkRef.current;
+    if (!host || !first || scrolledMarkRef.current === textMark) return;
+    scrolledMarkRef.current = textMark;
+    const box = first.getBoundingClientRect();
+    const view = host.getBoundingClientRect();
+    const left = box.left - view.left;
+    const top = box.top - view.top;
+    if (
+      left < 0 ||
+      top < 0 ||
+      left + box.width > host.clientWidth ||
+      top + box.height > host.clientHeight
+    )
+      host.scrollTo(
+        host.scrollLeft + left + box.width / 2 - host.clientWidth / 2,
+        host.scrollTop + top + box.height / 2 - host.clientHeight / 2
+      );
+  }, [markLines, scale, textMark]);
 
   const activeSlide = model?.snapshot.slides[model.slideIndex];
   const currentSlideId = activeSlide?.id;
@@ -3501,6 +3551,23 @@ function PptxEditorContent({
                   }
                 />
                 {!canvasReview.reviewing && <>
+                {markLines.map((line, index) => (
+                  <span
+                    key={index}
+                    ref={index === 0 ? firstMarkRef : undefined}
+                    data-citation-highlight="true"
+                    aria-hidden="true"
+                    style={{
+                      position: 'absolute',
+                      left: line.x * scale,
+                      top: line.y * scale,
+                      width: line.width * scale,
+                      height: line.height * scale,
+                      background: textMark?.color,
+                      pointerEvents: 'none',
+                    }}
+                  />
+                ))}
                 <SelectionOverlay
                   frame={model.frame}
                   selection={selection}
