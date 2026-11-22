@@ -1560,6 +1560,14 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// The retained `{ layout, headersFooters? }` without laying out again
+    /// (see [`EngineSession::retained_region_layout_json`]).
+    pub fn retained_region_layout_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_region_layout_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// Retained `{ measured, options }` for the main-thread display-list
     /// fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {

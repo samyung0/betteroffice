@@ -17,7 +17,7 @@ import {
   type RetainedFrame,
   type ResidentDisplayListQueryEngine,
 } from '@betteroffice/docx/layout/render';
-import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
+import { getLayoutKernelInputs, isRecordedResidentLayout } from '@betteroffice/docx/editor';
 import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
@@ -126,6 +126,9 @@ interface MainThreadBuild {
 interface WorkerFrameRequest {
   hostEngine: YrsSession;
   extras: string;
+  /** The page recorded this pass without laying it out: the worker's reply
+   * carries its layout for the page's readers. */
+  wantLayout: boolean;
   /** Leave the worker for the main-thread engine and build there instead. */
   fallback(cause: unknown): void;
 }
@@ -161,6 +164,8 @@ export function useRustDisplayList(
 ): UseRustDisplayListResult {
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
   const queryEpochGateRef = useRef<DisplayListQueryEpochGate | null>(null);
   if (!queryEpochGateRef.current) queryEpochGateRef.current = new DisplayListQueryEpochGate();
   const queryEpochGate = queryEpochGateRef.current;
@@ -413,6 +418,11 @@ export function useRustDisplayList(
         }
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
+        // The page lays out from now on. A pass the worker laid out has no
+        // current layout in this engine: the edit takes the structural path,
+        // whose pass lays out here.
+        hostEngine.publishResidentLayout?.({ kind: 'page' });
+        if (isRecordedResidentLayout(layoutRef.current)) return null;
         let encoded: Uint8Array;
         suppressWorkerInvalidationRef.current += 1;
         try {
@@ -658,8 +668,9 @@ export function useRustDisplayList(
     let result: ResidentEngineWorkerFrame;
     let nextFrame: RetainedFrame;
     try {
+      const { wantLayout } = request;
       result = bootstrapping
-        ? await client.bootstrap(snapshot(), extras)
+        ? await client.bootstrap(snapshot(), extras, wantLayout)
         : client.layoutRevision() === probe.layoutRevision
           ? await client.buildFrame(extras, expectedFrameEpoch, paintCaret)
           : probe.regionLayoutInput !== null &&
@@ -670,9 +681,10 @@ export function useRustDisplayList(
                 expectedFrameEpoch,
                 hostEngine.selection(),
                 probe.layoutRevision,
-                paintCaret
+                paintCaret,
+                wantLayout
               )
-            : await client.sync(snapshot(), extras, expectedFrameEpoch, paintCaret);
+            : await client.sync(snapshot(), extras, expectedFrameEpoch, paintCaret, wantLayout);
       if (result.fontErrors.length > 0) hostEngine.reportResidentFontErrors(result.fontErrors);
       // Torn down, or the frame this delta builds on was reset meanwhile (the
       // next request then asks for a full frame).
@@ -685,6 +697,22 @@ export function useRustDisplayList(
       if (workerRef.current?.client !== client) return;
       (workerFrameRequestRef.current ?? request).fallback(cause);
       return;
+    }
+    // The worker's layout for the page's readers, parsed after its frame
+    // paints (the pages come from the frame). A pass recorded or laid out on
+    // the page since then supersedes it.
+    if (result.layoutJson !== undefined) {
+      const json = result.layoutJson;
+      const { layoutRevision } = result;
+      setTimeout(() => {
+        if (
+          workerRef.current?.client !== client ||
+          hostEngine.residentWorkerProbe()?.layoutRevision !== layoutRevision
+        ) {
+          return;
+        }
+        hostEngine.publishResidentLayout?.({ kind: 'layout', json });
+      }, 0);
     }
     if (workerFrameQueuedRef.current) {
       // A newer frame is already queued: the next delta builds on this one
@@ -866,6 +894,10 @@ export function useRustDisplayList(
         workerFrameRequestRef.current = null;
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
+        // The page lays out from now on; a recorded pass is laid out there
+        // again, and that layout builds here.
+        hostEngine.publishResidentLayout?.({ kind: 'page' });
+        if (isRecordedResidentLayout(layout)) return;
         finish(buildOnMainThread(), ++generationRef.current);
       };
       try {
@@ -880,6 +912,7 @@ export function useRustDisplayList(
         workerFrameRequestRef.current = {
           hostEngine,
           extras: encodeDisplayListFrameExtras(buildInputs),
+          wantLayout: isRecordedResidentLayout(layout),
           fallback,
         };
         if (!workerFrameQueuedRef.current) {
@@ -893,6 +926,9 @@ export function useRustDisplayList(
       } catch (error) {
         fallback(error);
       }
+    } else if (isRecordedResidentLayout(layout)) {
+      // A recorded pass with no worker to lay it out: the page lays out.
+      residentEngine?.publishResidentLayout?.({ kind: 'page' });
     } else {
       finish(buildOnMainThread(), generation);
     }

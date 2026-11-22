@@ -116,6 +116,8 @@ function worker() {
     failRaster: null as number | null,
     failPresent: null as number | null,
     relayouts: [] as Array<[string, string, number]>,
+    /** The replica's document epoch: every update it applies or edit it makes moves it on. */
+    docEpoch: 0,
     selections: [] as unknown[],
     sessionIds: [] as Array<number | undefined>,
     progressive: null as null | {
@@ -141,6 +143,13 @@ function worker() {
         return 7;
       },
       layoutDocumentJson() {},
+      layoutDocumentWithRegionsRetainedJson() {},
+      applyUpdate() {
+        harness.docEpoch += 1;
+      },
+      docEpoch() {
+        return harness.docEpoch;
+      },
       relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number) {
         harness.relayouts.push([layoutInput, extras, expectedFrameEpoch]);
         return new Uint8Array([frameEpoch]);
@@ -154,6 +163,7 @@ function worker() {
       },
       // A keystroke: committed to the replica (its update) before the frame is painted.
       applyInput() {
+        harness.docEpoch += 1;
         harness.emitUpdate?.(new Uint8Array([7, 7]));
         return new Uint8Array([frameEpoch]);
       },
@@ -302,12 +312,12 @@ function worker() {
         paintCaret: !!caret,
       });
     },
-    relayout(upserts: number[], layoutRevision: number) {
+    relayout(upserts: number[], layoutRevision: number, layoutInput = '{"bodyStory":"body"}') {
       delta(upserts, false);
       harness.caret = null;
       return send({
         type: 'relayout',
-        layoutInput: '{"bodyStory":"body"}',
+        layoutInput,
         extras: '{}',
         expectedFrameEpoch: frameEpoch - 1,
         selection: {
@@ -659,5 +669,25 @@ describe('resident worker relayout', () => {
     expect(reply.layoutRevision).toBe(7);
     expect(reply.frame).toBeInstanceOf(ArrayBuffer);
     expect(w.harness.rasterized).toEqual([2]);
+  });
+
+  test('a pass over the input it laid out last (a web-font load) lays out nothing; a changed request or document does (Q813 A)', async () => {
+    const w = worker();
+    const request = '{"bodyStory":"body"}';
+    await w.bootstrap(3, undefined, { layoutInput: request, layoutWithRegions: true });
+    expect((await w.relayout([], 2)).ok).toBe(true);
+    // A keystroke lays itself out against the same request.
+    await w.type([1], caret(1));
+    expect((await w.relayout([], 3)).ok).toBe(true);
+    expect(w.harness.relayouts).toEqual([]);
+
+    // The hidden-text toggle changes the request.
+    const hidden = '{"bodyStory":"body","renderEnv":{"showHiddenText":true}}';
+    await w.relayout([2], 4, hidden);
+    expect(w.harness.relayouts.map(([input]) => input)).toEqual([hidden]);
+    // A header saved (or a peer's edit) reaches the replica as an update.
+    w.post({ type: 'applyUpdate', update: new Uint8Array([1]), selection: null });
+    await w.relayout([2], 5, hidden);
+    expect(w.harness.relayouts.map(([input]) => input)).toEqual([hidden, hidden]);
   });
 });

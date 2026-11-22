@@ -619,6 +619,17 @@ export interface YrsResidentWorkerSnapshot {
 }
 
 /**
+ * What the resident worker hands the page after it laid out a recorded pass
+ * (see {@link YrsSession.recordResidentLayout}): its retained
+ * `{ layout, headersFooters? }` JSON for the page's layout readers (page
+ * count, scroll height, the table of contents, table handles), or `page`
+ * when the worker failed and the page lays out from now on.
+ *
+ * @internal
+ */
+export type YrsResidentLayoutReply = { kind: 'layout'; json: string } | { kind: 'page' };
+
+/**
  * {@link YrsSession.residentWorkerProbe}: enough to pick between a worker
  * relayout (the worker holds every update and the fonts) and a full sync.
  *
@@ -913,6 +924,13 @@ export interface YrsSession extends CollaborationReplica {
     direction: 'backward' | 'forward',
     expectedFrameEpoch: number
   ): { frame: Uint8Array; profile: YrsEngineApplyProfile };
+  /** Records a region layout request as this engine's latest pass (its input
+   * and a new revision) without laying it out: the resident worker lays it
+   * out and hands its layout back through {@link publishResidentLayout}. */
+  recordResidentLayout?(input: string): number;
+  /** The resident worker's replies to recorded passes (canvas renderer to editor). */
+  onResidentLayout?(listener: (reply: YrsResidentLayoutReply) => void): () => void;
+  publishResidentLayout?(reply: YrsResidentLayoutReply): void;
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
   /**
@@ -1372,6 +1390,7 @@ function wrapSession(
   let residentLayoutInput: string | null = null;
   let residentLayoutWithRegions = false;
   let residentLayoutRevision = 0;
+  const residentLayoutListeners = new Set<(reply: YrsResidentLayoutReply) => void>();
   let residentFontsRevision = 0;
   let ownsResidentFontStore = false;
   // Fonts registered from sliced faces' skeletons: a page's outlines install
@@ -1650,6 +1669,21 @@ function wrapSession(
       residentLayoutWithRegions = true;
       residentLayoutRevision += 1;
       return output;
+    },
+    recordResidentLayout: (input) => {
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      return residentLayoutRevision;
+    },
+    onResidentLayout: (listener) => {
+      residentLayoutListeners.add(listener);
+      return () => {
+        residentLayoutListeners.delete(listener);
+      };
+    },
+    publishResidentLayout: (reply) => {
+      for (const listener of [...residentLayoutListeners]) listener(reply);
     },
     retainedKernelInputsJson: (expectedLayoutRevision) => {
       if (expectedLayoutRevision !== residentLayoutRevision) {

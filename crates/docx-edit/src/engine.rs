@@ -290,12 +290,25 @@ struct MeasurementState {
 #[derive(Debug)]
 struct ResidentRegionState {
     request_json: String,
+    /// What the retained layout was laid out over, after a whole pass (not
+    /// a first-pages one): a pass of the same request over the same document,
+    /// layout and fonts lays out nothing.
+    laid_out: Option<RegionLayoutStamp>,
     headers_footers: Option<serde_json::Value>,
     /// Inputs retained from the last full region pass so a plain body-text
     /// edit can relayout residently. `None` when the pass was not
     /// resident-body or the document shape rules the fast path out; the
     /// error names why.
     fast_path: Result<RegionFastPathState, &'static str>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RegionLayoutStamp {
+    doc_epoch: u64,
+    layout_epoch: u64,
+    /// [`docx_layout::measure_fonts_generation`]: the fonts measuring read.
+    fonts: (u64, usize),
+    notes_converged: bool,
 }
 
 /// Retained region-pass configuration consumed by
@@ -803,6 +816,8 @@ struct DisplayState {
     /// the next key must not patch.
     extras_fingerprint: Option<u64>,
     extras_json: Option<String>,
+    /// The layout epoch the retained list was built from on the resident path.
+    layout_epoch: Option<u64>,
     incremental_display_builds: u64,
     rebuilt_display_pages: u64,
 }
@@ -1370,6 +1385,10 @@ impl EngineSession {
     pub fn set_media(&self, media: HashMap<String, String>) {
         *self.media.borrow_mut() = media;
         self.render.borrow_mut().stories.clear();
+        // Pictures resolve against it: the next pass lays out again.
+        if let Some(state) = self.regions.borrow_mut().as_mut() {
+            state.laid_out = None;
+        }
     }
 
     /// The attached source package media.
@@ -1809,6 +1828,31 @@ impl EngineSession {
         .map_err(|error| format!("serialize: {error}"))
     }
 
+    /// The retained `{ layout, headersFooters? }` without laying out again: a
+    /// resident worker that laid out a pass (a relayout, an edit) hands the
+    /// page thread, which lays out nothing, the layout it holds.
+    pub fn retained_region_layout_json(&self) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let regions_state = self.regions.borrow();
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedRegionLayout<'a> {
+            layout: &'a Layout,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            headers_footers: Option<&'a serde_json::Value>,
+        }
+        serde_json::to_string(&RetainedRegionLayout {
+            layout: pagination
+                .layout
+                .as_ref()
+                .ok_or_else(|| "resident layout is not built".to_owned())?,
+            headers_footers: regions_state
+                .as_ref()
+                .and_then(|state| state.headers_footers.as_ref()),
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
     /// The retained measured arena and layout options, for a host taking the
     /// main-thread display-list fallback after a retained-only region layout.
     pub fn retained_kernel_inputs_json(&self) -> Result<String, String> {
@@ -1830,11 +1874,30 @@ impl EngineSession {
         .map_err(|error| format!("serialize: {error}"))
     }
 
+    /// `Some(notes_converged)` when the retained layout is what a whole pass
+    /// of `request_json` would lay out now: the same request over the same
+    /// document, layout and fonts. A web-font load's pass changes none of them
+    /// (measuring reads font files here), so it lays out nothing, in the
+    /// resident worker or on a page that took over from it (Q813 A, Q824 A).
+    fn region_layout_current(&self, request_json: &str) -> Option<bool> {
+        let regions = self.regions.borrow();
+        let state = regions.as_ref()?;
+        let stamp = state.laid_out?;
+        (state.request_json == request_json
+            && stamp.doc_epoch == self.doc_epoch()
+            && stamp.layout_epoch == self.pagination.borrow().layout_epoch
+            && stamp.fonts == docx_layout::measure_fonts_generation())
+        .then_some(stamp.notes_converged)
+    }
+
     /// The full region pass minus the JSON envelope: pagination, note
     /// stabilization, and header/footer measurement all land in retained
     /// state. `apply_input`'s fallback consumes this directly so a keystroke
     /// never serializes a layout nobody reads. Returns `notes_converged`.
     fn layout_document_with_regions_value(&self, input_json: &str) -> Result<bool, String> {
+        if let Some(notes_converged) = self.region_layout_current(input_json) {
+            return Ok(notes_converged);
+        }
         let mut request = RegionRequest::parse(input_json)?;
         let RegionRequest {
             input,
@@ -2060,9 +2123,16 @@ impl EngineSession {
         // send the final section after the parsed list that already ends
         // with it.
         let single_section = regions.sections.len() <= 1 || !body_has_section_break;
+        let layout_epoch = pagination.layout_epoch;
         drop(pagination);
         self.regions.replace(Some(ResidentRegionState {
             request_json: input_json.to_owned(),
+            laid_out: (!partial).then(|| RegionLayoutStamp {
+                doc_epoch: self.doc_epoch(),
+                layout_epoch,
+                fonts: docx_layout::measure_fonts_generation(),
+                notes_converged,
+            }),
             headers_footers,
             fast_path: if !resident_body {
                 Err("not resident body")
@@ -2825,6 +2895,9 @@ impl EngineSession {
         extras_json: &str,
         expected_frame_epoch: u64,
     ) -> Result<Vec<u8>, String> {
+        if self.region_layout_current(request_json).is_some() {
+            return self.build_display_list_frame(extras_json, expected_frame_epoch);
+        }
         let same_request = self
             .regions
             .borrow()
@@ -2861,6 +2934,19 @@ impl EngineSession {
         phase: &mut impl FnMut(RegionResidentPhase),
     ) -> Result<bool, String> {
         let outcome = self.region_fast_path_attempt(story, phase)?;
+        if outcome.is_ok() {
+            // The retained layout now holds every edit, under the same request.
+            let layout_epoch = self.pagination.borrow().layout_epoch;
+            if let Some(stamp) = self
+                .regions
+                .borrow_mut()
+                .as_mut()
+                .and_then(|state| state.laid_out.as_mut())
+            {
+                stamp.doc_epoch = self.doc_epoch();
+                stamp.layout_epoch = layout_epoch;
+            }
+        }
         let (hits, _) = self.region_fast_path.get();
         self.region_fast_path.set(match outcome {
             Ok(()) => (hits.wrapping_add(1), None),
@@ -3192,8 +3278,15 @@ impl EngineSession {
                 .as_ref()
                 .ok_or_else(|| "resident layout is not built".to_owned())?;
             let mut display = self.display.borrow_mut();
+            // Nothing laid out since the retained list was built from these
+            // extras (a relayout whose input had not changed): it is current,
+            // and the frame rebuilds no page.
+            let current = display.list.is_some()
+                && display.layout_epoch == Some(pagination.layout_epoch)
+                && display.extras_fingerprint == Some(extras_fingerprint);
             let rebuilt = pagination.rebuilt_page_start..pagination.rebuilt_page_end;
-            let incremental = pagination.last_incremental
+            let incremental = !current
+                && pagination.last_incremental
                 && display.extras_fingerprint == Some(extras_fingerprint)
                 && rebuilt.start <= rebuilt.end
                 && rebuilt.end <= layout.pages.len()
@@ -3209,7 +3302,10 @@ impl EngineSession {
                     )?,
                     None => false,
                 };
-            if incremental {
+            if current {
+                observe_display_phase();
+                (true, 0, 0, 0)
+            } else if incremental {
                 (true, rebuilt.len(), rebuilt.start, rebuilt.end)
             } else {
                 display.list = Some(docx_layout::build_resident_display_pages_observed(
@@ -3238,6 +3334,7 @@ impl EngineSession {
         let binary_frame_epoch = display.binary_frame_epoch;
         let full = expected_frame_epoch != binary_frame_epoch || binary_frame_epoch == 0;
         let layout_epoch = self.pagination.borrow().layout_epoch;
+        display.layout_epoch = Some(layout_epoch);
         let mut next_page_id = display.next_page_id;
         // Split borrows: the encoder reads the retained list and the previous
         // snapshots in place — no per-frame deep clone of the snapshot set.

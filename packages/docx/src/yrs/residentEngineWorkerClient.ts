@@ -30,6 +30,8 @@ export interface ResidentEngineWorkerFrame {
   fontErrors: ResidentFontError[];
   /** The worker committed the edit but could not paint its frame. */
   paintError?: string;
+  /** The worker's retained layout JSON, when the request asked for it. */
+  layoutJson?: string;
 }
 
 export interface ResidentEngineOffscreenPage {
@@ -156,11 +158,12 @@ export class ResidentEngineWorkerClient {
 
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
-    extras: string
+    extras: string,
+    wantLayout = false
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0 },
+      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0, wantLayout },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -174,11 +177,12 @@ export class ResidentEngineWorkerClient {
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
     expectedFrameEpoch: number,
-    paintCaret = false
+    paintCaret = false,
+    wantLayout = false
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret },
+      { type: 'sync', snapshot, extras, expectedFrameEpoch, paintCaret, wantLayout },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -210,7 +214,8 @@ export class ResidentEngineWorkerClient {
     expectedFrameEpoch: number,
     selection: YrsSelection | null,
     layoutRevision: number,
-    paintCaret = false
+    paintCaret = false,
+    wantLayout = false
   ): Promise<ResidentEngineWorkerFrame> {
     const result = frameResult(
       await this.request({
@@ -221,6 +226,7 @@ export class ResidentEngineWorkerClient {
         selection,
         layoutRevision,
         paintCaret,
+        wantLayout,
       })
     );
     this.ready = true;
@@ -439,6 +445,7 @@ function frameResult(
     layoutRevision: response.layoutRevision ?? 0,
     fontErrors: response.fontErrors ?? [],
     ...(response.paintError === undefined ? {} : { paintError: response.paintError }),
+    ...(response.layoutJson === undefined ? {} : { layoutJson: response.layoutJson }),
   };
 }
 

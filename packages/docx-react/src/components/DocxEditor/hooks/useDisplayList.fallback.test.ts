@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { createEditSession, preloadEditWasm } from '@betteroffice/docx/wasm/edit';
-import type { YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
+import { recordResidentLayout } from '@betteroffice/docx/editor';
+import type { ResidentMeasurementConfig } from '@betteroffice/docx/layout';
+import type { YrsResidentLayoutReply, YrsSelection, YrsSession } from '@betteroffice/docx/yrs';
 import type { ResidentEngineWorkerRequest, ResidentEngineWorkerResponse } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
 import { useRustDisplayList, type ResidentFrameApplyResult } from './useDisplayList';
 
@@ -655,4 +657,120 @@ test('keeps editing on the main thread when the worker fails before the host eng
     errors.mockRestore();
     native.free();
   }
+});
+
+test('a worker that fails on a pass the page recorded hands layout back to the page and builds nothing', async () => {
+  const replies: YrsResidentLayoutReply[] = [];
+  const engine = {
+    residentWorkerProbe: () => ({ layoutRevision: 1, fontsRevision: 0, regionLayoutInput: '{}' }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onFontSlicesRetry: () => () => {},
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+    recordResidentLayout: () => 1,
+    publishResidentLayout: (reply: YrsResidentLayoutReply) => replies.push(reply),
+  } as unknown as YrsSession;
+  const recorded = recordResidentLayout({
+    document: null,
+    pageGap: 0,
+    renderEnv: {},
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } } as ResidentMeasurementConfig,
+    session: engine,
+  });
+  class FailingWorker extends InputFakeWorker {
+    constructor() {
+      super(new Uint8Array(), (request) =>
+        queueMicrotask(() =>
+          this.onmessage?.({
+            data: { id: request.id, ok: false, error: 'worker failed' },
+          } as MessageEvent<ResidentEngineWorkerResponse>)
+        )
+      );
+    }
+  }
+  globalThis.Worker = FailingWorker as unknown as typeof Worker;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(() =>
+      useRustDisplayList(recorded, undefined, undefined, undefined, engine)
+    );
+    await waitFor(() => expect(replies).toEqual([{ kind: 'page' }]));
+    expect(result.current.error).toBeNull();
+    unmount();
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+/**
+ * What the page is handed when the worker replies to the bootstrap of a pass it
+ * recorded with that pass's layout; `newerPass` records another pass first.
+ */
+async function bootstrapLayoutReplies(newerPass: boolean): Promise<YrsResidentLayoutReply[]> {
+  const native = createEditSession(9102);
+  native.create_story('body', 'Worker layout', 'Normal', 'left');
+  const inputs = native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  }));
+  const frame = native.build_display_list_frame(inputs, 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  native.free();
+  let layoutRevision = 1;
+  const replies: YrsResidentLayoutReply[] = [];
+  const engine = {
+    residentWorkerProbe: () => ({ layoutRevision, fontsRevision: 0, regionLayoutInput: '{}' }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onFontSlicesRetry: () => () => {},
+    onUpdate: () => () => {},
+    selection: () => null,
+    applyUpdate: () => null,
+    recordResidentLayout: () => layoutRevision,
+    publishResidentLayout: (reply: YrsResidentLayoutReply) => replies.push(reply),
+  } as unknown as YrsSession;
+  const recorded = recordResidentLayout({
+    document: null,
+    pageGap: 0,
+    renderEnv: {},
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } } as ResidentMeasurementConfig,
+    session: engine,
+  });
+  let worker: InputFakeWorker | undefined;
+  class HeldWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+    }
+  }
+  globalThis.Worker = HeldWorker as unknown as typeof Worker;
+  const { result, unmount } = renderHook(() =>
+    useRustDisplayList(recorded, undefined, undefined, undefined, engine)
+  );
+  await waitFor(() => expect(worker?.posted.some((request) => request.type === 'bootstrap')).toBe(true));
+  const bootstrap = worker!.posted.find((request) => request.type === 'bootstrap')!;
+  if (newerPass) layoutRevision = 2;
+  await act(async () => {
+    worker!.onmessage?.({ data: {
+      id: bootstrap.id, ok: true, frame: frame.slice().buffer,
+      caret: { frameEpoch: 100, caretRect: null }, selection: null, layoutRevision: 1,
+      // As the worker does: the layout only for a request that asks for it.
+      ...(bootstrap.type === 'bootstrap' && bootstrap.wantLayout ? { layoutJson: '{"layout":{"pages":[]}}' } : {}),
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+  });
+  await waitFor(() => expect(result.current.frame?.frameEpoch).toBe(100));
+  await act(async () => {
+    await new Promise((done) => setTimeout(done, 20));
+  });
+  unmount();
+  return replies;
+}
+
+test('the worker hands the page the layout of the newest pass, and drops a reply for an older one', async () => {
+  expect(await bootstrapLayoutReplies(false)).toEqual([
+    { kind: 'layout', json: '{"layout":{"pages":[]}}' },
+  ]);
+  expect(await bootstrapLayoutReplies(true)).toEqual([]);
 });

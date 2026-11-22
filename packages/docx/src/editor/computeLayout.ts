@@ -201,6 +201,50 @@ export function getLayoutKernelInputs(layout: Layout):
   return kernelInputsByLayout.get(layout);
 }
 
+/**
+ * Passes recorded for the resident worker, which lays them out instead of the
+ * page ({@link recordResidentLayout}). A recorded pass stands for its layout
+ * in the canvas renderer: it holds no pages, only the trigger for a worker
+ * frame, and the worker's layout reaches the page's readers on its own
+ * ({@link adoptResidentLayout}).
+ */
+const recordedResidentLayouts = new WeakSet<Layout>();
+
+export function isRecordedResidentLayout(layout: Layout | null | undefined): boolean {
+  return Boolean(layout && recordedResidentLayouts.has(layout));
+}
+
+export function recordResidentLayout(
+  inputs: Omit<ComputeLayoutInputs, 'session'> & {
+    session: Pick<YrsSession, 'recordResidentLayout'>;
+  }
+): Layout {
+  const request = buildResidentRegionLayoutRequest(
+    inputs.document,
+    inputs.pageGap,
+    inputs.renderEnv
+  );
+  request.measurement = inputs.measurement;
+  inputs.session.recordResidentLayout!(JSON.stringify(request));
+  const recorded = { pages: [] } as unknown as Layout;
+  recordedResidentLayouts.add(recorded);
+  // The worker keeps the measured arena: a recorded pass cannot be built here.
+  kernelInputsByLayout.set(recorded, {
+    get measured(): MeasuredBlock[] {
+      throw new Error('A recorded resident layout has no measured arena on the page');
+    },
+    get options(): LayoutOptions {
+      throw new Error('A recorded resident layout has no options on the page');
+    },
+  });
+  return recorded;
+}
+
+/** The worker's retained region layout JSON (see `YrsResidentLayoutReply`) as the page's layout. */
+export function adoptResidentLayout(json: string): Layout {
+  return (JSON.parse(json) as ResidentRegionLayoutRetainedOutput).layout;
+}
+
 export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
   const request = buildResidentRegionLayoutRequest(
     inputs.document,

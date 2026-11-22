@@ -107,6 +107,7 @@ export function DocxEditorPagedArea({
   // Scroll page indicator
   onTotalPagesChange,
   onLayoutComputed,
+  residentWorkerLayout,
   onError,
   onPendingChange,
   applyResidentInput,
@@ -198,6 +199,8 @@ export function DocxEditorPagedArea({
   onError?: (error: Error) => void;
   onPendingChange?: (pending: boolean) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
+  /** The resident worker lays out every pass (see PagedEditor's prop). */
+  residentWorkerLayout?: boolean;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
     direction: 'backward' | 'forward'
@@ -468,6 +471,7 @@ export function DocxEditorPagedArea({
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
+        residentWorkerLayout={residentWorkerLayout}
         onError={onError}
         onPendingChange={onPendingChange}
         applyResidentInput={applyResidentInput}

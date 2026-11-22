@@ -43,6 +43,10 @@ export type ResidentEngineSession = Pick<
   relayoutFrame(layoutInput: string, extras: string, expectedFrameEpoch: number): Uint8Array;
   /** Replaces a sliced face's outlines with those of `bytes`, the face with more chunks. */
   updateFontOutlines(fontId: number, bytes: Uint8Array): void;
+  /** Counts committed transactions: it moves on with every document change. */
+  docEpoch(): number;
+  /** The retained `{ layout, headersFooters? }` JSON, without laying out again. */
+  retainedRegionLayoutJson(): string;
 };
 
 export async function createResidentEngineSession(
@@ -80,6 +84,7 @@ export async function createResidentEngineSession(
       session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     updateFontOutlines: (fontId, bytes) => session.update_measure_font_outlines(fontId, bytes),
+    docEpoch: () => session.doc_epoch(),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
@@ -90,6 +95,7 @@ export async function createResidentEngineSession(
       session.build_display_list_frame(input, expectedFrameEpoch),
     relayoutFrame: (layoutInput, extras, expectedFrameEpoch) =>
       session.relayout_frame(layoutInput, extras, expectedFrameEpoch),
+    retainedRegionLayoutJson: () => session.retained_region_layout_json(),
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     selection: () => JSON.parse(session.selection()) as YrsSelection | null,
