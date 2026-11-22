@@ -4564,6 +4564,44 @@ describe('XlsxEditor marked cell', () => {
     expect(await workbook.encodeStateVector()).toEqual(state);
   });
 
+  // Q812 B: a mark on another sheet switches to it as a tab click does.
+  it('switches to the sheet of a mark elsewhere as a tab click does, then fills its cell unselected', async () => {
+    const cursors: { sheet: string; anchor: CellAddr }[] = [];
+    const provider = {
+      onAwareness: () => () => {},
+      peers: [],
+      setCursor: (cursor: { sheet: string; anchor: CellAddr } | null) => {
+        if (cursor) cursors.push(cursor);
+      },
+    };
+    const view = await mountEditor(plain, undefined, undefined, { collaboration: { provider } });
+    await act(async () => {
+      await view.workbook().editCell(1, 4, 2, 'The cited passage');
+    });
+    await view.idle();
+    // A draft open on the first sheet commits, as a tab click commits it.
+    await view.doubleClick({ row: 2, col: 1 });
+    view.type('draft');
+    const sheetIds = view.api().sheetInfo()!.sheetIds;
+    await view.setProps({
+      markedCell: {
+        col: 2,
+        color: 'rgba(255, 196, 0, 0.3)',
+        holds: (text) => text.includes('cited passage'),
+        row: 4,
+        sheetId: sheetIds[1],
+      },
+    });
+    await view.idle();
+    const tabs = [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')];
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+    expect(await view.input(2, 1)).toBe('draft');
+    expect(highlights()).toBe(1);
+    // The switch's own selection (A1) is announced on that sheet; the mark selects nothing.
+    expect(view.nameBox().value).toBe('A1');
+    expect(cursors[cursors.length - 1]).toMatchObject({ anchor: { col: 0, row: 0 }, sheet: sheetIds[1] });
+  });
+
   it('goes once its cell no longer holds the quote, and never follows the text', async () => {
     const view = await mountEditor();
     await act(async () => {

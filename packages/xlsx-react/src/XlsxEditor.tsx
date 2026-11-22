@@ -314,9 +314,9 @@ export interface XlsxEditorProps {
   /**
    * A cell the host marks (a citation): filled in `color` while its sheet
    * shows and its drawn text still `holds` what it marks (checked on every
-   * frame; the mark never moves with the text). A new mark scrolls to its cell
-   * once its sheet is on screen. Display only: no edit, no selection, nothing
-   * peers see.
+   * frame; the mark never moves with the text). A new mark on another sheet
+   * switches to it as a tab click does, then scrolls to its cell. The mark
+   * itself is display only: no edit, no selection.
    */
   markedCell?: {
     sheetId: string;
@@ -1789,14 +1789,25 @@ function XlsxEditorContent({
     });
   }, [frame, selection, sheetInfo, activeSheet, t]);
 
-  // A new mark on the sheet on screen scrolls there once, leaving View's
-  // context (100 sheet px) above and left of its cell; it selects nothing.
+  // A new mark on another sheet switches to it once, as a tab click does
+  // (Q812 B); on the sheet drawn, it scrolls there once, leaving View's
+  // context (100 sheet px) above and left of its cell. It selects nothing.
+  const switchedMarkRef = useRef<unknown>(null);
   const scrolledMarkRef = useRef<unknown>(null);
+  const markDrawnHere = !!shownHere;
   useEffect(() => {
     const handle = handleRef.current;
     const scroll = scrollRef.current;
     if (!markedCell || !handle || !scroll || !sheetInfo) return;
-    if (markedCell.sheetId !== activeSheetId || scrolledMarkRef.current === markedCell) return;
+    if (markedCell.sheetId !== activeSheetId) {
+      const index = sheetInfo.sheetIds.indexOf(markedCell.sheetId);
+      if (index < 0 || switchedMarkRef.current === markedCell) return;
+      switchedMarkRef.current = markedCell;
+      switchSheet(index, markedCell.sheetId);
+      return;
+    }
+    // after the switched sheet's first frame has put back its saved scroll.
+    if (!markDrawnHere || scrolledMarkRef.current === markedCell) return;
     scrolledMarkRef.current = markedCell;
     handle.onSheet(activeSheetId, 'cellPosition', activeSheet, markedCell.row, markedCell.col).then(
       (cell) => {
@@ -1806,7 +1817,7 @@ function XlsxEditorContent({
       },
       () => {}
     );
-  }, [markedCell, activeSheetId, activeSheet, sheetInfo]);
+  }, [markedCell, activeSheetId, activeSheet, sheetInfo, markDrawnHere]);
 
   // preventScroll everywhere: the sticky overlay host sits below the full-height
   // canvas in flow, so a plain focus() scrolls the grid to bring it into view.
