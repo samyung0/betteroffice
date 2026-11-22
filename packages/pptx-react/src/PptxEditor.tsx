@@ -248,10 +248,12 @@ export interface PptxEditorProps {
   onPresentingChange?: (presenting: boolean) => void;
   /**
    * A text story the host marks (a citation): its lines on the slide on screen
-   * are filled in `color`, and a zoomed slide scrolls the first into view once
-   * per mark. Display only: no edit, no selection, nothing peers see.
+   * are filled in `color` while its text still `holds` what it marks (checked
+   * on every change; the mark never moves with the text), and a zoomed slide
+   * scrolls the first into view once per mark. Display only: no edit, no
+   * selection, nothing peers see.
    */
-  textMark?: { storyId: string; color: string } | null;
+  textMark?: { storyId: string; color: string; holds: (text: string) => boolean } | null;
 }
 
 interface EditorModel {
@@ -807,7 +809,8 @@ function PptxEditorContent({
       }
       clearSelection();
       if (!refreshAt(slide - 1)) return false;
-      stageRef.current?.focus();
+      // A host's move (a citation from the app) leaves the focus where it is.
+      if (document.hasFocus()) stageRef.current?.focus();
       return true;
     },
     [clearSelection, refreshAt]
@@ -1125,7 +1128,11 @@ function PptxEditorContent({
     () =>
       textMark && model?.frame
         ? model.frame.primitives.flatMap((primitive) =>
-            primitive.kind === 'textBox' && primitive.storyId === textMark.storyId
+            primitive.kind === 'textBox' &&
+            primitive.storyId === textMark.storyId &&
+            textMark.holds(
+              primitive.paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n')
+            )
               ? primitive.lines
               : []
           )

@@ -312,10 +312,19 @@ export interface XlsxEditorProps {
    */
   onFontError?: (family: string, error: Error) => void;
   /**
-   * A cell the host marks (a citation), filled in `color` over the grid while
-   * its sheet shows. Display only: no edit, no selection, nothing peers see.
+   * A cell the host marks (a citation): filled in `color` while its sheet
+   * shows and its drawn text still `holds` what it marks (checked on every
+   * frame; the mark never moves with the text). A new mark scrolls to its cell
+   * once its sheet is on screen. Display only: no edit, no selection, nothing
+   * peers see.
    */
-  markedCell?: { sheetId: string; row: number; col: number; color: string } | null;
+  markedCell?: {
+    sheetId: string;
+    row: number;
+    col: number;
+    color: string;
+    holds: (text: string) => boolean;
+  } | null;
 }
 
 /**
@@ -1779,6 +1788,25 @@ function XlsxEditorContent({
       emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
     });
   }, [frame, selection, sheetInfo, activeSheet, t]);
+
+  // A new mark on the sheet on screen scrolls there once, leaving View's
+  // context (100 sheet px) above and left of its cell; it selects nothing.
+  const scrolledMarkRef = useRef<unknown>(null);
+  useEffect(() => {
+    const handle = handleRef.current;
+    const scroll = scrollRef.current;
+    if (!markedCell || !handle || !scroll || !sheetInfo) return;
+    if (markedCell.sheetId !== activeSheetId || scrolledMarkRef.current === markedCell) return;
+    scrolledMarkRef.current = markedCell;
+    handle.onSheet(activeSheetId, 'cellPosition', activeSheet, markedCell.row, markedCell.col).then(
+      (cell) => {
+        if (handleRef.current !== handle) return;
+        scroll.scrollLeft = Math.max(0, (cell.x - 100) * zoomRef.current);
+        scroll.scrollTop = Math.max(0, (cell.y - 100) * zoomRef.current);
+      },
+      () => {}
+    );
+  }, [markedCell, activeSheetId, activeSheet, sheetInfo]);
 
   // preventScroll everywhere: the sticky overlay host sits below the full-height
   // canvas in flow, so a plain focus() scrolls the grid to bring it into view.
@@ -3383,8 +3411,15 @@ function XlsxEditorContent({
       ? rangeRect(grid, expandRangeToMergedCells(normalizeRange(pointed), visibleMergedRanges))
       : null;
   const scaledPointedRect = pointedRect ? scaledRect(pointedRect, paintedZoom) : null;
-  const markRect =
+  // drawn only while its cell, on the frame on screen, holds what it marks.
+  const markText =
     grid && markedCell?.sheetId === activeSheetId
+      ? a11yGrid?.rows
+          .find((row) => row.row === markedCell.row)
+          ?.cells.find((cell) => cell.col === markedCell.col)?.text
+      : undefined;
+  const markRect =
+    grid && markedCell && markText !== undefined && markedCell.holds(markText)
       ? cellRect(grid, markedCell.row, markedCell.col)
       : null;
   const scaledMarkRect = markRect ? scaledRect(markRect, paintedZoom) : null;

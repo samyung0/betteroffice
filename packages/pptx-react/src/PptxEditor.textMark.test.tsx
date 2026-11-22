@@ -55,16 +55,36 @@ it("fills a marked story's lines on its slide and leaves the deck untouched", as
     )!;
   const state = handle.encodeStateAsUpdate();
   const marks = () => view.baseElement.querySelectorAll<HTMLElement>('[data-citation-highlight]');
-  const mark = { color: 'rgba(255, 196, 0, 0.3)', storyId: box.storyId! };
+  const text = box.paragraphs.map((p) => p.runs.map((r) => r.text).join('')).join('\n');
+  const mark = {
+    color: 'rgba(255, 196, 0, 0.3)',
+    holds: (shown: string) => shown === text,
+    storyId: box.storyId!,
+  };
 
   view.rerender(<PptxEditor {...props} textMark={mark} />);
   // Slide 1 shows: nothing of slide 2's story is drawn.
   expect(marks()).toHaveLength(0);
-  await act(async () => {
-    expect(api!.goToSlide(2)).toBe(true);
-  });
+  // A host's move leaves the focus outside the frame where it is.
+  const outside = document.createElement('input');
+  document.body.append(outside);
+  outside.focus();
+  const hasFocus = document.hasFocus;
+  document.hasFocus = () => false;
+  try {
+    await act(async () => {
+      expect(api!.goToSlide(2)).toBe(true);
+    });
+  } finally {
+    document.hasFocus = hasFocus;
+  }
+  expect(document.activeElement).toBe(outside);
+  outside.remove();
   await waitFor(() => expect(marks()).toHaveLength(box.lines.length));
   expect(marks()[0].style.background).toBe(mark.color);
+  // Q809 A: a story that no longer holds what it marks shows nothing.
+  view.rerender(<PptxEditor {...props} textMark={{ ...mark, holds: () => false }} />);
+  expect(marks()).toHaveLength(0);
 
   view.rerender(<PptxEditor {...props} textMark={null} />);
   expect(marks()).toHaveLength(0);

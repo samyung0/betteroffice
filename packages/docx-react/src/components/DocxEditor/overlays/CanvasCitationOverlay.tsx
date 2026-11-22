@@ -6,13 +6,16 @@
  * selection or the presence collaborators see.
  */
 
-import { useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { DisplayListQueries, DisplayListRect } from '@betteroffice/docx/layout/render';
 import type { YrsLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 /** What `DocxEditorRef.showCitation` takes. */
 export interface DocxCitation {
+  /** A literal piece every paragraph `match` could pick holds: the engine's
+   * text search finds the candidates with it. */
+  probe: string;
   /** Picks the cited paragraph by its text, or none: the host's citation rule. */
   match: <T extends { text: string }>(paragraphs: T[]) => T | null;
   /** The mark's CSS colour. */
@@ -26,32 +29,40 @@ export interface CitedParagraph {
 }
 
 /**
- * The paragraph `citation` picks. Every story is a candidate, so a quote that
- * also appears in a header or a note is not unique; only a body paragraph
- * (table cells included) is marked.
+ * The paragraph `citation` picks among those holding its probe, in every
+ * story, so a quote that also appears in a header or a note is not unique;
+ * only a body paragraph (table cells included) is marked.
  */
 export function findCitedParagraph(
   session: YrsSession,
   citation: DocxCitation
 ): CitedParagraph | null {
-  const paragraphs = session
-    .storyIds()
-    .flatMap((story) =>
-      session.paragraphs(story).map(({ paraId, text }) => ({ paraId, story, text }))
-    );
-  const match = citation.match(paragraphs);
+  const candidates = new Map<string, CitedParagraph & { text: string }>();
+  for (const { paraId, story } of session.searchText(citation.probe)) {
+    const key = `${story}/${paraId}`;
+    if (!candidates.has(key))
+      candidates.set(key, { paraId, story, text: session.paragraphUnitText(story, paraId) });
+  }
+  const match = citation.match([...candidates.values()]);
   return match && (match.story === 'body' || match.story.startsWith('body:'))
     ? { paraId: match.paraId, story: match.story }
     : null;
 }
 
-/** The cited paragraph's live display range; null once it is gone. */
+/**
+ * The cited paragraph's live display range while it still holds the quote
+ * (checked on every change, with the same rule); null once it does not or is
+ * gone. The mark never moves to text elsewhere.
+ */
 export function citedRange(
   session: YrsSession,
   cited: CitedParagraph,
+  citation: DocxCitation,
   toDisplay: (loc: YrsLoc) => number | null
 ): { from: number; to: number } | null {
   try {
+    if (!citation.match([{ text: session.paragraphUnitText(cited.story, cited.paraId) }]))
+      return null;
     const span = session.locateParagraph(cited.story, cited.paraId);
     const from = toDisplay({ ...cited, offset: 0 });
     const to = toDisplay({ ...cited, offset: span.end - span.start });
@@ -67,6 +78,8 @@ export interface CanvasCitationOverlayProps {
   color: string;
   /** A new key centres the mark once more, as each citation in the viewer does. */
   scrollKey: unknown;
+  /** The pages have been presented: the first centring waits for it. */
+  presented: boolean;
   /** Portal target — `editorContentRef.current`, sharing the canvas host's top-left. */
   overlayTarget: HTMLElement;
   /** `.canvas-pages` host — live per-page `<canvas>` rects are read from here. */
@@ -85,10 +98,14 @@ interface ProjectedRect {
   height: number;
 }
 
+/** What the reader does to move: after it, a zoom change leaves the scroll alone. */
+const READER_MOVES = ['wheel', 'pointerdown', 'keydown', 'touchstart'] as const;
+
 export function CanvasCitationOverlay({
   range,
   color,
   scrollKey,
+  presented,
   overlayTarget,
   canvasHostRef,
   displayListQueries,
@@ -97,18 +114,20 @@ export function CanvasCitationOverlay({
 }: CanvasCitationOverlayProps) {
   const [rects, setRects] = useState<ProjectedRect[]>([]);
   const firstRef = useRef<HTMLDivElement>(null);
-  const scrolledRef = useRef<unknown>(null);
+  const recomputeRef = useRef(() => {});
   const from = range?.from ?? 0;
   const to = range?.to ?? 0;
   const marked = range != null;
 
+  // The live range's rects; the observer below calls the latest through the
+  // ref, so a key that shifts the paragraph only recomputes.
   useLayoutEffect(() => {
-    const host = canvasHostRef.current;
-    if (!marked || !host) {
-      setRects([]);
-      return;
-    }
-    const recompute = () => {
+    recomputeRef.current = () => {
+      const host = canvasHostRef.current;
+      if (!marked || !host) {
+        setRects([]);
+        return;
+      }
       const targetRect = overlayTarget.getBoundingClientRect();
       // The live `<canvas>` rect folds in centering, the sidebar shift and zoom.
       const project = (r: DisplayListRect): ProjectedRect | null => {
@@ -134,7 +153,13 @@ export function CanvasCitationOverlay({
       }
       setRects(next);
     };
-    recompute();
+    recomputeRef.current();
+  }, [marked, from, to, overlayTarget, canvasHostRef, displayListQueries, sidebarOpen, zoom]);
+
+  useEffect(() => {
+    const host = canvasHostRef.current;
+    if (!marked || !host) return;
+    const recompute = () => recomputeRef.current();
     const ro = new ResizeObserver(recompute);
     ro.observe(host);
     ro.observe(overlayTarget);
@@ -145,14 +170,30 @@ export function CanvasCitationOverlay({
       window.removeEventListener('resize', recompute);
       host.removeEventListener('transitionend', recompute);
     };
-  }, [marked, from, to, overlayTarget, canvasHostRef, displayListQueries, sidebarOpen, zoom]);
+  }, [marked, overlayTarget, canvasHostRef]);
 
-  // Centred once the pages hold it, once per citation, as the viewer does.
+  // Centred once the pages are presented, once per citation, as the viewer
+  // does; a zoom change before the reader moves (a fitted zoom settling)
+  // centres it again.
+  const scrolledRef = useRef<{ key: unknown; zoom: number; moved: boolean } | null>(null);
+  useEffect(() => {
+    const doc = overlayTarget.ownerDocument;
+    const moved = () => {
+      if (scrolledRef.current) scrolledRef.current.moved = true;
+    };
+    for (const type of READER_MOVES)
+      doc.addEventListener(type, moved, { capture: true, passive: true });
+    return () => {
+      for (const type of READER_MOVES) doc.removeEventListener(type, moved, { capture: true });
+    };
+  }, [overlayTarget]);
   useLayoutEffect(() => {
-    if (rects.length === 0 || scrolledRef.current === scrollKey) return;
-    scrolledRef.current = scrollKey;
+    if (!presented || rects.length === 0) return;
+    const last = scrolledRef.current;
+    if (last && last.key === scrollKey && (last.zoom === zoom || last.moved)) return;
+    scrolledRef.current = { key: scrollKey, moved: false, zoom };
     firstRef.current?.scrollIntoView({ block: 'center' });
-  }, [rects, scrollKey]);
+  }, [presented, rects, scrollKey, zoom]);
 
   if (rects.length === 0) return null;
 

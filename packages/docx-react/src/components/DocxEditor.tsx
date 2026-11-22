@@ -52,6 +52,7 @@ import {
   CanvasCitationOverlay,
   citedRange,
   findCitedParagraph,
+  type CitedParagraph,
   type DocxCitation,
 } from './DocxEditor/overlays/CanvasCitationOverlay';
 import { useCanvasOverlayTarget } from './DocxEditor/internals/useCanvasOverlayTarget';
@@ -457,11 +458,13 @@ export interface DocxEditorRef {
    */
   highlightRange: (from: number, to: number) => void;
   /**
-   * Marks the body paragraph `citation.match` picks among the document's
-   * paragraphs in `citation.color`, and centres it once the pages hold it.
+   * Marks the body paragraph `citation.match` picks among the paragraphs
+   * holding `citation.probe`, in `citation.color`, and centres it once the
+   * pages are presented (again if the zoom settles before the reader moves).
    * Display only: no selection, no document change, nothing collaborators see.
-   * The mark follows its paragraph through edits until the next call; `null`
-   * or no pick clears it.
+   * The mark stays on its paragraph while that paragraph still holds the quote
+   * (checked on every change), never moving to the text elsewhere, until the
+   * next call; `null` or no pick clears it.
    */
   showCitation: (citation: DocxCitation | null) => void;
   /** Open print preview */
@@ -1006,12 +1009,17 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   );
 
   // A font slice that fails before the first pages are presented fails the
-  // open; after, it is a notice (Q752 B scoping).
+  // open; after, it is a notice (Q752 B scoping). A citation's first centring
+  // waits for it too.
+  const [pagesPresented, setPagesPresented] = useState(false);
   useEffect(() => {
     const host = containerRef.current;
     const session = yrsCore.session;
     if (!host || !session) return;
-    const presented = () => session.markPagesPresented();
+    const presented = () => {
+      session.markPagesPresented();
+      setPagesPresented(true);
+    };
     host.addEventListener(DOCX_PAGES_PRESENTED_EVENT, presented);
     return () => host.removeEventListener(DOCX_PAGES_PRESENTED_EVENT, presented);
   }, [yrsCore.session]);
@@ -1558,19 +1566,24 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [canvasRenderer.queries, expandedSidebarItem, trackedChanges, comments]);
 
   // A host's citation (showCitation): its paragraph is picked once per call,
-  // after the first layout, and marked at its live range after every layout.
+  // after the first layout and outside render, and marked at its live range
+  // after every layout while it still holds the quote.
   const [citation, setCitation] = useState<DocxCitation | null>(null);
   const laidOut = canvasRenderer.displayList != null;
-  const citedParagraph = useMemo(() => {
+  const [citedParagraph, setCitedParagraph] = useState<CitedParagraph | null>(null);
+  useEffect(() => {
     const session = yrsCore.session;
-    return citation && session && laidOut ? findCitedParagraph(session, citation) : null;
+    setCitedParagraph(
+      citation && session && laidOut ? findCitedParagraph(session, citation) : null
+    );
   }, [citation, yrsCore.session, laidOut]);
   const citationRange = useMemo(() => {
     const session = yrsCore.session;
     const paged = pagedEditorRef.current;
-    if (!citedParagraph || !session || !paged || !canvasRenderer.queries) return null;
-    return citedRange(session, citedParagraph, paged.yrsLocToDisplayPosition);
-  }, [citedParagraph, yrsCore.session, canvasRenderer.queries]);
+    if (!citation || !citedParagraph || !session || !paged || !canvasRenderer.queries)
+      return null;
+    return citedRange(session, citedParagraph, citation, paged.yrsLocToDisplayPosition);
+  }, [citation, citedParagraph, yrsCore.session, canvasRenderer.queries]);
 
   const {
     displayList: printList,
@@ -2403,6 +2416,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           range={citationRange}
           color={citation.color}
           scrollKey={citedParagraph}
+          presented={pagesPresented}
           overlayTarget={canvasFindOverlayTarget}
           canvasHostRef={canvasRenderer.canvasHostRef}
           displayListQueries={canvasRenderer.queries}
