@@ -31,6 +31,7 @@ export type {
   HostMenuEntry,
 } from './components/DocxEditor/hostMenus';
 export type { DocxZoom } from './components/DocxEditor/pageZoom';
+export type { DocxCitation } from './components/DocxEditor/overlays/CanvasCitationOverlay';
 export type { ColorPaletteColor } from './components/ui/ColorPicker';
 export {
   DOCX_PAGES_PRESENTED_EVENT,

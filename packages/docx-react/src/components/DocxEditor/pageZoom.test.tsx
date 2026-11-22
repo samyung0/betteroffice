@@ -150,29 +150,20 @@ test('a fitted viewer re-fits on resize until a pinch picks a level, then never'
   expect(width()).toBeCloseTo(page.width * levels[0]!, 3);
 });
 
-// Progressive DOCX View: pages still to come keep their place and count in the fit.
-test('pages still to come hold their height and widest width, and fit with the pages shown', () => {
+// Progressive DOCX View: the pages grow as they come, and the widest page to come sets the fit.
+test('pages still to come fit with the pages shown by the widest page of the document', () => {
   const page = displayList.pages[0]!;
-  const pending = [
-    { width: page.width, height: 500 },
-    { width: page.width * 2, height: 300 },
-  ];
   paneWidth = 348;
   const { container } = render(
     <div className="pane" style={{ overflowX: 'auto', overflowY: 'auto' }}>
-      <DocxDisplayListViewer displayList={displayList} zoom="fit" pendingPages={pending} />
+      <DocxDisplayListViewer displayList={displayList} zoom="fit" morePages={{ width: page.width * 2 }} />
     </div>
   );
-  // The widest page to come sets the fit.
   const zoom = fitZoom(348, page.width * 2)!;
   const canvas = container.querySelector<HTMLCanvasElement>('canvas[data-page-index="0"]')!;
   expect(Number.parseFloat(canvas.style.width)).toBeCloseTo(page.width * zoom, 3);
   const column = container.querySelector<HTMLElement>('.canvas-pages__column')!;
-  const spacer = column.lastElementChild as HTMLElement;
-  expect(spacer.getAttribute('aria-hidden')).toBe('true');
-  // Both pages at the zoom and the gap between them; the column's gap comes before.
-  expect(Number.parseFloat(spacer.style.height)).toBeCloseTo((500 + 300) * zoom + Number.parseFloat(column.style.gap), 3);
-  expect(Number.parseFloat(spacer.style.width)).toBeCloseTo(page.width * 2 * zoom, 3);
+  expect(column.children).toHaveLength(displayList.pages.length);
 });
 
 test('a pinch previews its scale, stays within 25–200%, and a two-finger tap or a cancel keeps the level', async () => {

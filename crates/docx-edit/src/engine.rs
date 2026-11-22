@@ -39,6 +39,9 @@ use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
 };
 
+mod first_pages;
+pub use first_pages::FirstPages;
+
 #[derive(Debug)]
 struct LoweredStory {
     doc_epoch: u64,
@@ -470,6 +473,104 @@ fn initial_float_page_geometry(
     }
 }
 
+/// A region-layout request, parsed: the render environment of a document
+/// with one section takes its line unit and grid pitch.
+struct RegionRequest {
+    input: LayoutInput,
+    regions: DocumentRegions,
+    notes: docx_layout::footnotes::NoteLayoutInput,
+    measurement: docx_layout::measure_blocks::MeasurementConfig,
+    render_env: Option<RenderEnv>,
+    body_story: Option<String>,
+    measurement_fingerprint: u64,
+}
+
+impl RegionRequest {
+    fn parse(input_json: &str) -> Result<Self, String> {
+        let request: RegionLayoutInput =
+            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
+        let (input, regions, notes, measurement, render_env, body_story) = request.split();
+        let mut render_env = if render_env.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value::<RenderEnv>(render_env)
+                    .map_err(|error| format!("parse render environment: {error}"))?,
+            )
+        };
+        if regions.sections.len() <= 1
+            && let Some(env) = &mut render_env
+        {
+            let line_px = regions.paragraph_spacing_line_px(0);
+            env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
+            env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
+        }
+        let measurement_fingerprint = serde_json::to_vec(&measurement)
+            .map(|bytes| hash_bytes(&bytes))
+            .map_err(|error| format!("fingerprint measurement config: {error}"))?;
+        Ok(Self {
+            input,
+            regions,
+            notes,
+            measurement,
+            render_env,
+            body_story,
+            measurement_fingerprint,
+        })
+    }
+}
+
+/// Readies a lowered body for measuring as a whole: each block takes its
+/// section's line unit and grid pitch, and the options and section breaks
+/// the sections' geometry. Returns each block's measurement width and the
+/// first page's float geometry.
+fn prepare_measured_arena(
+    blocks: &mut [LayoutBlock],
+    options: &mut docx_layout::types::LayoutOptions,
+    regions: &DocumentRegions,
+) -> (Vec<f64>, docx_layout::measure_blocks::FloatPageGeometry) {
+    let mut section_index = 0;
+    for block in blocks.iter_mut() {
+        resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
+        resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
+        if advances_region_section(block) {
+            section_index += 1;
+        }
+    }
+    apply_section_geometry_to_blocks(blocks, options, regions);
+    let input = LayoutInput {
+        measured: Vec::new(),
+        options: options.clone(),
+    };
+    (
+        region_measurement_widths(blocks.iter(), &input, regions),
+        initial_float_page_geometry(&input, regions),
+    )
+}
+
+/// A shape [`stabilize_shape_wrapping`] settles: text wraps it on the side
+/// of an inside or outside margin, which only placement decides.
+fn margin_side_shape(block: &LayoutBlock) -> bool {
+    let LayoutBlock::Shape(shape) = block else {
+        return false;
+    };
+    let Some(horizontal) = shape
+        .position
+        .as_ref()
+        .and_then(|position| position.horizontal.as_ref())
+    else {
+        return false;
+    };
+    matches!(
+        shape.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "topAndBottom")
+    ) && (horizontal.align.as_deref() == Some("inside")
+        || matches!(
+            horizontal.relative_to.as_deref(),
+            Some("insideMargin" | "outsideMargin")
+        ))
+}
+
 fn stabilize_shape_wrapping(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -479,20 +580,11 @@ fn stabilize_shape_wrapping(
         .measured
         .iter()
         .enumerate()
-        .filter_map(|(index, measured)| {
-            let LayoutBlock::Shape(shape) = &measured.block else {
-                return None;
-            };
-            let horizontal = shape.position.as_ref()?.horizontal.as_ref()?;
-            (matches!(
-                shape.wrap_type.as_deref(),
-                Some("square" | "tight" | "through" | "topAndBottom")
-            ) && (horizontal.align.as_deref() == Some("inside")
-                || matches!(
-                    horizontal.relative_to.as_deref(),
-                    Some("insideMargin" | "outsideMargin")
-                )))
-            .then(|| (index, shape.id.clone()))
+        .filter_map(|(index, measured)| match &measured.block {
+            LayoutBlock::Shape(shape) if margin_side_shape(&measured.block) => {
+                Some((index, shape.id.clone()))
+            }
+            _ => None,
         })
         .collect::<Vec<_>>();
     if shapes.is_empty() {
@@ -1770,28 +1862,17 @@ impl EngineSession {
     /// state. `apply_input`'s fallback consumes this directly so a keystroke
     /// never serializes a layout nobody reads. Returns `notes_converged`.
     fn layout_document_with_regions_value(&self, input_json: &str) -> Result<bool, String> {
-        let request: RegionLayoutInput =
-            serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
-        let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
-        let mut parsed_render_env = if render_env.is_null() {
-            None
-        } else {
-            Some(
-                serde_json::from_value::<RenderEnv>(render_env)
-                    .map_err(|error| format!("parse render environment: {error}"))?,
-            )
-        };
-        if regions.sections.len() <= 1
-            && let Some(env) = &mut parsed_render_env
-        {
-            let line_px = regions.paragraph_spacing_line_px(0);
-            env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
-            env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
-        }
-        let measurement_fingerprint = serde_json::to_vec(&measurement)
-            .map(|bytes| hash_bytes(&bytes))
-            .map_err(|error| format!("fingerprint measurement config: {error}"))?;
-        let resident_body = body_story.is_some();
+        let mut request = RegionRequest::parse(input_json)?;
+        let RegionRequest {
+            input,
+            regions,
+            measurement,
+            render_env: parsed_render_env,
+            body_story,
+            measurement_fingerprint,
+            ..
+        } = &mut request;
+        let measurement_fingerprint = *measurement_fingerprint;
         let mut block_fingerprints: Option<Vec<u64>> = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -1803,15 +1884,15 @@ impl EngineSession {
             }
             let arena = self
                 .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
-                    apply_section_geometry(&mut input, &regions);
-                    let widths = region_measurement_widths(blocks.iter(), &input, &regions);
-                    let geometry = initial_float_page_geometry(&input, &regions);
+                    apply_section_geometry(input, regions);
+                    let widths = region_measurement_widths(blocks.iter(), input, regions);
+                    let geometry = initial_float_page_geometry(input, regions);
                     let default_width = widths.first().copied().unwrap_or(0.0);
                     // floating extents depend on flow position; re-measure all
                     if docx_layout::measure_blocks::has_floating_zones(
                         blocks,
                         default_width,
-                        &measurement,
+                        measurement,
                         Some(&geometry),
                     )? {
                         return Ok(Arena::Full(blocks.to_vec()));
@@ -1819,8 +1900,8 @@ impl EngineSession {
                     match self.resident_region_measured(
                         blocks,
                         &widths,
-                        &regions,
-                        &measurement,
+                        regions,
+                        measurement,
                         measurement_fingerprint,
                     )? {
                         Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
@@ -1832,30 +1913,15 @@ impl EngineSession {
                 Arena::Reused(measured, fingerprints) => {
                     input.measured = measured;
                     block_fingerprints = Some(fingerprints);
-                    apply_section_geometry(&mut input, &regions);
+                    apply_section_geometry(input, regions);
                 }
                 Arena::Full(mut blocks) => {
-                    let mut section_index = 0;
-                    for block in &mut blocks {
-                        resolve_line_unit_spacing(
-                            block,
-                            regions.paragraph_spacing_line_px(section_index),
-                        );
-                        resolve_doc_grid_pitch(
-                            block,
-                            regions.doc_grid_snap_pitch_px(section_index),
-                        );
-                        if advances_region_section(block) {
-                            section_index += 1;
-                        }
-                    }
-                    apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
-                    let widths = region_measurement_widths(blocks.iter(), &input, &regions);
-                    let geometry = initial_float_page_geometry(&input, &regions);
+                    let (widths, geometry) =
+                        prepare_measured_arena(&mut blocks, &mut input.options, regions);
                     let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
                         &mut blocks,
                         &widths,
-                        &measurement,
+                        measurement,
                         Some(&geometry),
                     )?;
                     input.measured = blocks
@@ -1866,8 +1932,34 @@ impl EngineSession {
                 }
             }
         } else {
-            apply_section_geometry(&mut input, &regions);
+            apply_section_geometry(input, regions);
         }
+        self.finish_region_pass(input_json, request, block_fingerprints, false)
+    }
+
+    /// The region pass once the body's arena is measured: headers and
+    /// footers, shape wrapping, pagination, note stabilization and areas, and
+    /// header/footer field widths, retained. A `partial` pass lays out only
+    /// the body's first pages ([`Self::layout_document_with_regions_first_pages`]):
+    /// its page totals render their saved results and it keeps no state an
+    /// edit or a later pass reuses. Returns `notes_converged`.
+    fn finish_region_pass(
+        &self,
+        input_json: &str,
+        request: RegionRequest,
+        mut block_fingerprints: Option<Vec<u64>>,
+        partial: bool,
+    ) -> Result<bool, String> {
+        let RegionRequest {
+            mut input,
+            regions,
+            mut notes,
+            measurement,
+            render_env: parsed_render_env,
+            body_story,
+            measurement_fingerprint,
+        } = request;
+        let resident_body = body_story.is_some();
         let mut measured_headers_footers = if let Some(render_env) = parsed_render_env.as_ref() {
             self.measure_header_footer_payload(&mut input, &regions, &measurement, render_env)?
         } else {
@@ -1972,6 +2064,10 @@ impl EngineSession {
             &separator_heights,
             &regions,
         );
+        // Page-count fields show the file's saved count until the whole
+        // layout knows the real one, as Word does (Q801 B).
+        layout.partial = partial;
+        layout.cached_page_totals = partial;
         let measured_headers_footers = measured_headers_footers
             .as_mut()
             .map(|payload| {
@@ -1997,6 +2093,8 @@ impl EngineSession {
             headers_footers,
             fast_path: if !resident_body {
                 Err("not resident body")
+            } else if partial {
+                Err("first pages")
             } else if !single_section {
                 Err("sections")
             } else {
@@ -2010,7 +2108,7 @@ impl EngineSession {
         }));
         // Only the region-measured arena may seed the next pass's reuse walk.
         self.pagination.borrow_mut().measured_with =
-            resident_body.then_some(measurement_fingerprint);
+            (resident_body && !partial).then_some(measurement_fingerprint);
         self.edits.borrow_mut().outside_body = false;
         Ok(notes_converged)
     }

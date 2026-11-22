@@ -57,7 +57,8 @@ export interface DocxPageSize {
 export interface DocxViewerPages {
   /**
    * In order, each at its `pageIndex`; a page that comes again replaces the
-   * one before (a later page's list markers renamed its sliced face).
+   * one before (the whole layout's page count reached its page-count fields,
+   * or a later page's list markers renamed its sliced face).
    */
   pages: DisplayPage[];
   /**
@@ -65,19 +66,31 @@ export interface DocxViewerPages {
    * first pages), each holding every outline the pages so far draw.
    */
   slicedFaces: Omit<DocxViewerSlicedFace, 'files'>[];
+  /** The widest page of the whole document, known before its pages are. */
+  width: number;
 }
 
 export interface DocxViewerOptions {
   reading?: DocxReadingLayout;
   /**
-   * Shows pages before the whole document is built: with every page's size
-   * from the layout, `firstPages` says how many to build first; those, then
-   * the rest `PAGE_BATCH` at a time, go to `onPages` once their sliced faces
-   * hold their outlines. The handle resolves after the last.
+   * Shows pages before the whole document is laid out and built (Q801 B).
+   * The body's first pages are laid out alone when it can be cut after them,
+   * and `firstPages`, from the sizes of the pages laid out so far and the
+   * widest page of the document, says how many the first screen needs; more
+   * are laid out if those fall short. They go to `onPages` before the rest
+   * of the body is laid out; then the rest `PAGE_BATCH` at a time, each
+   * batch once its sliced faces hold its outlines. A first page the whole
+   * layout draws otherwise (its page-count fields) comes again. A body that
+   * can't be cut is laid out whole first, as `firstPages` then sees. The
+   * handle resolves after the last batch.
    */
   progressive?: {
-    firstPages(sizes: readonly DocxPageSize[]): number;
+    firstPages(sizes: readonly DocxPageSize[], width: number): number;
     onPages(batch: DocxViewerPages): void;
+    /** Lays the whole body out first, for an open that waits for every page
+     * anyway (a citation, a print), which the first pages alone would only
+     * delay (Q823 A). */
+    whole?: boolean;
   };
 }
 
@@ -108,6 +121,11 @@ export function initWasm(
 
 /** Pages per `displayPagesJson` call: the list is never built in one piece. */
 const PAGE_BATCH = 8;
+
+/** The pages a first layout lays out before `firstPages` sees their sizes
+ * (it builds only those the screen shows): a desktop screen at 100% shows
+ * two, a narrow one fitting the page three. */
+const FIRST_LAYOUT_PAGES = 3;
 
 const TWIPS_PER_PX = 15;
 /** A reading layout's page: tall, so few lines meet a page join, but well
@@ -201,7 +219,7 @@ function slicedOutlines(faces: ReadonlyMap<number, SlicedFontFace>, chains: Read
   const names = new Map([...wanted.keys()].map((face, index) => [face, `BetterOffice Sliced ${opens}.${index}`]));
   const families = new Map<string, string | string[]>();
   // Every rewritable font as the layout wrote it, to rewrite again under the final families.
-  const written: Array<{ page: DisplayPage; node: { font: string }; font: string }> = [];
+  let written: Array<{ page: DisplayPage; node: { font: string }; font: string }> = [];
   const rewrite = (node: { font: string }, font: string) => {
     const next = withFontFamilies(font, families);
     if (next === node.font) return false;
@@ -240,6 +258,12 @@ function slicedOutlines(faces: ReadonlyMap<number, SlicedFontFace>, chains: Read
       await Promise.all([...needs].map(([face, { glyphs, characters }]) =>
         Promise.all([face.ensureGlyphs(glyphs), face.ensureText([...characters].join(''))])));
     },
+    /** `add` for pages built again: the pages they replace are no longer rewritten. */
+    replace(pages: readonly DisplayPage[]): Promise<void> {
+      const indices = new Set(pages.map((page) => page.pageIndex));
+      written = written.filter(({ page }) => !indices.has(page.pageIndex));
+      return this.add(pages);
+    },
     /** The faces whose outlines grew since the last call, each with every outline loaded so far. */
     grown(): Omit<DocxViewerSlicedFace, 'files'>[] {
       return [...wanted].flatMap(([face, entry]) => {
@@ -276,6 +300,8 @@ export async function openDocumentViewer(
   let pageGap: number;
   let list: DisplayList | null = null;
   let outlines!: ReturnType<typeof slicedOutlines>;
+  // The widest page of the document, with each batch of `progressive`.
+  let width = 0;
   // A registry per open: its failures and sliced faces are this open's. The
   // engine answers bytes it already holds with their first id.
   const failures: Error[] = [];
@@ -303,30 +329,66 @@ export async function openDocumentViewer(
     // skeletons layout waits for (Q769 A). A task boundary lets the requests
     // go out before layout holds the thread.
     if (await source.startEastAsianCores(requirements)) await new Promise((resolve) => setTimeout(resolve, 0));
-    const pageCount = document.layout(JSON.stringify({ ...request, measurement }));
+    const measured = JSON.stringify({ ...request, measurement });
     const progressive = options.progressive;
     outlines = slicedOutlines(source.progressiveFaces(), measurement.fontChains);
-    let next = PAGE_BATCH;
-    if (progressive) {
-      const sizes = (JSON.parse(document.pageSizesJson()) as [number, number][]).map(([width, height]) => ({ width, height }));
-      next = Math.max(1, Math.floor(progressive.firstPages(sizes)));
-    }
+    const sizes = () =>
+      (JSON.parse(document.pageSizesJson()) as [number, number][]).map(([width, height]) => ({ width, height }));
     // Batches go to `onPages` in order, each once its outlines are in. The
-    // first goes before anything else is built; a later one's chunk fetches
-    // overlap the next batch's build (Q804 A).
+    // first goes before anything else is laid out or built; a later one's
+    // chunk fetches overlap the next batch's build (Q804 A).
     let delivered = Promise.resolve();
+    const deliver = (pages: DisplayPage[], loaded: Promise<void>) => {
+      // Reported through `delivered`, in order.
+      loaded.catch(() => {});
+      delivered = delivered.then(() => loaded).then(() => progressive!.onPages({ pages, slicedFaces: outlines.grown(), width }));
+    };
+    // With `progressive`, the first pages the screen shows are laid out and
+    // handed over alone when the body can be cut after them; a screen that
+    // shows more than were laid out has more laid out.
+    let first = 0;
+    let firstJson: string[] = [];
+    for (let pages = FIRST_LAYOUT_PAGES; progressive && !progressive.whole; ) {
+      const laidOut = document.layoutFirst(measured, pages);
+      if (!laidOut) break;
+      width = document.documentWidth();
+      pages = Math.max(1, Math.floor(progressive.firstPages(sizes(), width)));
+      if (pages <= laidOut) {
+        first = pages;
+        break;
+      }
+    }
+    if (first) {
+      const batch = JSON.parse(document.displayPagesJson(0, first)) as DisplayList;
+      firstJson = batch.pages.map((page) => JSON.stringify(page));
+      list = { ...batch, pages: [...batch.pages] };
+      deliver(batch.pages, outlines.add(batch.pages));
+      await delivered;
+    }
+    const pageCount = document.layout(measured);
+    if (first) {
+      if (pageCount < first) throw new Error('The DOCX view laid out fewer pages than its first');
+      // Built again from the whole layout: a page drawn otherwise (its
+      // page-count fields now show the real count) replaces the one shown.
+      const again = (JSON.parse(document.displayPagesJson(0, first)) as DisplayList).pages.filter(
+        (page, index) => JSON.stringify(page) !== firstJson[index]
+      );
+      for (const page of again) list!.pages[page.pageIndex] = page;
+      if (again.length > 0) deliver(again, outlines.replace(again));
+    }
+    let next = first + PAGE_BATCH;
+    if (progressive && !first) {
+      const all = sizes();
+      width = Math.max(0, ...all.map((size) => size.width));
+      next = Math.max(1, Math.floor(progressive.firstPages(all, width)));
+    }
     // At least one call, so a document of no pages still gets its list.
-    for (let start = 0; start < pageCount || !list; start = next, next += PAGE_BATCH) {
+    for (let start = first; start < pageCount || !list; start = next, next += PAGE_BATCH) {
       const batch = JSON.parse(document.displayPagesJson(start, Math.min(next, pageCount))) as DisplayList;
       if (list) list.pages.push(...batch.pages);
       else list = { ...batch, pages: [...batch.pages] };
       if (!progressive) continue;
-      const loaded = outlines.add(batch.pages);
-      // Reported through `delivered`, in order.
-      loaded.catch(() => {});
-      delivered = delivered
-        .then(() => loaded)
-        .then(() => progressive.onPages({ pages: batch.pages, slicedFaces: outlines.grown() }));
+      deliver(batch.pages, outlines.add(batch.pages));
       // A batch whose outlines are loaded goes before the next is built; one
       // still fetching lets the next build meanwhile.
       await (start === 0 ? delivered : Promise.race([delivered, new Promise((resolve) => setTimeout(resolve, 0))]));
@@ -345,7 +407,7 @@ export async function openDocumentViewer(
   if (!options.progressive) await outlines.add(list!.pages);
   else {
     const renamed = outlines.finish();
-    if (renamed.length > 0) options.progressive.onPages({ pages: renamed, slicedFaces: outlines.grown() });
+    if (renamed.length > 0) options.progressive.onPages({ pages: renamed, slicedFaces: outlines.grown(), width });
   }
   let sliced = outlines.faces();
   return {

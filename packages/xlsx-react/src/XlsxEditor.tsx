@@ -311,6 +311,20 @@ export interface XlsxEditorProps {
    * font and the editor shows no error; the host reports it.
    */
   onFontError?: (family: string, error: Error) => void;
+  /**
+   * A cell the host marks (a citation): filled in `color` while its sheet
+   * shows and its drawn text still `holds` what it marks (checked on every
+   * frame; the mark never moves with the text). A new mark on another sheet
+   * switches to it as a tab click does, then scrolls to its cell. The mark
+   * itself is display only: no edit, no selection.
+   */
+  markedCell?: {
+    sheetId: string;
+    row: number;
+    col: number;
+    color: string;
+    holds: (text: string) => boolean;
+  } | null;
 }
 
 /**
@@ -853,6 +867,7 @@ function XlsxEditorContent({
   initialZoom = 1,
   defaultFonts,
   onFontError,
+  markedCell,
 }: Omit<XlsxEditorProps, 'i18n' | 'icons'>) {
   const { t } = useTranslation();
   // a cut reading its selection in pieces refuses edits, as a send does, so
@@ -1773,6 +1788,36 @@ function XlsxEditorContent({
       emptyCellLabelSelected: t('a11y.emptyCellLabelSelected'),
     });
   }, [frame, selection, sheetInfo, activeSheet, t]);
+
+  // A new mark on another sheet switches to it once, as a tab click does
+  // (Q812 B); on the sheet drawn, it scrolls there once, leaving View's
+  // context (100 sheet px) above and left of its cell. It selects nothing.
+  const switchedMarkRef = useRef<unknown>(null);
+  const scrolledMarkRef = useRef<unknown>(null);
+  const markDrawnHere = !!shownHere;
+  useEffect(() => {
+    const handle = handleRef.current;
+    const scroll = scrollRef.current;
+    if (!markedCell || !handle || !scroll || !sheetInfo) return;
+    if (markedCell.sheetId !== activeSheetId) {
+      const index = sheetInfo.sheetIds.indexOf(markedCell.sheetId);
+      if (index < 0 || switchedMarkRef.current === markedCell) return;
+      switchedMarkRef.current = markedCell;
+      switchSheet(index, markedCell.sheetId);
+      return;
+    }
+    // after the switched sheet's first frame has put back its saved scroll.
+    if (!markDrawnHere || scrolledMarkRef.current === markedCell) return;
+    scrolledMarkRef.current = markedCell;
+    handle.onSheet(activeSheetId, 'cellPosition', activeSheet, markedCell.row, markedCell.col).then(
+      (cell) => {
+        if (handleRef.current !== handle) return;
+        scroll.scrollLeft = Math.max(0, (cell.x - 100) * zoomRef.current);
+        scroll.scrollTop = Math.max(0, (cell.y - 100) * zoomRef.current);
+      },
+      () => {}
+    );
+  }, [markedCell, activeSheetId, activeSheet, sheetInfo, markDrawnHere]);
 
   // preventScroll everywhere: the sticky overlay host sits below the full-height
   // canvas in flow, so a plain focus() scrolls the grid to bring it into view.
@@ -3377,6 +3422,18 @@ function XlsxEditorContent({
       ? rangeRect(grid, expandRangeToMergedCells(normalizeRange(pointed), visibleMergedRanges))
       : null;
   const scaledPointedRect = pointedRect ? scaledRect(pointedRect, paintedZoom) : null;
+  // drawn only while its cell, on the frame on screen, holds what it marks.
+  const markText =
+    grid && markedCell?.sheetId === activeSheetId
+      ? a11yGrid?.rows
+          .find((row) => row.row === markedCell.row)
+          ?.cells.find((cell) => cell.col === markedCell.col)?.text
+      : undefined;
+  const markRect =
+    grid && markedCell && markText !== undefined && markedCell.holds(markText)
+      ? cellRect(grid, markedCell.row, markedCell.col)
+      : null;
+  const scaledMarkRect = markRect ? scaledRect(markRect, paintedZoom) : null;
   // committed inputs on this sheet the worker has not drawn yet, over their cells.
   const optimisticCells = grid
     ? optimistic.flatMap((entry) => {
@@ -4003,6 +4060,19 @@ function XlsxEditorContent({
               pointerEvents: 'none',
             }}
           >
+            {scaledMarkRect && markedCell && (
+              <div
+                data-citation-highlight="true"
+                style={{
+                  position: 'absolute',
+                  left: scaledMarkRect.x,
+                  top: scaledMarkRect.y,
+                  width: scaledMarkRect.w,
+                  height: scaledMarkRect.h,
+                  background: markedCell.color,
+                }}
+              />
+            )}
             {scaledSelectionRect && !selectedChart && (
               <div
                 data-testid="xlsx-selection"

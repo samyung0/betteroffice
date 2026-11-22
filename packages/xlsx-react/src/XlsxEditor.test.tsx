@@ -4522,3 +4522,108 @@ it('pins the editor root to ltr on a right-to-left page (upstream #1884)', async
   const view = await mountEditor();
   expect(view.surface.closest('[role="application"]')?.getAttribute('dir')).toBe('ltr');
 });
+
+// Q667, Q809 A, Q810 B: a host's citation mark selects nothing and changes
+// nothing, and shows only while its cell holds what it marks.
+describe('XlsxEditor marked cell', () => {
+  const highlights = () => document.querySelectorAll('[data-citation-highlight]').length;
+
+  it('scrolls to a far cell with context and fills it, leaving the selection, presence and workbook as they were', async () => {
+    const cursors: unknown[] = [];
+    const provider = {
+      onAwareness: () => () => {},
+      peers: [],
+      setCursor: (cursor: unknown) => {
+        cursors.push(cursor);
+      },
+    };
+    const view = await mountEditor(wide, undefined, undefined, { collaboration: { provider } });
+    const workbook = view.workbook();
+    const state = await workbook.encodeStateVector();
+    const selected = view.nameBox().value;
+    const announced = cursors[cursors.length - 1];
+    expect(announced).toBeDefined();
+    const sheetId = view.api().sheetInfo()!.sheetIds[0];
+    await view.setProps({
+      markedCell: {
+        ...FAR_CELL,
+        color: 'rgba(255, 196, 0, 0.3)',
+        holds: (text) => text === 'far',
+        sheetId,
+      },
+    });
+    await view.idle();
+    const cell = await workbook.cellPosition(0, FAR_CELL.row, FAR_CELL.col);
+    expect([view.surface.scrollLeft, view.surface.scrollTop]).toEqual([cell.x - 100, cell.y - 100]);
+    fireEvent.scroll(view.surface);
+    await view.idle();
+    expect(highlights()).toBe(1);
+    expect(view.nameBox().value).toBe(selected);
+    // a new frame may announce the cursor again, never another one.
+    expect(cursors[cursors.length - 1]).toEqual(announced);
+    expect(await workbook.encodeStateVector()).toEqual(state);
+  });
+
+  // Q812 B: a mark on another sheet switches to it as a tab click does.
+  it('switches to the sheet of a mark elsewhere as a tab click does, then fills its cell unselected', async () => {
+    const cursors: { sheet: string; anchor: CellAddr }[] = [];
+    const provider = {
+      onAwareness: () => () => {},
+      peers: [],
+      setCursor: (cursor: { sheet: string; anchor: CellAddr } | null) => {
+        if (cursor) cursors.push(cursor);
+      },
+    };
+    const view = await mountEditor(plain, undefined, undefined, { collaboration: { provider } });
+    await act(async () => {
+      await view.workbook().editCell(1, 4, 2, 'The cited passage');
+    });
+    await view.idle();
+    // A draft open on the first sheet commits, as a tab click commits it.
+    await view.doubleClick({ row: 2, col: 1 });
+    view.type('draft');
+    const sheetIds = view.api().sheetInfo()!.sheetIds;
+    await view.setProps({
+      markedCell: {
+        col: 2,
+        color: 'rgba(255, 196, 0, 0.3)',
+        holds: (text) => text.includes('cited passage'),
+        row: 4,
+        sheetId: sheetIds[1],
+      },
+    });
+    await view.idle();
+    const tabs = [...view.surface.ownerDocument.querySelectorAll('[role="tab"]')];
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+    expect(await view.input(2, 1)).toBe('draft');
+    expect(highlights()).toBe(1);
+    // The switch's own selection (A1) is announced on that sheet; the mark selects nothing.
+    expect(view.nameBox().value).toBe('A1');
+    expect(cursors[cursors.length - 1]).toMatchObject({ anchor: { col: 0, row: 0 }, sheet: sheetIds[1] });
+  });
+
+  it('goes once its cell no longer holds the quote, and never follows the text', async () => {
+    const view = await mountEditor();
+    await act(async () => {
+      await view.workbook().editCell(0, 2, 1, 'The cited passage');
+    });
+    await view.idle();
+    const sheetId = view.api().sheetInfo()!.sheetIds[0];
+    await view.setProps({
+      markedCell: {
+        col: 1,
+        color: 'rgba(255, 196, 0, 0.3)',
+        holds: (text) => text.includes('cited passage'),
+        row: 2,
+        sheetId,
+      },
+    });
+    await view.idle();
+    expect(highlights()).toBe(1);
+    // A row inserted above moves the text to B4: B3 no longer holds it.
+    await view.click({ row: 0, col: 0 });
+    await view.run('insertRowAbove');
+    expect(await view.input(3, 1)).toBe('The cited passage');
+    expect(highlights()).toBe(0);
+  });
+});
