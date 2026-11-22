@@ -307,6 +307,42 @@ fn a_frame_with_nothing_laid_out_since_the_last_rebuilds_no_page() {
     fixture.assert_same_as_fresh(&worker);
 }
 
+/// A pass over the request, document and fonts the engine laid out last (a
+/// web-font load's) lays out nothing, on a page that lays out itself as in the
+/// worker; an update or a font change lays out (Q824 A).
+#[test]
+fn a_pass_over_what_was_laid_out_last_lays_out_nothing() {
+    let fixture = Fixture::new();
+    let (worker, _) = fixture.worker();
+    let passes = |engine: &EngineSession| engine.stats().pagination_calls;
+    let laid_out = passes(&worker);
+    worker
+        .layout_document_with_regions_retained_json(&fixture.request)
+        .unwrap();
+    fixture.relayout(&worker);
+    assert_eq!(passes(&worker), laid_out);
+
+    let peer = fixture.replica(2);
+    type_at(&peer, fixture.starts[3] + 1, "w");
+    apply(&worker, &peer);
+    fixture.relayout(&worker);
+    let updated = passes(&worker);
+    assert!(updated > laid_out);
+    worker
+        .layout_document_with_regions_retained_json(&fixture.request)
+        .unwrap();
+    assert_eq!(passes(&worker), updated);
+
+    // The same face in a new store: measuring reads other fonts.
+    docx_layout::clear_measure_fonts();
+    docx_layout::register_measure_font(FONT).unwrap();
+    worker
+        .layout_document_with_regions_retained_json(&fixture.request)
+        .unwrap();
+    assert!(passes(&worker) > updated);
+    fixture.assert_same_as_fresh(&worker);
+}
+
 /// Chart block keys and content-control group ids in the retained display list.
 fn embed_ids(worker: &EngineSession) -> Vec<String> {
     fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
