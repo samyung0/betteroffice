@@ -41,6 +41,8 @@ interface YrsCoreSessionCallbacks {
   isCurrentLoad?: (generation: number) => boolean;
   onHostDocument?: (host: YrsDocxHost, generation: number) => void;
   onError?: (error: Error, generation: number) => void;
+  /** The session loaded its document: `update` is the shared state it loaded, if any. */
+  onSeeded?: (session: YrsSession, update: Uint8Array | null) => void;
 }
 
 function mergeHeaderFooterMaps(
@@ -222,6 +224,8 @@ export function useYrsCoreSession(
         });
         sessionRef.current = next;
         facadeRef.current = yrs;
+        // Before the page's first render with it (Q815).
+        callbacksRef.current?.onSeeded?.(next, collaborationInitialUpdate ?? null);
         setSession(next);
         if (host) callbacksRef.current?.onHostDocument?.(host, seedGeneration);
       })

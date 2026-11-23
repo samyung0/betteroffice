@@ -619,6 +619,17 @@ export interface YrsResidentWorkerSnapshot {
 }
 
 /**
+ * The resident worker's starting replica, sent as the session opens: the
+ * state this session loaded and the source media. The worker loads it while
+ * the page renders, and its first snapshot then ships only what changed since.
+ */
+export interface YrsResidentWorkerSeed {
+  state: Uint8Array;
+  media: string;
+  workerClientId?: number;
+}
+
+/**
  * What the resident worker hands the page after it laid out a recorded pass
  * (see {@link YrsSession.recordResidentLayout}): its retained
  * `{ layout, headersFooters? }` JSON for the page's layout readers (page
@@ -931,6 +942,9 @@ export interface YrsSession extends CollaborationReplica {
   /** The resident worker's replies to recorded passes (canvas renderer to editor). */
   onResidentLayout?(listener: (reply: YrsResidentLayoutReply) => void): () => void;
   publishResidentLayout?(reply: YrsResidentLayoutReply): void;
+  /** The resident worker's starting replica: `update`, the state this session
+   * loaded, or this session's own state when it loaded none. */
+  residentWorkerSeed(update: Uint8Array | null): YrsResidentWorkerSeed;
   /** Snapshot the inputs needed to move resident layout ownership to a worker. */
   residentWorkerSnapshot(options?: YrsResidentWorkerSyncOptions): YrsResidentWorkerSnapshot | null;
   /**
@@ -1722,6 +1736,11 @@ function wrapSession(
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
+    residentWorkerSeed: (update) => ({
+      state: update ? update.slice() : session.encode_state(),
+      media: session.media_json(),
+      workerClientId,
+    }),
     residentWorkerSnapshot: (options) => {
       if (!residentLayoutInput) return null;
       if (!residentLayoutWithRegions && residentRenderInputs.size === 0) return null;

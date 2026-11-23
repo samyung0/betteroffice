@@ -117,8 +117,16 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     destroySession();
     return;
   }
-  if (request.type === 'bootstrap') {
+  if (request.type === 'seed') {
     destroySession();
+    session = await createResidentEngineSession(request.seed.workerClientId);
+    session.setMedia(request.seed.media);
+    session.loadState(request.seed.state);
+    const stateVector = exactBuffer(session.encodeStateVector());
+    reply({ id: request.id, ok: true, stateVector }, [stateVector]);
+    return;
+  }
+  if (request.type === 'bootstrap') {
     // The worker is a genuine yrs peer. Reusing the main replica's client id
     // makes a fast structural input race overlap one client's clock range and
     // corrupt the update; an id of its own (the host's assigned worker id, or
@@ -126,8 +134,9 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     // main replica applies worker updates with local origin. A worker that
     // replaces another under the same assigned id hydrates from the main
     // replica, which holds every worker update it applied, and the replaced
-    // worker's later replies are dropped, so no clock is taken twice.
-    session = await createResidentEngineSession(request.snapshot.workerClientId);
+    // worker's later replies are dropped, so no clock is taken twice. A
+    // seeded replica keeps its state: the snapshot holds what changed since.
+    session ??= await createResidentEngineSession(request.snapshot.workerClientId);
     const layoutJson = hydrate(request.snapshot);
     if (request.wantLayout) replyLayoutJson = layoutJson;
     subscribe();

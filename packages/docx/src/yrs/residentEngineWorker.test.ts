@@ -120,6 +120,9 @@ function worker() {
     docEpoch: 0,
     selections: [] as unknown[],
     sessionIds: [] as Array<number | undefined>,
+    /** The states the replica loaded and the media it was given, in order. */
+    loaded: [] as number[][],
+    media: [] as string[],
     progressive: null as null | {
       added: [number, unknown];
       onError(error: Error): void;
@@ -137,7 +140,12 @@ function worker() {
     /** The failed chunks the last face opened was handed. */
     failed: undefined as unknown,
     session: {
-      loadState() {},
+      loadState(state: Uint8Array) {
+        harness.loaded.push([...state]);
+      },
+      setMedia(media: string) {
+        harness.media.push(media);
+      },
       clearFonts() {},
       registerFont() {
         return 7;
@@ -371,6 +379,21 @@ describe('resident worker replica', () => {
     const unassigned = worker();
     await unassigned.bootstrap(3);
     expect(unassigned.harness.sessionIds).toEqual([undefined]);
+  });
+});
+
+describe('resident worker seed', () => {
+  test('a replica seeded as the session opens keeps its state: the bootstrap applies only its snapshot (Q815)', async () => {
+    const w = worker();
+    const seeded = await w.send({
+      type: 'seed',
+      seed: { state: new Uint8Array([1, 2, 3]), media: '{"word/media/a.png":"data:"}', workerClientId: 4242 },
+    });
+    expect(seeded).toMatchObject({ ok: true, stateVector: new Uint8Array([1]).buffer });
+    await w.bootstrap(3, 4242, { state: new Uint8Array([9]) });
+    expect(w.harness.sessionIds).toEqual([4242]);
+    expect(w.harness.loaded).toEqual([[1, 2, 3], [9]]);
+    expect(w.harness.media).toEqual(['{"word/media/a.png":"data:"}']);
   });
 });
 

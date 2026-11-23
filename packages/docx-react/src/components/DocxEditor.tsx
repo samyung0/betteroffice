@@ -1005,6 +1005,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       isCurrentLoad,
       onHostDocument: acceptHostDocument,
       onError: failHostDocument,
+      onSeeded: canvasRenderer.startWorker,
     }
   );
 

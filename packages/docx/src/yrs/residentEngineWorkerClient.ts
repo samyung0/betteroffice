@@ -1,6 +1,7 @@
 import type {
   YrsEngineApplyProfile,
   YrsResidentCaretSnapshot,
+  YrsResidentWorkerSeed,
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
@@ -64,6 +65,7 @@ type AwaitedRequest = Exclude<
  * sync or bootstrap cannot time out the input waiting behind it.
  */
 export const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
+  seed: 15_000,
   bootstrap: 15_000,
   sync: 15_000,
   // Replaces a sync after remote or structural updates; may be a full region pass.
@@ -154,6 +156,12 @@ export class ResidentEngineWorkerClient {
   /** The fonts revision this worker last applied (null before bootstrap). */
   syncedFontsRevision(): number | null {
     return this.appliedFontsRevision;
+  }
+
+  /** Loads the replica's starting state while the page renders; the reply's
+   * state vector makes the bootstrap snapshot a diff. */
+  async seed(seed: YrsResidentWorkerSeed): Promise<void> {
+    await this.request({ type: 'seed', seed }, [seed.state.buffer]);
   }
 
   async bootstrap(

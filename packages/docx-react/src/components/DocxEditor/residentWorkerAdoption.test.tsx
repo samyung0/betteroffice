@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
 
-import { createRef } from 'react';
+import { createRef, useRef } from 'react';
 import type { YrsSession } from '@betteroffice/docx/yrs';
 import { createResidentEngineSession } from '@betteroffice/docx/yrs/residentEngineSession';
 import { PagedEditor, type PagedEditorRef } from './PagedEditor';
@@ -13,6 +13,7 @@ import { useCanvasRenderer } from './hooks/useDisplayList';
 import {
   destroySessions,
   docxPackage,
+  joinSession,
   loadEditor,
   openSession,
   pagedEditorProps,
@@ -131,4 +132,59 @@ test('the worker lays the pass out and its reply hands the page its layout; the 
   render(<CanvasEditor session={session} editor={editor} />);
   await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
   expect(pageLayouts).toBe(0);
+});
+
+test('a worker started as the session opens loads the state the page loaded: its first frame request ships only what changed since, for the same pages (Q815)', async () => {
+  globalThis.Worker = InProcessWorker as unknown as typeof Worker;
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7500)).encodeState();
+  const unseeded = createRef<PagedEditorRef>();
+  render(<CanvasEditor session={await joinSession(bytes, room, 7501)} editor={unseeded} />);
+  await waitFor(() => expect(unseeded.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  const expected = JSON.stringify(unseeded.current!.getLayout());
+  cleanup();
+
+  type Posted = { type: string; snapshot?: { state: Uint8Array; media?: string } };
+  const posted: Posted[] = [];
+  globalThis.Worker = class extends InProcessWorker {
+    override postMessage(data: unknown): void {
+      posted.push(data as Posted);
+      super.postMessage(data);
+    }
+  } as unknown as typeof Worker;
+  const session = await joinSession(bytes, room, 7502);
+  let pageLayouts = 0;
+  const layOut = session.layoutDocumentWithRegionsRetainedJson.bind(session);
+  session.layoutDocumentWithRegionsRetainedJson = (input) => {
+    pageLayouts += 1;
+    return layOut(input);
+  };
+  const editor = createRef<PagedEditorRef>();
+  function SeededEditor() {
+    const canvas = useCanvasRenderer();
+    // As DocxEditor's session hook does, before the page's first render with the session.
+    const started = useRef(false);
+    if (!started.current) {
+      started.current = true;
+      canvas.startWorker(session, room);
+    }
+    return (
+      <PagedEditor
+        ref={editor}
+        {...pagedEditorProps(session)}
+        residentWorkerLayout
+        onLayoutComputed={canvas.onLayoutComputed}
+      />
+    );
+  }
+  render(<SeededEditor />);
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  expect(JSON.stringify(editor.current!.getLayout())).toBe(expected);
+  // The worker laid it out from the seeded replica.
+  expect(pageLayouts).toBe(0);
+  const [seed, bootstrap] = posted.filter(({ type }) => type === 'seed' || type === 'bootstrap');
+  expect([seed?.type, bootstrap?.type]).toEqual(['seed', 'bootstrap']);
+  // The page's replica holds what the room sent and nothing more.
+  expect(bootstrap!.snapshot!.state.byteLength).toBeLessThan(16);
+  expect(bootstrap!.snapshot!.media).toBeUndefined();
 });
