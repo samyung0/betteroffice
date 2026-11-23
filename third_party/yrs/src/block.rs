@@ -2159,8 +2159,9 @@ impl ItemContent {
             }
             BLOCK_ITEM_ANY_REF_NUMBER => {
                 let len = decoder.read_len()? as usize;
-                // Patched for BetterOffice: no reservation from a declared length.
-                let mut values = Vec::new();
+                // Patched for BetterOffice: reserve no more values than the
+                // input can hold (one byte each at least), and no spare slots.
+                let mut values = Vec::with_capacity(len.min(decoder.remaining()));
 
                 let mut i = 0;
                 while i < len {
@@ -2611,6 +2612,39 @@ mod test {
             .apply_update(Update::decode_v1(&state).unwrap())
             .unwrap();
         assert_eq!(copied.get_string(&copy.transact()), "a\u{FFFD}X\u{FFFD}b");
+    }
+
+    // Patched for BetterOffice: a decoded value's Vec holds no spare capacity.
+    #[test]
+    fn decoded_values_hold_no_spare_capacity() {
+        use crate::block::{ClientID, ItemContent};
+        use crate::updates::decoder::Decode;
+        use crate::{Any, Array, Doc, Map, ReadTxn, StateVector, Transact, Update, UpdateBlock};
+        let doc = Doc::with_options(crate::Options::with_client_id(ClientID::new(1)));
+        let map = doc.get_or_insert_map("m");
+        let array = doc.get_or_insert_array("a");
+        {
+            let mut txn = doc.transact_mut();
+            let values = [Any::from(1.0), Any::from(2.0), Any::from(3.0)];
+            map.insert(&mut txn, "xywh", "[0,0,10,10]");
+            array.insert_range(&mut txn, 0, values);
+        }
+        let txn = doc.transact();
+        let v1 = Update::decode_v1(&txn.encode_state_as_update_v1(&StateVector::default()));
+        let v2 = Update::decode_v2(&txn.encode_state_as_update_v2(&StateVector::default()));
+        for update in [v1.unwrap(), v2.unwrap()] {
+            let mut lengths = Vec::new();
+            for block in update.blocks() {
+                if let UpdateBlock::Item(item) = block {
+                    if let ItemContent::Any(values) = &item.content {
+                        assert_eq!(values.capacity(), values.len());
+                        lengths.push(values.len());
+                    }
+                }
+            }
+            lengths.sort();
+            assert_eq!(lengths, [1, 3]);
+        }
     }
 
     #[test]

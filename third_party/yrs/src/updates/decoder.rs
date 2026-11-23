@@ -70,6 +70,12 @@ pub trait Decoder: Read {
 
     /// Consume a rest of the decoded buffer data and return it without parsing.
     fn read_to_end(&mut self) -> Result<&[u8], Error>;
+
+    /// Patched for BetterOffice: bytes left in the stream [Decoder::read_any] reads, or 0 when
+    /// the decoder does not say (a reservation it bounds then reserves nothing).
+    fn remaining(&self) -> usize {
+        0
+    }
 }
 
 /// Version 1 of lib0 decoder.
@@ -192,6 +198,11 @@ impl<'a> Decoder for DecoderV1<'a> {
     #[inline]
     fn read_to_end(&mut self) -> Result<&[u8], Error> {
         Ok(&self.cursor.buf[self.cursor.next..])
+    }
+
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.cursor.buf.len() - self.cursor.next
     }
 }
 
@@ -372,6 +383,11 @@ impl<'a> Decoder for DecoderV2<'a> {
     #[inline]
     fn read_to_end(&mut self) -> Result<&[u8], Error> {
         Ok(&self.cursor.buf[self.cursor.next..])
+    }
+
+    #[inline]
+    fn remaining(&self) -> usize {
+        self.cursor.buf.len() - self.cursor.next
     }
 }
 
