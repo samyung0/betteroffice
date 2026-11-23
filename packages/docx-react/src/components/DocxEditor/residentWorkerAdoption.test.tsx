@@ -188,3 +188,40 @@ test('a worker started as the session opens loads the state the page loaded: its
   expect(bootstrap!.snapshot!.state.byteLength).toBeLessThan(16);
   expect(bootstrap!.snapshot!.media).toBeUndefined();
 });
+
+test('a pass over the request and document the font check read last reuses its answer: the pass after the fonts load and a web-font load check nothing again (Q815)', async () => {
+  globalThis.Worker = InProcessWorker as unknown as typeof Worker;
+  const session = await openSession(docxPackage(BODY), 7403);
+  let checks = 0;
+  const check = session.layoutFontRequirementsJson.bind(session);
+  session.layoutFontRequirementsJson = (input) => {
+    checks += 1;
+    return check(input);
+  };
+  let passes = 0;
+  const record = session.recordResidentLayout!.bind(session);
+  session.recordResidentLayout = (input) => {
+    passes += 1;
+    return record(input);
+  };
+  // The editor's web-font load listener (this DOM's font set dispatches nothing).
+  const fonts = window.document.fonts as unknown as {
+    addEventListener(type: string, listener: () => void): void;
+  };
+  const listen = fonts.addEventListener;
+  let fontsLoaded = () => {};
+  fonts.addEventListener = (type, listener) => {
+    if (type === 'loadingdone') fontsLoaded = listener;
+    listen.call(fonts, type, listener);
+  };
+  const editor = createRef<PagedEditorRef>();
+  try {
+    render(<CanvasEditor session={session} editor={editor} />);
+  } finally {
+    fonts.addEventListener = listen;
+  }
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  await act(async () => fontsLoaded());
+  await waitFor(() => expect(passes).toBe(2));
+  expect(checks).toBe(1);
+});
