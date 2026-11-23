@@ -120,6 +120,11 @@ function worker() {
     docEpoch: 0,
     selections: [] as unknown[],
     sessionIds: [] as Array<number | undefined>,
+    /** The states the replica loaded and the media it was given, in order. */
+    loaded: [] as number[][],
+    media: [] as string[],
+    /** The next state loaded is refused, as a corrupt update is. */
+    refuseLoad: false,
     progressive: null as null | {
       added: [number, unknown];
       onError(error: Error): void;
@@ -137,7 +142,16 @@ function worker() {
     /** The failed chunks the last face opened was handed. */
     failed: undefined as unknown,
     session: {
-      loadState() {},
+      loadState(state: Uint8Array) {
+        if (harness.refuseLoad) {
+          harness.refuseLoad = false;
+          throw new Error('not an update');
+        }
+        harness.loaded.push([...state]);
+      },
+      setMedia(media: string) {
+        harness.media.push(media);
+      },
       clearFonts() {},
       registerFont() {
         return 7;
@@ -371,6 +385,34 @@ describe('resident worker replica', () => {
     const unassigned = worker();
     await unassigned.bootstrap(3);
     expect(unassigned.harness.sessionIds).toEqual([undefined]);
+  });
+});
+
+describe('resident worker seed', () => {
+  test('a replica seeded as the session opens keeps its state: the bootstrap applies only its snapshot (Q815)', async () => {
+    const w = worker();
+    const seeded = await w.send({
+      type: 'seed',
+      seed: { state: new Uint8Array([1, 2, 3]), media: '{"word/media/a.png":"data:"}', workerClientId: 4242 },
+    });
+    expect(seeded).toMatchObject({ ok: true, stateVector: new Uint8Array([1]).buffer });
+    await w.bootstrap(3, 4242, { state: new Uint8Array([9]) });
+    expect(w.harness.sessionIds).toEqual([4242]);
+    expect(w.harness.loaded).toEqual([[1, 2, 3], [9]]);
+    expect(w.harness.media).toEqual(['{"word/media/a.png":"data:"}']);
+  });
+
+  test('a seed the replica refuses is dropped: the bootstrap starts a replica of its own (Q815)', async () => {
+    const w = worker();
+    w.harness.refuseLoad = true;
+    const seeded = await w.send({
+      type: 'seed',
+      seed: { state: new Uint8Array([1, 2, 3]), media: '{}', workerClientId: 4242 },
+    });
+    expect(seeded).toMatchObject({ ok: false });
+    expect((await w.bootstrap(3, 4242, { state: new Uint8Array([9]) })).ok).toBe(true);
+    expect(w.harness.sessionIds).toEqual([4242, 4242]);
+    expect(w.harness.loaded).toEqual([[9]]);
   });
 });
 

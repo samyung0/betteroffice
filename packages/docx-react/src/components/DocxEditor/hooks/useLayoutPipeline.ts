@@ -167,6 +167,15 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   );
   // The session whose worker failed: its passes lay out on the page.
   const workerFailedSessionRef = useRef<YrsSession | null>(null);
+  // The last font check and what it read: a pass over the same request and
+  // document (the one after the fonts it asked for load, a web-font load's)
+  // reuses its answer instead of reading every story again (Q815).
+  const fontCheckRef = useRef<{
+    session: YrsSession;
+    docEpoch: number;
+    input: string;
+    requirements: ResidentFontRequirement[];
+  } | null>(null);
 
   // Callback refs — parent may hand in a fresh closure every render. Mirroring
   // these in refs keeps `runLayoutPipeline`'s dep array stable; otherwise
@@ -297,10 +306,16 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
 
       let measurement: ResidentMeasurementConfig | null = null;
       try {
-        const request = buildResidentRegionLayoutRequest(document, pageGap, renderEnv);
-        const requirements = JSON.parse(
-          session.layoutFontRequirementsJson(JSON.stringify(request))
-        ) as ResidentFontRequirement[];
+        const input = JSON.stringify(
+          buildResidentRegionLayoutRequest(document, pageGap, renderEnv)
+        );
+        const docEpoch = session.docEpoch();
+        const known = fontCheckRef.current;
+        const requirements =
+          known?.session === session && known.docEpoch === docEpoch && known.input === input
+            ? known.requirements
+            : (JSON.parse(session.layoutFontRequirementsJson(input)) as ResidentFontRequirement[]);
+        fontCheckRef.current = { session, docEpoch, input, requirements };
         measurement = residentMeasurementConfig(requirements);
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);

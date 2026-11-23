@@ -85,6 +85,8 @@ export interface UseRustDisplayListResult {
   ): Promise<boolean>;
   /** True while the worker-painted caret line owns the caret (DOM caret hidden). */
   paintedCaretActive: boolean;
+  /** Starts the session's worker as it opens, seeded from `update` (see YrsSession.residentWorkerSeed). */
+  startWorker(engine: YrsSession, update: Uint8Array | null): void;
   /** Local text input: keeps painted-caret mode alive for follow-up frames. */
   notifyCaretInput(): void;
   /** Text input dispatched: hide the DOM caret before the worker round-trip. */
@@ -741,6 +743,27 @@ export function useRustDisplayList(
     );
   }, [applyPaintedCaretReply, paintedCaretMachine, publishQuerySnapshot]);
 
+  // The worker starts as the session opens (Q815): it loads the state the
+  // page's replica loaded while the page renders, so the first frame request
+  // ships only what changed since. A seed that fails leaves that request to
+  // send the whole state.
+  const startWorker = useCallback((engine: YrsSession, update: Uint8Array | null): void => {
+    if (!canUseResidentEngineWorker() || workerRef.current?.engine === engine) return;
+    const failed = (error: unknown) =>
+      console.error('[CanvasRenderer] Resident engine worker seed failed', error);
+    try {
+      const seed = engine.residentWorkerSeed(update);
+      workerRef.current?.client.destroy();
+      const client = new ResidentEngineWorkerClient();
+      workerRef.current = { engine, client };
+      const seeded = client.seed(seed).catch(failed);
+      // The first frame request's snapshot waits for the seed's state vector.
+      workerInputQueueRef.current = workerInputQueueRef.current.then(() => seeded);
+    } catch (error) {
+      failed(error);
+    }
+  }, []);
+
   const attachOffscreenCanvases = useCallback(
     async (
       pages: ResidentEngineOffscreenPage[],
@@ -963,6 +986,7 @@ export function useRustDisplayList(
     setWorkerPresentationActive,
     attachOffscreenCanvases,
     paintedCaretActive,
+    startWorker,
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
@@ -1105,6 +1129,8 @@ export interface UseCanvasRendererResult {
   } | null;
   /** True while the worker-painted caret line owns the caret (DOM caret hidden). */
   paintedCaretActive: boolean;
+  /** Starts the session's worker as it opens, seeded from the state it loaded. */
+  startWorker(engine: YrsSession, update: Uint8Array | null): void;
   /** Local text input notification for the painted-caret mode machine. */
   notifyCaretInput(): void;
   /** Text input dispatched: hide the DOM caret before the worker round-trip. */
@@ -1154,6 +1180,7 @@ export function useCanvasRenderer(
     setWorkerPresentationActive,
     attachOffscreenCanvases,
     paintedCaretActive,
+    startWorker,
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
@@ -1247,6 +1274,7 @@ export function useCanvasRenderer(
     setWorkerPresentationActive,
     offscreenReplay,
     paintedCaretActive,
+    startWorker,
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,

@@ -249,17 +249,15 @@ pub(crate) fn positions_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(u3
     positions_by_story_where(txn, |_| true)
 }
 
-/// Markers of the stories `wanted` picks, every anchor resolved in one walk
-/// of its story rather than one walk per anchor.
-fn positions_by_story_where<T: ReadTxn>(
-    txn: &T,
-    wanted: impl Fn(&str) -> bool,
-) -> HashMap<String, Vec<(u32, Any)>> {
+/// Every anchor of the bookmarks root decoded, by the story it anchors in:
+/// its entry's data and its start, in the root's order.
+pub(crate) fn anchors_by_story<T: ReadTxn>(txn: &T) -> HashMap<String, Vec<(Any, StickyIndex)>> {
+    #[cfg(test)]
+    tests::ANCHOR_SCANS.with(|scans| scans.set(scans.get() + 1));
+    let mut stories: HashMap<String, Vec<(Any, StickyIndex)>> = HashMap::new();
     let Some(root) = txn.get_map(ROOT) else {
-        return HashMap::new();
+        return stories;
     };
-    let mut found: Vec<(String, Any)> = Vec::new();
-    let mut starts: Vec<StickyIndex> = Vec::new();
     for (_, value) in root.iter(txn) {
         let Out::YMap(entry) = value else {
             continue;
@@ -270,12 +268,46 @@ fn positions_by_story_where<T: ReadTxn>(
             continue;
         };
         for encoded in anchors.iter() {
-            if let Ok(anchor) = decode_anchor(encoded)
-                && wanted(&anchor.story)
-            {
-                found.push((anchor.story, data.clone()));
-                starts.push(anchor.start);
+            if let Ok(anchor) = decode_anchor(encoded) {
+                stories
+                    .entry(anchor.story)
+                    .or_default()
+                    .push((data.clone(), anchor.start));
             }
+        }
+    }
+    stories
+}
+
+/// One story's `positions` from its decoded `anchors` ([`anchors_by_story`]).
+pub(crate) fn positions_of<T: ReadTxn>(txn: &T, anchors: &[(Any, StickyIndex)]) -> Vec<(u32, Any)> {
+    let starts: Vec<StickyIndex> = anchors.iter().map(|(_, start)| start.clone()).collect();
+    #[cfg(test)]
+    tests::RESOLVED_BATCHES.with(|batches| batches.borrow_mut().push(starts.len()));
+    ordered(
+        anchors
+            .iter()
+            .zip(StickyIndex::get_offsets(txn, &starts))
+            .filter_map(|((data, _), at)| Some((at?.index, data.clone())))
+            .collect(),
+    )
+}
+
+/// Markers of the stories `wanted` picks, every anchor resolved in one walk
+/// of its story rather than one walk per anchor.
+fn positions_by_story_where<T: ReadTxn>(
+    txn: &T,
+    wanted: impl Fn(&str) -> bool,
+) -> HashMap<String, Vec<(u32, Any)>> {
+    let mut found: Vec<(String, Any)> = Vec::new();
+    let mut starts: Vec<StickyIndex> = Vec::new();
+    for (story, anchors) in anchors_by_story(txn) {
+        if !wanted(&story) {
+            continue;
+        }
+        for (data, start) in anchors {
+            found.push((story.clone(), data));
+            starts.push(start);
         }
     }
     #[cfg(test)]
@@ -566,6 +598,8 @@ mod tests {
         /// The anchor count of every batch a bookmark read resolved.
         pub(super) static RESOLVED_BATCHES: RefCell<Vec<usize>> =
             const { RefCell::new(Vec::new()) };
+        /// How many times the bookmarks root's anchors were decoded.
+        pub(super) static ANCHOR_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
     fn resolved_batches() -> Vec<usize> {
@@ -798,6 +832,87 @@ mod tests {
         let markers = positions(&txn, "body");
         assert_eq!(markers.len(), 2 * PARAGRAPHS as usize);
         assert_eq!(markers.last().unwrap().0, (PARAGRAPHS - 1) * 20 + 9);
+    }
+
+    /// The editor's position map reads every story, a table's cells too: the
+    /// bookmark anchors are decoded once per document state, not once per
+    /// story, and a change decodes them again (Q815).
+    #[test]
+    fn story_reads_decode_the_bookmark_anchors_once_per_document_state() {
+        let doc = EditingDoc::new(9);
+        doc.create_story("body", "One two three", "Normal", "left")
+            .unwrap();
+        doc.create_story("fn:1", "A footnote.", "Normal", "left")
+            .unwrap();
+        bookmark(&doc, "body", 1, 0, 3);
+        bookmark(&doc, "fn:1", 2, 0, 1);
+        let scans = || ANCHOR_SCANS.with(|scans| scans.replace(0));
+        scans();
+        let body = doc.story_segments("body").unwrap();
+        let note = doc.story_segments("fn:1").unwrap();
+        assert_eq!(doc.story_segments("body").unwrap(), body);
+        assert_eq!(scans(), 1);
+        // Each story's markers as reading the anchors for every story at once gives them.
+        let all = doc.all_story_segments();
+        assert_eq!((&all["body"], &all["fn:1"]), (&body, &note));
+        scans();
+        bookmark(&doc, "body", 3, 4, 7);
+        let changed = doc.story_segments("body").unwrap();
+        assert_eq!(scans(), 1);
+        assert_ne!(changed, body);
+        assert_eq!(changed, doc.all_story_segments()["body"]);
+    }
+
+    /// The decoded anchors are kept for the document epoch, which every
+    /// transaction moves: a table cell's markers, a peer's bookmark and the
+    /// undo and redo of one read as reading every story at once does (Q815).
+    #[test]
+    fn cached_anchors_follow_table_cells_peers_and_undo() {
+        let ctx = EditCtx::local("", "");
+        let doc = EditingDoc::new(9);
+        doc.create_story("body", "One two three", "Normal", "left")
+            .unwrap();
+        let cell = doc
+            .insert_table(&ctx, Position::new("body", 0), 1, 1, 12)
+            .unwrap()
+            .created_story_ids
+            .remove(0);
+        doc.insert_text(
+            &ctx,
+            Position::new(&cell, 0),
+            "Cell text",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        bookmark(&doc, &cell, 1, 0, 4);
+        let read = |story: &str| {
+            let segments = doc.story_segments(story).unwrap();
+            assert_eq!(segments, doc.all_story_segments()[story], "{story}");
+            segments
+        };
+        let cell_marked = read(&cell);
+
+        // A peer's bookmark in the cell, arriving as its update.
+        let peer = EditingDoc::new(10);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        bookmark(&peer, &cell, 2, 5, 9);
+        let update = peer.encode_diff_v1(&doc.encode_state_vector_v1()).unwrap();
+        doc.applying_peer_update(|| doc.apply_update_v1(&update).unwrap());
+        assert_ne!(read(&cell), cell_marked);
+
+        // A bookmark in the body, undone and redone.
+        let body = read("body");
+        let undo = crate::UndoSession::new();
+        undo.track(&doc);
+        bookmark(&doc, "body", 3, 0, 3);
+        undo.add_undo_barrier();
+        let marked = read("body");
+        assert_ne!(marked, body);
+        assert!(undo.undo());
+        assert_eq!(read("body"), body);
+        assert!(undo.redo());
+        assert_eq!(read("body"), marked);
     }
 
     /// A peer sets a bookmark's start again on text another peer deleted and

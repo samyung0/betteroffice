@@ -1,6 +1,7 @@
 import type {
   YrsEngineApplyProfile,
   YrsResidentCaretSnapshot,
+  YrsResidentWorkerSeed,
   YrsResidentWorkerSnapshot,
   YrsSelection,
 } from './index';
@@ -8,6 +9,13 @@ import type { ResidentCaretPaintStyle } from './residentCaret';
 import type { ResidentFontError } from './residentProgressiveFonts';
 
 export type ResidentEngineWorkerRequest =
+  | {
+      /** The replica's starting state, before any frame request: a later
+       * bootstrap keeps it and applies only its snapshot's diff. */
+      id: number;
+      type: 'seed';
+      seed: YrsResidentWorkerSeed;
+    }
   | {
       id: number;
       type: 'bootstrap';
