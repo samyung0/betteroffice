@@ -235,6 +235,9 @@ pub struct StorySegment {
 /// does not change.
 pub struct BookmarkPositions(HashMap<String, Vec<(u32, Any)>>);
 
+/// Every story's bookmark and field-boundary anchors, decoded but not resolved.
+type BookmarkAnchors = HashMap<String, Vec<(Any, StickyIndex)>>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParagraphSnapshot {
     pub para_id: ParagraphId,
@@ -633,6 +636,7 @@ pub struct EditingDoc {
     /// with the epoch before it ([`segments::follow_commit`]).
     segment_indexes: Arc<Mutex<segments::Indexes>>,
     chunk_snapshots: Mutex<EpochCache<Vec<ops::Chunk>>>,
+    bookmark_anchors: Mutex<Option<(u64, Arc<BookmarkAnchors>)>>,
     story_revisions: Arc<Mutex<StoryRevisions>>,
     table_membership: Mutex<Option<TableMembership>>,
     revision_lists: Mutex<StoryCache<Vec<RevisionInfo>>>,
@@ -692,6 +696,7 @@ impl EditingDoc {
             epoch,
             segment_indexes,
             chunk_snapshots: Mutex::default(),
+            bookmark_anchors: Mutex::new(None),
             story_revisions,
             table_membership: Mutex::new(None),
             revision_lists: Mutex::default(),
@@ -1160,10 +1165,30 @@ impl EditingDoc {
     }
 
     pub fn story_segments(&self, story_id: &str) -> EditResult<Vec<StorySegment>> {
+        let anchors = self.bookmark_anchors();
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
-        let bookmarks = bookmarks::paragraph_properties(&txn, story_id, &story);
+        let markers = anchors
+            .get(story_id)
+            .map_or_else(Vec::new, |anchors| bookmarks::positions_of(&txn, anchors));
+        let bookmarks = bookmarks::paragraph_properties_at(&txn, &story, &markers);
         Ok(segments_of(&txn, &story, &bookmarks))
+    }
+
+    /// The bookmarks root's anchors, decoded once per committed epoch: a
+    /// reader of every story (the editor's position map over a table's cells,
+    /// a save) decodes them once, not once per story.
+    fn bookmark_anchors(&self) -> Arc<BookmarkAnchors> {
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let mut cached = self.bookmark_anchors.lock().unwrap();
+        if let Some((at, anchors)) = cached.as_ref()
+            && *at == epoch
+        {
+            return Arc::clone(anchors);
+        }
+        let anchors = Arc::new(bookmarks::anchors_by_story(&self.doc.transact()));
+        *cached = Some((epoch, Arc::clone(&anchors)));
+        anchors
     }
 
     /// [`Self::story_segments`] for a reader of many stories: one story's read
