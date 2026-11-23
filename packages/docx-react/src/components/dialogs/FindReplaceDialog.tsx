@@ -9,7 +9,7 @@
  * - useFindReplace.ts   — React hook for dialog state management
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, ChangeEvent } from 'react';
 import { useTranslation } from '../../i18n';
 import { DrawnIcon } from '../ui/Icons';
@@ -321,6 +321,7 @@ export function FindReplaceDialog({
   const [result, setResult] = useState<FindResult | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [replaceFocused, setReplaceFocused] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(0);
 
   // Refs
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -343,21 +344,26 @@ export function FindReplaceDialog({
   }, [currentResult]);
 
   // Initialize when dialog opens
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (isOpen) {
       setSearchText(initialSearchText);
       setReplaceText('');
       setShowReplace(replaceMode);
       setResult(null);
-
-      setTimeout(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      }, 100);
+      setFocusRequest((request) => request + 1);
     } else {
       onClearHighlightsRef.current?.();
     }
   }, [isOpen, initialSearchText, replaceMode]);
+
+  // The box takes the focus with its seed selected in the commit that shows the
+  // seed, which React runs before the browser handles another key: every key
+  // typed after the opening shortcut reaches Find (Q825 A).
+  useLayoutEffect(() => {
+    if (focusRequest === 0) return;
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [focusRequest]);
 
   const clearSearchResult = useCallback(() => {
     setResult(null);
