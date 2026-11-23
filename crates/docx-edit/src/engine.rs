@@ -822,6 +822,53 @@ struct DisplayState {
     rebuilt_display_pages: u64,
 }
 
+struct UnbuiltDisplayInput {
+    layout_epoch: u64,
+    extras_fingerprint: u64,
+    input: docx_layout::display_list::ResidentDisplayInput,
+}
+
+/// Pages a frame builds besides what changed (Q815 C).
+#[derive(Clone, Copy)]
+enum PageBuild<'a> {
+    /// When every page is built anew, only this many from the first.
+    First(usize),
+    /// These pages of the retained list, if unbuilt.
+    Unbuilt(&'a [usize]),
+}
+
+/// Builds the unbuilt pages among `pages` of `list` in place, each run of
+/// consecutive pages as one range, and returns those built.
+fn build_unbuilt_pages(
+    resident: &mut docx_layout::display_list::ResidentDisplayInput,
+    input: &LayoutInput,
+    layout: &Layout,
+    list: &mut DisplayList,
+    pages: &[usize],
+) -> Result<Vec<usize>, String> {
+    let mut wanted: Vec<usize> = pages
+        .iter()
+        .copied()
+        .filter(|&index| list.pages.get(index).is_some_and(|page| page.unbuilt))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    for run in wanted.chunk_by(|a, b| *b == a + 1) {
+        let range = run[0]..run[run.len() - 1] + 1;
+        let built = docx_layout::build_resident_display_pages_from_observed(
+            resident,
+            input,
+            layout,
+            range.clone(),
+            &mut || {},
+        )?;
+        for (index, page) in range.zip(built.pages) {
+            list.pages[index] = page;
+        }
+    }
+    Ok(wanted)
+}
+
 /// Engine observability snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineStats {
@@ -918,6 +965,9 @@ pub struct EngineSession {
     regions: RefCell<Option<ResidentRegionState>>,
     pagination: RefCell<PaginationState>,
     display: RefCell<DisplayState>,
+    /// The display input the retained list's unbuilt pages are built with, for
+    /// the layout epoch and extras it was parsed from (Q815 C).
+    unbuilt_input: RefCell<Option<UnbuiltDisplayInput>>,
     /// Source package media, part path to display data URL. Lowering swaps
     /// `media:<part>` image sources for these; an unknown part stays
     /// unresolved and paints nothing.
@@ -1375,6 +1425,7 @@ impl EngineSession {
             regions: RefCell::new(None),
             pagination: RefCell::new(PaginationState::default()),
             display: RefCell::new(DisplayState::default()),
+            unbuilt_input: RefCell::new(None),
             media: RefCell::new(HashMap::new()),
             region_fast_path: Cell::new((0, None)),
         }
@@ -3260,14 +3311,84 @@ impl EngineSession {
         self.build_display_list_frame_observed(extras_json, expected_frame_epoch, &mut || {})
     }
 
+    /// [`Self::build_display_list_frame`] for an editor's first frame: when
+    /// every page is built anew, only the first `first_pages` are, and the
+    /// others stay unbuilt placeholders (their size and position span) until
+    /// [`Self::build_unbuilt_display_pages_frame`] builds them (Q815 C).
+    pub fn build_display_list_frame_first(
+        &self,
+        extras_json: &str,
+        expected_frame_epoch: u64,
+        first_pages: usize,
+    ) -> Result<Vec<u8>, String> {
+        let extras = if self.regions.borrow().is_some() {
+            self.region_display_extras(extras_json)?
+        } else {
+            extras_json.to_owned()
+        };
+        self.build_display_list_frame_pages(
+            &extras,
+            expected_frame_epoch,
+            &mut || {},
+            Some(PageBuild::First(first_pages)),
+        )
+    }
+
+    /// Builds the unbuilt pages among `pages` of the retained list, with the
+    /// builder a whole build uses, and returns the FrameDelta of those pages
+    /// (Q815 C).
+    pub fn build_unbuilt_display_pages_frame(
+        &self,
+        pages: &[usize],
+        expected_frame_epoch: u64,
+    ) -> Result<Vec<u8>, String> {
+        let extras = self
+            .display
+            .borrow()
+            .extras_json
+            .clone()
+            .ok_or_else(|| "resident display extras are not built".to_owned())?;
+        self.build_display_list_frame_pages(
+            &extras,
+            expected_frame_epoch,
+            &mut || {},
+            Some(PageBuild::Unbuilt(pages)),
+        )
+    }
+
+    /// The retained layout's page heights, in display pixels.
+    pub fn layout_page_heights(&self) -> Vec<f64> {
+        let pagination = self.pagination.borrow();
+        let pages = pagination
+            .layout
+            .as_ref()
+            .map_or(&[][..], |layout| &layout.pages);
+        pages.iter().map(|page| page.size.h).collect()
+    }
+
     fn build_display_list_frame_observed(
         &self,
         extras_json: &str,
         expected_frame_epoch: u64,
         observe_display_phase: &mut impl FnMut(),
     ) -> Result<Vec<u8>, String> {
+        self.build_display_list_frame_pages(
+            extras_json,
+            expected_frame_epoch,
+            observe_display_phase,
+            None,
+        )
+    }
+
+    fn build_display_list_frame_pages(
+        &self,
+        extras_json: &str,
+        expected_frame_epoch: u64,
+        observe_display_phase: &mut impl FnMut(),
+        pages: Option<PageBuild<'_>>,
+    ) -> Result<Vec<u8>, String> {
         let extras_fingerprint = hash_bytes(extras_json.as_bytes());
-        let (incremental_build, rebuilt_display_pages, rebuilt_page_start, rebuilt_page_end) = {
+        let (incremental_build, rebuilt_display_pages, rebuilt_pages) = {
             let pagination = self.pagination.borrow();
             let input = pagination
                 .input
@@ -3304,9 +3425,52 @@ impl EngineSession {
                 };
             if current {
                 observe_display_phase();
-                (true, 0, 0, 0)
+                let built = match (pages, display.list.as_mut()) {
+                    (Some(PageBuild::Unbuilt(pages)), Some(list)) => {
+                        let mut cached = self.unbuilt_input.borrow_mut();
+                        if !cached.as_ref().is_some_and(|cached| {
+                            cached.layout_epoch == pagination.layout_epoch
+                                && cached.extras_fingerprint == extras_fingerprint
+                        }) {
+                            *cached = Some(UnbuiltDisplayInput {
+                                layout_epoch: pagination.layout_epoch,
+                                extras_fingerprint,
+                                input: docx_layout::display_list::ResidentDisplayInput::new(
+                                    input,
+                                    layout,
+                                    extras_json,
+                                )?,
+                            });
+                        }
+                        let resident = &mut cached.as_mut().expect("cached above").input;
+                        build_unbuilt_pages(resident, input, layout, list, pages)?
+                    }
+                    _ => Vec::new(),
+                };
+                (true, built.len(), built)
             } else if incremental {
-                (true, rebuilt.len(), rebuilt.start, rebuilt.end)
+                (true, rebuilt.len(), rebuilt.collect())
+            } else if let Some(PageBuild::First(first)) = pages
+                && first < layout.pages.len()
+            {
+                let mut resident = docx_layout::display_list::ResidentDisplayInput::new(
+                    input,
+                    layout,
+                    extras_json,
+                )?;
+                display.list = Some(docx_layout::build_resident_display_pages_first_observed(
+                    &mut resident,
+                    input,
+                    layout,
+                    0..first,
+                    observe_display_phase,
+                )?);
+                *self.unbuilt_input.borrow_mut() = Some(UnbuiltDisplayInput {
+                    layout_epoch: pagination.layout_epoch,
+                    extras_fingerprint,
+                    input: resident,
+                });
+                (false, first, Vec::new())
             } else {
                 display.list = Some(docx_layout::build_resident_display_pages_observed(
                     input,
@@ -3315,7 +3479,7 @@ impl EngineSession {
                     0..layout.pages.len(),
                     observe_display_phase,
                 )?);
-                (false, layout.pages.len(), 0, layout.pages.len())
+                (false, layout.pages.len(), Vec::new())
             }
         };
         observe_display_phase();
@@ -3357,7 +3521,7 @@ impl EngineSession {
                     previous_pages,
                     epochs,
                     &mut next_page_id,
-                    &(rebuilt_page_start..rebuilt_page_end).collect(),
+                    &rebuilt_pages.into_iter().collect(),
                 )?
             } else {
                 encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?

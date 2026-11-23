@@ -126,6 +126,7 @@ export function useFileIO({
   pagedEditorRef,
   documentFromYrs,
   displayList,
+  wholeDisplayList,
   resolveImage,
   documentName,
   onSave,
@@ -144,6 +145,8 @@ export function useFileIO({
   /** The session's document, with no view on it. */
   documentFromYrs?: () => Document | null;
   displayList: DisplayList | null;
+  /** The newest list with every page built (see usePagedList). */
+  wholeDisplayList: () => Promise<DisplayList>;
   resolveImage: ImageResolver;
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
@@ -212,8 +215,10 @@ export function useFileIO({
       onPrint?.();
       return;
     }
-    printDisplayListPages(displayList, resolveImage, onPrint);
-  }, [displayList, resolveImage, onPrint]);
+    // Every page, built: an editor builds the pages out of its first view
+    // after it (Q815 C).
+    void wholeDisplayList().then((list) => printDisplayListPages(list, resolveImage, onPrint));
+  }, [displayList, wholeDisplayList, resolveImage, onPrint]);
 
   const handleDownloadDocument = useCallback((): Promise<void> => {
     if (saveRequestRef.current) return saveRequestRef.current;

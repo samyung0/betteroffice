@@ -52,6 +52,7 @@ function setup(
     const io = useFileIO({
       pagedEditorRef,
       displayList: null,
+      wholeDisplayList: () => new Promise(() => {}),
       resolveImage: () => null,
       documentName: 'saved',
       onSave: (buffer) => {
@@ -258,6 +259,7 @@ test('an inserted image is the file prepareImage returns: one at a time, pending
       useFileIO({
         pagedEditorRef: { current: editor },
         displayList: null,
+        wholeDisplayList: () => new Promise(() => {}),
         resolveImage: () => null,
         documentName: 'doc',
         onSave: undefined,
@@ -342,6 +344,7 @@ test("with the editor's view gone, a save exports what the session holds", async
       pagedEditorRef: { current: null },
       documentFromYrs: () => structuredClone(fixture),
       displayList: null,
+      wholeDisplayList: () => new Promise(() => {}),
       resolveImage: () => null,
       documentName: 'doc',
       onSave: undefined,

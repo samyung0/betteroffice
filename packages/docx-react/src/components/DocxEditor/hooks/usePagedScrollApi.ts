@@ -78,6 +78,9 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
     [canvasHostRef, displayListQueries, getScrollContainer, pagesContainerRef]
   );
 
+  // A position on a page not built yet (Q815 C): the query asked for the
+  // page, and the scroll follows once it is built.
+  const pendingScrollRef = useRef<{ pos: number; smooth: boolean } | null>(null);
   const scrollToPositionImpl = useCallback(
     (pmPos: number, forParaIdScroll = false) => {
       if (!Number.isInteger(pmPos) || pmPos < 0 || !displayListQueries) return;
@@ -85,10 +88,22 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       scrollAbortRef.current?.abort();
       scrollAbortRef.current = new AbortController();
       const rect = displayListQueries.anchorRect(pmPos);
+      pendingScrollRef.current = null;
       if (rect) scrollRectIntoView(rect, !forParaIdScroll);
+      else if (displayListQueries.displayList.pages.some((page) => page.unbuilt)) {
+        pendingScrollRef.current = { pos: pmPos, smooth: !forParaIdScroll };
+      }
     },
     [displayListQueries, onNavigationIntent, scrollRectIntoView]
   );
+  useEffect(() => {
+    const pending = pendingScrollRef.current;
+    if (!pending || !displayListQueries) return;
+    const rect = displayListQueries.anchorRect(pending.pos);
+    if (!rect && displayListQueries.displayList.pages.some((page) => page.unbuilt)) return;
+    pendingScrollRef.current = null;
+    if (rect) scrollRectIntoView(rect, pending.smooth);
+  }, [displayListQueries, scrollRectIntoView]);
 
   const scrollToPageImpl = useCallback(
     (pageNumber: number): void => {

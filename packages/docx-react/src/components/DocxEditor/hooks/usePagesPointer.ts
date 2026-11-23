@@ -113,6 +113,8 @@ export interface UsePagesPointerOptions {
   /** the non-body part open for editing — the body is inert behind it */
   partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
+  /** Resolves once these pages are built (Q815 C: pages out of view build after the first frame). */
+  ensureDisplayPages?: (pageIndices: number[]) => Promise<void>;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   canvasOverlayTarget?: HTMLElement | null;
   onBodyClick?: () => void;
@@ -232,6 +234,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     readOnly,
     partEdit = null,
     displayListQueries,
+    ensureDisplayPages,
     canvasHostRef,
     canvasOverlayTarget,
     onBodyClick,
@@ -540,6 +543,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const placeHeldPress = (): void => {
     const held = heldPressRef.current;
     if (!held?.drained || !displayListQueries) return;
+    // A press on a page not built yet places once it is (Q815 C).
+    if (held.page && displayListQueries.displayList.pages[Number(held.page.index)]?.unbuilt) return;
     heldPressRef.current = null;
     let placed = false;
     try {
@@ -567,14 +572,21 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       e.preventDefault();
       if (readOnly) return;
       const input = yrsInputRef.current;
-      if (displayListQueries && !heldPressRef.current && !input?.inputPending()) {
+      // A press on a page not built yet holds, as one before the geometry (Q815 C).
+      const unbuiltPress = displayListQueries?.displayList.pages.some((page) => page.unbuilt)
+        ? pressPage(hostElement(), e.clientX, e.clientY)
+        : null;
+      const unbuiltIndex = Number(unbuiltPress?.index);
+      const onUnbuilt = Boolean(displayListQueries?.displayList.pages[unbuiltIndex]?.unbuilt);
+      if (displayListQueries && !onUnbuilt && !heldPressRef.current && !input?.inputPending()) {
         placePress(e, false);
         return;
       }
+      if (onUnbuilt) void ensureDisplayPages?.([unbuiltIndex]);
       // No click may follow, on a drag off the pages: the input takes the keys from here.
       focusInput();
       if (!partEdit) setIsFocused(true);
-      const page = pressPage(hostElement(), e.clientX, e.clientY);
+      const page = unbuiltPress ?? pressPage(hostElement(), e.clientX, e.clientY);
       const earlier = heldPressRef.current;
       if (earlier) {
         // The last press wins; only the first holds the input.
@@ -605,6 +617,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       displayListQueries,
       dropHeldPress,
       endHeldPress,
+      ensureDisplayPages,
       focusInput,
       pagesContainerRef,
       partEdit,

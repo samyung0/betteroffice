@@ -47,6 +47,13 @@ export type ResidentEngineSession = Pick<
   docEpoch(): number;
   /** The retained `{ layout, headersFooters? }` JSON, without laying out again. */
   retainedRegionLayoutJson(): string;
+  /** An editor's first frame: when every page is built anew, only the first
+   * `firstPages` are, and the rest stay unbuilt (Q815 C). */
+  buildDisplayListFrameFirst(extras: string, expectedFrameEpoch: number, firstPages: number): Uint8Array;
+  /** Builds the unbuilt pages among `pages` (indices) and returns their FrameDelta. */
+  buildUnbuiltPagesFrame(pages: Uint32Array, expectedFrameEpoch: number): Uint8Array;
+  /** The retained layout's page heights, in display pixels. */
+  layoutPageHeights(): Float64Array;
 };
 
 export async function createResidentEngineSession(
@@ -93,6 +100,11 @@ export async function createResidentEngineSession(
       session.layout_document_with_regions_retained_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
+    buildDisplayListFrameFirst: (input, expectedFrameEpoch, firstPages) =>
+      session.build_display_list_frame_first(input, expectedFrameEpoch, firstPages),
+    buildUnbuiltPagesFrame: (pages, expectedFrameEpoch) =>
+      session.build_unbuilt_display_pages_frame(pages, expectedFrameEpoch),
+    layoutPageHeights: () => session.layout_page_heights(),
     relayoutFrame: (layoutInput, extras, expectedFrameEpoch) =>
       session.relayout_frame(layoutInput, extras, expectedFrameEpoch),
     retainedRegionLayoutJson: () => session.retained_region_layout_json(),

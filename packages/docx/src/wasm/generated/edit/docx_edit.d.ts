@@ -167,10 +167,22 @@ export class EditSession {
      */
     build_display_list_frame(input: string, expected_frame_epoch: number): Uint8Array;
     /**
+     * [`EditSession::build_display_list_frame`] for an editor's first frame:
+     * when every page is built anew, only the first `first_pages` are and the
+     * others stay unbuilt until
+     * [`EditSession::build_unbuilt_display_pages_frame`] builds them (Q815 C).
+     */
+    build_display_list_frame_first(input: string, expected_frame_epoch: number, first_pages: number): Uint8Array;
+    /**
      * `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
      * against the same resident font store this session measures with.
      */
     build_display_list_json(input: string): string;
+    /**
+     * Builds the unbuilt pages among `pages` (page indices) of the retained
+     * list and returns the FrameDelta of those pages (Q815 C).
+     */
+    build_unbuilt_display_pages_frame(pages: Uint32Array, expected_frame_epoch: number): Uint8Array;
     /**
      * Whether [`EditSession::redo`] would reapply something.
      */
@@ -480,6 +492,11 @@ export class EditSession {
      * needs as JSON out, so the host can register fonts before laying out.
      */
     layout_font_requirements_json(input: string): string;
+    /**
+     * The retained layout's page heights in display pixels, for choosing the
+     * pages a first frame builds.
+     */
+    layout_page_heights(): Float64Array;
     list_comments(): string;
     /**
      * Every pending tracked change across all stories, in deterministic
@@ -1194,7 +1211,9 @@ export interface InitOutput {
     readonly editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_autofit_table: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_build_display_list_frame_first: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_build_unbuilt_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly editsession_can_redo: (a: number) => number;
     readonly editsession_can_undo: (a: number) => number;
     readonly editsession_cell_selection: (a: number) => [number, number, number, number];
@@ -1242,6 +1261,7 @@ export interface InitOutput {
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_page_heights: (a: number) => [number, number];
     readonly editsession_list_comments: (a: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];

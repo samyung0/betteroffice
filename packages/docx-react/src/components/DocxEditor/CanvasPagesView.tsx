@@ -74,6 +74,7 @@ export function CanvasPagedArea({
           onGlyphOutlines={renderer.onGlyphOutlines}
           offscreenReplay={renderer.offscreenReplay}
           onWorkerPresentationChange={renderer.setWorkerPresentationActive}
+          onVisiblePages={renderer.setVisiblePages}
         />
       ) : renderer.status === 'error' ? (
         <div data-testid="canvas-renderer-error" role="alert" style={{ minHeight: 240 }}>
@@ -266,6 +267,7 @@ export function CanvasPagesView({
   onGlyphOutlines,
   offscreenReplay,
   onWorkerPresentationChange,
+  onVisiblePages,
   morePages = false,
 }: {
   displayList: DisplayList;
@@ -306,6 +308,8 @@ export function CanvasPagesView({
   /** Dedicated worker replay surface; unsupported/media-heavy pages use DOM canvas. */
   offscreenReplay?: UseCanvasRendererResult['offscreenReplay'];
   onWorkerPresentationChange?: (active: boolean) => void;
+  /** The pages the viewport shows, as it scrolls (unbuilt ones build first, Q815 C). */
+  onVisiblePages?: (first: number, last: number) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
@@ -434,6 +438,7 @@ export function CanvasPagesView({
         }
       }
       windowMeasuredRef.current = true;
+      onVisiblePages?.(first, last);
       setPageWindow((previous) => nextPageWindow(previous, first, last, tops.length));
     };
     const schedule = (): void => {
@@ -449,7 +454,7 @@ export function CanvasPagesView({
       scrollTarget.removeEventListener('scroll', schedule);
       window.removeEventListener('resize', schedule);
     };
-  }, [windowingEnabled, pageOffsets]);
+  }, [windowingEnabled, pageOffsets, onVisiblePages]);
   // Until the first measurement lands (set pre-paint by the layout effect
   // above), the replay effect is deferred entirely — never guess a window
   // that could blank a visible page, and never raster every page of a large

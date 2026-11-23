@@ -13398,6 +13398,63 @@ pub fn build_resident_display_pages_from_with_fonts_observed(
     Ok(list)
 }
 
+/// Builds display pages `first` as
+/// [`build_resident_display_pages_from_with_fonts_observed`] does; every other
+/// page is an unbuilt placeholder carrying its geometry and position span, for
+/// the host to build later with the same builder (an editor's visible pages
+/// first, Q815 C).
+pub fn build_resident_display_pages_first_with_fonts_observed(
+    input: &mut ResidentDisplayInput,
+    pagination: &crate::types::Input,
+    layout: &crate::types::Layout,
+    fonts: &ooxml_text::FontStore,
+    first: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<DisplayList, String> {
+    let built = build_resident_display_pages_from_with_fonts_observed(
+        input,
+        pagination,
+        layout,
+        fonts,
+        first.clone(),
+        observe_phase,
+    )?;
+    let blocks = source_blocks_by_key(
+        pagination,
+        layout
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !first.contains(index))
+            .map(|(_, page)| page),
+    );
+    let mut built_pages = built.pages.into_iter();
+    let pages = input
+        .input
+        .layout
+        .pages
+        .iter()
+        .enumerate()
+        .map(|(index, page)| {
+            if first.contains(&index) {
+                return built_pages
+                    .next()
+                    .ok_or_else(|| "resident display first pages are missing".to_owned());
+            }
+            Ok(unbuilt_page_with_span(
+                page,
+                index,
+                layout_page_position_span(&layout.pages[index], &blocks)?,
+                input.input.headers_footers.as_ref(),
+            ))
+        })
+        .collect::<Result<_, String>>()?;
+    Ok(DisplayList {
+        contract_version: built.contract_version,
+        pages,
+    })
+}
+
 /// Rebuilds the pages pagination dirtied in `previous` and patches absolute
 /// body positions on the converged suffix after them. `Ok(false)` leaves
 /// `previous` untouched when its page count no longer matches the layout.
@@ -13434,7 +13491,11 @@ pub fn update_resident_display_pages_with_fonts_observed(
         .skip(rebuilt_pages.end)
     {
         page.page_index = page_index as u64;
-        shift_page_body_positions(page, position_deltas);
+        if page.unbuilt {
+            shift_unbuilt_span(page, layout.pages.get(page_index), position_deltas);
+        } else {
+            shift_page_body_positions(page, position_deltas);
+        }
     }
     Ok(true)
 }

@@ -32,7 +32,9 @@ export const editsession_apply_update: (a: number, b: number, c: number) => [num
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_autofit_table: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const editsession_build_display_list_frame_first: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_build_display_list_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_build_unbuilt_display_pages_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const editsession_can_redo: (a: number) => number;
 export const editsession_can_undo: (a: number) => number;
 export const editsession_cell_selection: (a: number) => [number, number, number, number];
@@ -80,6 +82,7 @@ export const editsession_layout_document_json: (a: number, b: number, c: number)
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_page_heights: (a: number) => [number, number];
 export const editsession_list_comments: (a: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
 export const editsession_load: (a: number, b: number, c: number) => [number, number];

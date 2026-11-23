@@ -11,6 +11,7 @@ import {
   isDisplayListQuerySourceDead,
   type DisplayList,
   type DisplayListQueries,
+  type DisplayPage,
   type GlyphOutlineProvider,
   type ImageResolver,
   type RustDisplayListEngine,
@@ -28,6 +29,7 @@ import {
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
   type ResidentEngineWorkerFrame,
+  type ResidentFirstPagesViewport,
   type SlicedPaint,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
@@ -93,6 +95,14 @@ export interface UseRustDisplayListResult {
   notifyCaretInputDispatched(): void;
   /** Selection move / blur / IME start / mode change: immediate swap to the DOM caret. */
   notifyCaretInterrupt(): void;
+  /** Resolves once these pages are built (Q815 C: a first frame leaves the pages out of view unbuilt). */
+  ensurePages(pageIndices: number[]): Promise<void>;
+  /** The pages in view, which build first. */
+  setVisiblePages(first: number, last: number): void;
+  /** Resolves once the pages in view are built (every page before the view is known). */
+  ensureVisiblePages(): Promise<void>;
+  /** Unbuilt pages may hold pictures only the page can draw. */
+  unbuiltMayHoldImages: boolean;
 }
 
 export interface ResidentFrameApplyResult {
@@ -135,6 +145,37 @@ interface WorkerFrameRequest {
   fallback(cause: unknown): void;
 }
 
+/** Unbuilt pages one request builds (as DOCX View's batches). */
+const PAGE_BUILD_BATCH = 8;
+
+/** The next unbuilt pages to build: those in view, those asked for, then
+ * outward from the view (from the top without one). */
+export function pageBuildBatch(
+  pages: readonly DisplayPage[],
+  visible: { first: number; last: number } | null,
+  demanded: Iterable<number>
+): number[] {
+  const batch: number[] = [];
+  const add = (index: number): void => {
+    if (batch.length < PAGE_BUILD_BATCH && pages[index]?.unbuilt && !batch.includes(index)) {
+      batch.push(index);
+    }
+  };
+  const first = visible?.first ?? 0;
+  const last = visible?.last ?? -1;
+  for (let index = first; index <= last; index += 1) add(index);
+  for (const index of demanded) add(index);
+  for (
+    let step = 1;
+    batch.length < PAGE_BUILD_BATCH && (last + step < pages.length || first - step >= 0);
+    step += 1
+  ) {
+    add(last + step);
+    add(first - step);
+  }
+  return batch;
+}
+
 const EMPTY_DISPLAY_LIST_SNAPSHOT: RustDisplayListSnapshot = {
   displayList: null,
   frame: null,
@@ -162,7 +203,9 @@ export function useRustDisplayList(
   // Changing the set rebuilds the display list so resolve/reopen — and the
   // "expanded resolved card re-tints its range" flow — repaint immediately.
   resolvedCommentIds?: ReadonlySet<number>,
-  engine?: RustDisplayListEngine | null
+  engine?: RustDisplayListEngine | null,
+  // The viewport the worker's first frame fills; the other pages build later.
+  firstPagesViewport?: React.RefObject<(() => ResidentFirstPagesViewport | null) | null>
 ): UseRustDisplayListResult {
   const [snapshot, setSnapshot] = useState<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
   const snapshotRef = useRef<RustDisplayListSnapshot>(EMPTY_DISPLAY_LIST_SNAPSHOT);
@@ -187,6 +230,30 @@ export function useRustDisplayList(
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
   const workerPresentationActiveRef = useRef(false);
   const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
+
+  // Pages the worker's frames leave unbuilt (Q815 C) build a batch at a time
+  // on the worker's queue, between the other requests.
+  const visiblePagesRef = useRef<{ first: number; last: number } | null>(null);
+  const demandedPagesRef = useRef(new Set<number>());
+  const pageBuildQueuedRef = useRef(false);
+  const runPageBuildRef = useRef<() => Promise<void>>(async () => {});
+  const pageWaitersRef = useRef(new Set<{ pages: number[]; resolve: () => void }>());
+  const workerMediaRef = useRef(false);
+  const schedulePageBuilds = useCallback((): void => {
+    if (pageBuildQueuedRef.current || !workerRef.current) return;
+    pageBuildQueuedRef.current = true;
+    const run = (): Promise<void> => runPageBuildRef.current();
+    workerInputQueueRef.current = workerInputQueueRef.current
+      .then(run, run)
+      .catch((error) => console.error('[CanvasRenderer] Page build failed', error));
+  }, []);
+  const demandPages = useCallback(
+    (pageIndices: number[]): void => {
+      for (const index of pageIndices) demandedPagesRef.current.add(index);
+      schedulePageBuilds();
+    },
+    [schedulePageBuilds]
+  );
 
   const paintedCaretMachineRef = useRef<PaintedCaretMachine | null>(null);
   if (!paintedCaretMachineRef.current) paintedCaretMachineRef.current = new PaintedCaretMachine();
@@ -334,6 +401,8 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       workerRef.current = null;
       queryEpochGate.clear();
+      for (const waiter of pageWaitersRef.current) waiter.resolve();
+      pageWaitersRef.current.clear();
     },
     [queryEpochGate]
   );
@@ -460,7 +529,8 @@ export function useRustDisplayList(
           nextFrame,
           caret,
           null,
-          { ...previous, queries: null }
+          { ...previous, queries: null },
+          demandPages
         );
         generationRef.current += 1;
         snapshotRef.current = nextSnapshot;
@@ -570,7 +640,8 @@ export function useRustDisplayList(
           nextFrame,
           caret,
           null,
-          previous
+          previous,
+          demandPages
         );
         // Supersede an older async compatibility build before publishing the
         // frame produced by the edit transaction.
@@ -613,6 +684,7 @@ export function useRustDisplayList(
     },
     [
       applyPaintedCaretReply,
+      demandPages,
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
@@ -672,7 +744,12 @@ export function useRustDisplayList(
     try {
       const { wantLayout } = request;
       result = bootstrapping
-        ? await client.bootstrap(snapshot(), extras, wantLayout)
+        ? await client.bootstrap(
+            snapshot(),
+            extras,
+            wantLayout,
+            firstPagesViewport?.current?.() ?? undefined
+          )
         : client.layoutRevision() === probe.layoutRevision
           ? await client.buildFrame(extras, expectedFrameEpoch, paintCaret)
           : probe.regionLayoutInput !== null &&
@@ -688,6 +765,7 @@ export function useRustDisplayList(
               )
             : await client.sync(snapshot(), extras, expectedFrameEpoch, paintCaret, wantLayout);
       if (result.fontErrors.length > 0) hostEngine.reportResidentFontErrors(result.fontErrors);
+      if (result.unbuiltPages > 0) workerMediaRef.current = result.media;
       // Torn down, or the frame this delta builds on was reset meanwhile (the
       // next request then asks for a full frame).
       if (workerRef.current?.client !== client) return;
@@ -727,7 +805,8 @@ export function useRustDisplayList(
       nextFrame,
       residentCaretForSelection(result.caret, result.selection, hostEngine.selection(), nextFrame),
       null,
-      snapshotRef.current
+      snapshotRef.current,
+      demandPages
     );
     // Supersede an older async main-thread build.
     generationRef.current += 1;
@@ -741,7 +820,112 @@ export function useRustDisplayList(
       Boolean(result.caretPainted && nextSnapshot.caret?.caretRect),
       paintToken
     );
-  }, [applyPaintedCaretReply, paintedCaretMachine, publishQuerySnapshot]);
+  }, [
+    applyPaintedCaretReply,
+    demandPages,
+    firstPagesViewport,
+    paintedCaretMachine,
+    publishQuerySnapshot,
+  ]);
+
+  // One batch of the unbuilt pages, applied as any worker frame.
+  runPageBuildRef.current = async (): Promise<void> => {
+    pageBuildQueuedRef.current = false;
+    const worker = workerRef.current;
+    const previous = snapshotRef.current.frame;
+    if (!worker || !previous) return;
+    for (const index of [...demandedPagesRef.current]) {
+      if (!previous.displayList.pages[index]?.unbuilt) demandedPagesRef.current.delete(index);
+    }
+    const pages = pageBuildBatch(
+      previous.displayList.pages,
+      visiblePagesRef.current,
+      demandedPagesRef.current
+    );
+    if (pages.length === 0) return;
+    const contentEpoch = contentEpochRef.current;
+    const paintToken = paintedCaretMachine.token();
+    const paintCaret =
+      workerPresentationActiveRef.current && paintedCaretMachine.shouldPaint(performance.now());
+    let result: ResidentEngineWorkerFrame;
+    let nextFrame: RetainedFrame;
+    try {
+      result = await worker.client.buildPages(pages, previous.frameEpoch, paintCaret);
+      if (workerRef.current?.client !== worker.client || snapshotRef.current.frame !== previous) {
+        return;
+      }
+      nextFrame = applyFrameDeltaOwned(previous, decodeFrameDelta(result.frame));
+    } catch (cause) {
+      if (workerRef.current?.client === worker.client) workerFrameRequestRef.current?.fallback(cause);
+      return;
+    }
+    if (result.fontErrors.length > 0) worker.engine.reportResidentFontErrors(result.fontErrors);
+    for (const index of pages) demandedPagesRef.current.delete(index);
+    const nextSnapshot = createRustDisplayListSnapshot(
+      nextFrame.displayList,
+      nextFrame,
+      residentCaretForSelection(result.caret, result.selection, worker.engine.selection(), nextFrame),
+      null,
+      snapshotRef.current,
+      demandPages
+    );
+    generationRef.current += 1;
+    snapshotRef.current = nextSnapshot;
+    publishQuerySnapshot(nextSnapshot, contentEpoch);
+    setSnapshot(nextSnapshot);
+    applyPaintedCaretReply(Boolean(result.caretPainted && nextSnapshot.caret?.caretRect), paintToken);
+  };
+
+  // While a frame holds unbuilt pages the next batch follows; a caller
+  // waiting for pages resumes once they are built.
+  useEffect(() => {
+    const pages = snapshot.frame?.displayList.pages;
+    const unbuilt = pages?.some((page) => page.unbuilt) ?? false;
+    for (const waiter of [...pageWaitersRef.current]) {
+      if (!unbuilt || waiter.pages.every((index) => !pages?.[index]?.unbuilt)) {
+        pageWaitersRef.current.delete(waiter);
+        waiter.resolve();
+      }
+    }
+    if (unbuilt) schedulePageBuilds();
+  }, [schedulePageBuilds, snapshot.frame]);
+
+  const ensurePages = useCallback(
+    (pageIndices: number[]): Promise<void> => {
+      const pages = snapshotRef.current.frame?.displayList.pages;
+      const wanted = pageIndices.filter((index) => pages?.[index]?.unbuilt);
+      if (wanted.length === 0) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        pageWaitersRef.current.add({ pages: wanted, resolve });
+        demandPages(wanted);
+      });
+    },
+    [demandPages]
+  );
+
+  const setVisiblePages = useCallback(
+    (first: number, last: number): void => {
+      const current = visiblePagesRef.current;
+      if (current?.first === first && current.last === last) return;
+      visiblePagesRef.current = { first, last };
+      const pages = snapshotRef.current.frame?.displayList.pages;
+      if (pages?.slice(first, last + 1).some((page) => page.unbuilt)) schedulePageBuilds();
+    },
+    [schedulePageBuilds]
+  );
+
+  const ensureVisiblePages = useCallback((): Promise<void> => {
+    const count = snapshotRef.current.frame?.displayList.pages.length ?? 0;
+    const { first, last } = visiblePagesRef.current ?? { first: 0, last: count - 1 };
+    return ensurePages(Array.from({ length: last - first + 1 }, (_, index) => first + index));
+  }, [ensurePages]);
+
+  const unbuiltMayHoldImages = useMemo(
+    () =>
+      workerMediaRef.current &&
+      Boolean(snapshot.frame?.displayList.pages.some((page) => page.unbuilt)),
+    [snapshot.frame]
+  );
 
   // The worker starts as the session opens (Q815): it loads the state the
   // page's replica loaded while the page renders, so the first frame request
@@ -993,6 +1177,10 @@ export function useRustDisplayList(
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
+    ensurePages,
+    setVisiblePages,
+    ensureVisiblePages,
+    unbuiltMayHoldImages,
   };
 }
 
@@ -1001,13 +1189,14 @@ function createRustDisplayListSnapshot(
   frame: RetainedFrame | null,
   caret: YrsResidentCaretSnapshot | null,
   engine: RustDisplayListEngine | null | undefined,
-  previous: RustDisplayListSnapshot
+  previous: RustDisplayListSnapshot,
+  demandPages?: (pageIndices: number[]) => void
 ): RustDisplayListSnapshot {
   const residentQueries = residentDisplayListQueryEngine(engine);
   return {
     displayList,
     frame,
-    queries: createDisplayListQueries(displayList, residentQueries, previous.queries),
+    queries: createDisplayListQueries(displayList, residentQueries, previous.queries, demandPages),
     caret,
   };
 }
@@ -1140,6 +1329,12 @@ export interface UseCanvasRendererResult {
   notifyCaretInputDispatched(): void;
   /** Selection move / blur / IME / mode change: immediate swap to the DOM caret. */
   notifyCaretInterrupt(): void;
+  /** Resolves once these pages are built (a first frame builds only the pages in view, Q815 C). */
+  ensurePages(pageIndices: number[]): Promise<void>;
+  /** The pages in view, which build first. */
+  setVisiblePages(first: number, last: number): void;
+  /** Resolves once the pages in view are built. */
+  ensureVisiblePages(): Promise<void>;
 }
 
 // bundles the canvas-renderer host wiring for DocxEditor: collects each
@@ -1152,7 +1347,9 @@ export function useCanvasRenderer(
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>,
   // Resolved comment ids whose range wash the canvas hides; identity changes
   // rebuild the display list (resolve / reopen / expand-a-resolved-card).
-  resolvedCommentIds?: ReadonlySet<number>
+  resolvedCommentIds?: ReadonlySet<number>,
+  // The viewport the first frame fills (Q815 C): the other pages build after.
+  firstPagesViewport?: React.RefObject<(() => ResidentFirstPagesViewport | null) | null>
 ): UseCanvasRendererResult {
   const [layout, setLayout] = useState<Layout | null>(null);
   const [engine, setEngine] = useState<
@@ -1187,7 +1384,18 @@ export function useCanvasRenderer(
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
-  } = useRustDisplayList(layout, undefined, fontChainsProviderRef, resolvedCommentIds, engine);
+    ensurePages,
+    setVisiblePages,
+    ensureVisiblePages,
+    unbuiltMayHoldImages,
+  } = useRustDisplayList(
+    layout,
+    undefined,
+    fontChainsProviderRef,
+    resolvedCommentIds,
+    engine,
+    firstPagesViewport
+  );
   const resolveImage = useMemo(() => createCanvasImageResolver(), []);
   const status: UseCanvasRendererResult['status'] = error
     ? 'error'
@@ -1230,17 +1438,20 @@ export function useCanvasRenderer(
   // Keyed off surface ownership, not frame freshness: an invalidated worker
   // frame must not tear down the offscreen canvases (CanvasPagesView keys its
   // page surfaces on this), or every remote/structural edit remounts and
-  // blanks the whole document.
+  // blanks the whole document. Pages not built yet may hold pictures, which
+  // only the page draws: a document with media keeps the page's canvases
+  // until every page is built, as when its pictures are built.
   const offscreenReplay = useMemo(
     () =>
       workerSurfacesActive &&
+      !unbuiltMayHoldImages &&
       offscreenAllowed &&
       typeof OffscreenCanvas !== 'undefined' &&
       typeof HTMLCanvasElement !== 'undefined' &&
       'transferControlToOffscreen' in HTMLCanvasElement.prototype
         ? { attach: attachOffscreenCanvases }
         : null,
-    [attachOffscreenCanvases, offscreenAllowed, workerSurfacesActive]
+    [attachOffscreenCanvases, offscreenAllowed, unbuiltMayHoldImages, workerSurfacesActive]
   );
   const authoritativeCaretActive = Boolean(
     workerPresentationActive &&
@@ -1281,5 +1492,8 @@ export function useCanvasRenderer(
     notifyCaretInput,
     notifyCaretInputDispatched,
     notifyCaretInterrupt,
+    ensurePages,
+    setVisiblePages,
+    ensureVisiblePages,
   };
 }

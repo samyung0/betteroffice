@@ -247,3 +247,30 @@ describe('createDisplayListQueries wasm trap containment', () => {
     expect(isDisplayListQuerySourceDead(resident)).toBe(true);
   });
 });
+
+describe('createDisplayListQueries unbuilt pages (Q815 C)', () => {
+  test('a body range or hit test on a page not built yet asks for that page', () => {
+    const asked: number[][] = [];
+    const unbuilt = (pageIndex: number, span: [number, number]): DisplayPage => ({
+      ...page(pageIndex),
+      unbuilt: true,
+      positionSpan: span,
+    });
+    const queries = createDisplayListQueries(
+      { pages: [page(0), unbuilt(1, [100, 199]), unbuilt(2, [200, 299])] },
+      fakeEngine().engine,
+      null,
+      (pages) => asked.push(pages)
+    );
+    queries.rangeRects(10, 20);
+    expect(asked).toEqual([]);
+    queries.caretRect(150);
+    expect(asked[0]).toEqual([1]);
+    asked.length = 0;
+    queries.rangeRects(150, 250);
+    expect(asked).toEqual([[1, 2]]);
+    queries.hitTestRegions(2, 5, 5);
+    queries.hitTestRegions(0, 5, 5);
+    expect(asked).toEqual([[1, 2], [2]]);
+  });
+});

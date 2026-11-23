@@ -437,8 +437,21 @@ function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): s
 export function createDisplayListQueries(
   list: DisplayList,
   engine?: RustDisplayListQueryEngine | ResidentDisplayListQueryEngine,
-  previous?: DisplayListQueries | null
+  previous?: DisplayListQueries | null,
+  /** Asked for the unbuilt pages a body range or hit test needs (Q815 C):
+   * they come in a later list, and the query answers then. */
+  demandPages?: (pageIndices: number[]) => void
 ): DisplayListQueries {
+  const unbuiltPages = demandPages ? list.pages.filter((page) => page.unbuilt) : [];
+  const demandRange = (from: number, to: number): void => {
+    if (unbuiltPages.length === 0) return;
+    const lo = Math.min(from, to);
+    const hi = Math.max(from, to);
+    const wanted = unbuiltPages
+      .filter(({ positionSpan: span }) => span && span[0] <= hi && lo <= span[1])
+      .map((page) => page.pageIndex);
+    if (wanted.length > 0) demandPages!(wanted);
+  };
   let json: string | null = null;
   let jsonRevisions: readonly number[] | null = null;
   const getJson = (): string => {
@@ -679,6 +692,7 @@ export function createDisplayListQueries(
   };
 
   const hitTestRegions = (pageIndex: number, x: number, y: number): DisplayListRegionHit | null => {
+    if (unbuiltPages.length > 0 && list.pages[pageIndex]?.unbuilt) demandPages!([pageIndex]);
     if (resident) {
       return parseQuery(
         residentQuery(
@@ -699,6 +713,7 @@ export function createDisplayListQueries(
   };
 
   const rangeRects = (from: number, to: number): DisplayListRect[] => {
+    demandRange(from, to);
     if (resident) {
       return parseQuery(
         residentQuery(() => resident.displayRangeRectsJson(from, to), 'range_rects'),

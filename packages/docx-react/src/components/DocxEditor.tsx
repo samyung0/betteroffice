@@ -14,6 +14,7 @@ import type { CSSProperties, ReactNode, SetStateAction } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
 import {
   projectYrsComments,
+  type ResidentFirstPagesViewport,
   type YrsLoc,
   type YrsSession,
   type YrsStoryRange,
@@ -484,6 +485,9 @@ export interface DocxEditorRef {
   renderPages: <T>(
     each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
   ) => Promise<T[]>;
+  /** Resolves once the pages in view are drawn: while an editor opens, the
+   * pages out of view are built after the first frame (Q815 C). */
+  ensureVisiblePages: () => Promise<void>;
   /** Load a pre-parsed document programmatically */
   loadDocument: (doc: Document) => void;
   /** Load a DOCX buffer programmatically (ArrayBuffer, Uint8Array, Blob, or File) */
@@ -825,7 +829,14 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // Canvas renderer plumbing. `resolvedIdsForRender` reaches the Rust
   // display-list build so the canvas drops the comment wash of resolved
   // threads (and re-tints the one whose sidebar card is expanded).
-  const canvasRenderer = useCanvasRenderer(rustFontChainsProviderRef, resolvedIdsForRender);
+  const firstPagesViewportRef = useRef<(() => ResidentFirstPagesViewport | null) | null>(null);
+  const canvasRenderer = useCanvasRenderer(
+    rustFontChainsProviderRef,
+    resolvedIdsForRender,
+    firstPagesViewportRef
+  );
+  // Print and list-card captures draw every page, built.
+  const pagedList = usePagedList(canvasRenderer.displayList);
   useEffect(() => {
     if (canvasRenderer.error) onError?.(canvasRenderer.error);
   }, [canvasRenderer.error, onError]);
@@ -890,6 +901,11 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const paneWidth = usePaneWidth(scrollContainerRef, zoomFit && !state.isLoading);
   // 100% only until the pane is first measured, before anything paints.
   const zoom = state.zoom === 'fit' ? (fitZoom(paneWidth, maxPageWidthPx) ?? 1) : state.zoom;
+  // The editor's first frame builds the pages that fill the pane (Q815 C).
+  firstPagesViewportRef.current = () => {
+    const height = scrollContainerRef.current?.clientHeight || window.innerHeight;
+    return height > 0 ? { height, zoom } : null;
+  };
   const [documentFonts, setDocumentFonts] = useState<FontOption[]>([]);
   const {
     showOutline,
@@ -1067,6 +1083,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     pagedEditorRef,
     documentFromYrs: yrsCore.documentFromYrs,
     displayList: canvasRenderer.displayList,
+    wholeDisplayList: pagedList,
     resolveImage: canvasRenderer.resolveImage,
     documentName,
     onSave,
@@ -1587,12 +1604,10 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   }, [citation, citedParagraph, yrsCore.session, canvasRenderer.queries]);
 
   const {
-    displayList: printList,
     resolveImage: printImages,
     glyphOutlineProvider: printOutlines,
     prepareSlicedPaint: preparePrintPaint,
   } = canvasRenderer;
-  const pagedList = usePagedList(printList);
   const renderPages = useCallback(
     async <T,>(
       each: (page: { canvas: HTMLCanvasElement; width: number; height: number }) => Promise<T>
@@ -1630,6 +1645,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     handleSave,
     handleDirectPrint,
     renderPages,
+    ensureVisiblePages: canvasRenderer.ensureVisiblePages,
     zoom,
     setZoom: handleZoomChange,
     scrollPageInfo,
@@ -2292,6 +2308,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               applyResidentDelete={canvasRenderer.applyDelete}
               displayListQueries={canvasRenderer.queries}
               resolveDisplayListQueries={canvasRenderer.resolveQueries}
+              ensureDisplayPages={canvasRenderer.ensurePages}
               canvasDisplayList={canvasRenderer.displayList}
               displayListFrameEpoch={canvasRenderer.frame?.frameEpoch ?? null}
               residentCaret={canvasRenderer.caret}
