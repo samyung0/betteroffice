@@ -113,21 +113,32 @@ function CanvasEditor({ session, editor }: { session: YrsSession; editor: React.
   );
 }
 
-/** CanvasEditor with the worker started as DocxEditor's session hook starts it: before the page's first render with the session. */
+/**
+ * CanvasEditor with the worker started as DocxEditor's session hook starts it:
+ * before the page's first render with the session. `swappedFrom`'s worker is
+ * started first, as a room swap inside one frame does; `afterSeed` runs
+ * before the page's first layout.
+ */
 function SeededEditor({
   session,
   update,
   editor,
+  swappedFrom,
+  afterSeed,
 }: {
   session: YrsSession;
   update: Uint8Array;
   editor: React.Ref<PagedEditorRef>;
+  swappedFrom?: YrsSession;
+  afterSeed?: () => void;
 }) {
   const canvas = useCanvasRenderer();
   const started = useRef(false);
   if (!started.current) {
     started.current = true;
+    if (swappedFrom) canvas.startWorker(swappedFrom, update);
     canvas.startWorker(session, update);
+    afterSeed?.();
   }
   return (
     <PagedEditor
@@ -148,6 +159,41 @@ function countPageLayouts(session: YrsSession): () => number {
     return layOut(input);
   };
   return () => count;
+}
+
+type Posted = { type: string; snapshot?: { state: Uint8Array; media?: string } };
+
+/** In-process workers that record what each was sent and whether it was terminated. */
+function recordWorkers(): Array<{ posted: Posted[]; terminated: boolean }> {
+  const workers: Array<{ posted: Posted[]; terminated: boolean }> = [];
+  globalThis.Worker = class extends InProcessWorker {
+    private readonly record = { posted: [] as Posted[], terminated: false };
+    constructor() {
+      super();
+      workers.push(this.record);
+    }
+    override postMessage(data: unknown): void {
+      this.record.posted.push(data as Posted);
+      super.postMessage(data);
+    }
+    override terminate(): void {
+      this.record.terminated = true;
+    }
+  } as unknown as typeof Worker;
+  return workers;
+}
+
+/** The layout the page lays out for `session` with no worker, once it has `pages` pages. */
+async function pageOnlyLayout(session: YrsSession, pages: (count: number) => boolean): Promise<string> {
+  globalThis.Worker = undefined as unknown as typeof Worker;
+  const editor = createRef<PagedEditorRef>();
+  render(<CanvasEditor session={session} editor={editor} />);
+  await waitFor(() => expect(pages(editor.current?.getLayout()?.pages.length ?? 0)).toBe(true), {
+    timeout: 10000,
+  });
+  const layout = JSON.stringify(editor.current!.getLayout());
+  cleanup();
+  return layout;
 }
 
 const BODY = Array.from(
@@ -181,14 +227,7 @@ test('a worker started as the session opens loads the state the page loaded: its
   const expected = JSON.stringify(unseeded.current!.getLayout());
   cleanup();
 
-  type Posted = { type: string; snapshot?: { state: Uint8Array; media?: string } };
-  const posted: Posted[] = [];
-  globalThis.Worker = class extends InProcessWorker {
-    override postMessage(data: unknown): void {
-      posted.push(data as Posted);
-      super.postMessage(data);
-    }
-  } as unknown as typeof Worker;
+  const workers = recordWorkers();
   const session = await joinSession(bytes, room, 7502);
   const pageLayouts = countPageLayouts(session);
   const editor = createRef<PagedEditorRef>();
@@ -197,11 +236,34 @@ test('a worker started as the session opens loads the state the page loaded: its
   expect(JSON.stringify(editor.current!.getLayout())).toBe(expected);
   // The worker laid it out from the seeded replica.
   expect(pageLayouts()).toBe(0);
-  const [seed, bootstrap] = posted.filter(({ type }) => type === 'seed' || type === 'bootstrap');
+  const [seed, bootstrap] = workers[0]!.posted.filter(({ type }) => type === 'seed' || type === 'bootstrap');
   expect([seed?.type, bootstrap?.type]).toEqual(['seed', 'bootstrap']);
   // The page's replica holds what the room sent and nothing more.
   expect(bootstrap!.snapshot!.state.byteLength).toBeLessThan(16);
   expect(bootstrap!.snapshot!.media).toBeUndefined();
+});
+
+test("a seeded worker's first frame request ships what changed after the seed: a peer's text and the reader's, laid out as the page lays them out (Q815)", async () => {
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7520)).encodeState();
+  const peer = await joinSession(bytes, room, 7521);
+  peer.insertText({ story: 'body', paraId: '10000000', offset: 0 }, 'A peer typed this. '.repeat(160));
+  const change = (session: YrsSession) => {
+    session.applyUpdate(peer.encodeStateAsUpdate(session.encodeStateVector()));
+    session.insertText({ story: 'body', paraId: '10000059', offset: 0 }, 'Typed before the first layout. ');
+    return session;
+  };
+  const expected = await pageOnlyLayout(change(await joinSession(bytes, room, 7522)), (pages) => pages > 2);
+
+  const workers = recordWorkers();
+  const session = await joinSession(bytes, room, 7523);
+  const pageLayouts = countPageLayouts(session);
+  const editor = createRef<PagedEditorRef>();
+  render(<SeededEditor session={session} update={room} editor={editor} afterSeed={() => change(session)} />);
+  await waitFor(() => expect(JSON.stringify(editor.current?.getLayout())).toBe(expected), { timeout: 10000 });
+  expect(pageLayouts()).toBe(0);
+  const bootstrap = workers[0]!.posted.find(({ type }) => type === 'bootstrap');
+  expect(bootstrap!.snapshot!.state.byteLength).toBeGreaterThan(2);
 });
 
 test('a pass over the request and document the font check read last reuses its answer: the pass after the fonts load and a web-font load check nothing again (Q815)', async () => {
@@ -241,6 +303,33 @@ test('a pass over the request and document the font check read last reuses its a
   expect(checks).toBe(1);
 });
 
+test('a document change after the font check checks again: a family a peer applies is among the faces the next pass prepares (Q815)', async () => {
+  globalThis.Worker = InProcessWorker as unknown as typeof Worker;
+  const bytes = docxPackage(BODY);
+  const session = await openSession(bytes, 7405);
+  const checked: string[] = [];
+  const check = session.layoutFontRequirementsJson.bind(session);
+  session.layoutFontRequirementsJson = (input) => {
+    const requirements = check(input);
+    checked.push(requirements);
+    return requirements;
+  };
+  const editor = createRef<PagedEditorRef>();
+  render(<CanvasEditor session={session} editor={editor} />);
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  expect(checked).toHaveLength(1);
+  const peer = await joinSession(bytes, session.encodeState(), 7406);
+  peer.formatRange(
+    { story: 'body', start: { paraId: '10000000', offset: 0 }, end: { paraId: '10000000', offset: 6 } },
+    { fontFamily: { ascii: 'Noto Serif JP', hAnsi: 'Noto Serif JP' } }
+  );
+  act(() => {
+    session.applyUpdate(peer.encodeStateAsUpdate(session.encodeStateVector()));
+  });
+  await waitFor(() => expect(checked).toHaveLength(2));
+  expect(checked[1]).toContain('"family":"Noto Serif JP"');
+});
+
 test('a worker that fails while it loads the seed hands layout to the page, as a failed worker does (Q815, 2026-10-03)', async () => {
   globalThis.Worker = class extends InProcessWorker {
     override postMessage(data: unknown): void {
@@ -257,4 +346,62 @@ test('a worker that fails while it loads the seed hands layout to the page, as a
   render(<SeededEditor session={session} update={room} editor={editor} />);
   await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
   expect(pageLayouts()).toBeGreaterThan(0);
+});
+
+test('a seed the worker refuses, living on, leaves the bootstrap to ship the whole state: the worker lays out the pages the page lays out (Q815)', async () => {
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7530)).encodeState();
+  const expected = await pageOnlyLayout(await joinSession(bytes, room, 7531), (pages) => pages === 2);
+  globalThis.Worker = class extends InProcessWorker {
+    override postMessage(data: unknown): void {
+      const request = data as { type: string; seed?: object };
+      // A seed whose state is not an update: the worker answers with an error.
+      super.postMessage(
+        request.type === 'seed' ? { ...request, seed: { ...request.seed, state: Uint8Array.of(255, 255, 255) } } : data
+      );
+    }
+  } as unknown as typeof Worker;
+  const session = await joinSession(bytes, room, 7532);
+  const pageLayouts = countPageLayouts(session);
+  const errors: unknown[] = [];
+  const logError = console.error;
+  console.error = (message: unknown) => errors.push(message);
+  try {
+    const editor = createRef<PagedEditorRef>();
+    render(<SeededEditor session={session} update={room} editor={editor} />);
+    await waitFor(() => expect(JSON.stringify(editor.current?.getLayout())).toBe(expected), { timeout: 10000 });
+  } finally {
+    console.error = logError;
+  }
+  expect(errors).toContain('[CanvasRenderer] Resident engine worker seed failed');
+  expect(pageLayouts()).toBe(0);
+});
+
+test('an editor closed before its first layout ends the worker it started (Q815, Q791)', async () => {
+  const workers = recordWorkers();
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7540)).encodeState();
+  render(<SeededEditor session={await joinSession(bytes, room, 7541)} update={room} editor={createRef()} />);
+  cleanup();
+  expect(workers.map(({ posted, terminated }) => [posted.map(({ type }) => type), terminated])).toEqual([
+    [['seed', 'destroy'], true],
+  ]);
+});
+
+test("a session swapped in before the first layout ends the first session's worker; the second's lays out (Q815, Q791)", async () => {
+  const workers = recordWorkers();
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7550)).encodeState();
+  const first = await joinSession(bytes, room, 7551);
+  const second = await joinSession(bytes, room, 7552);
+  const pageLayouts = countPageLayouts(second);
+  const editor = createRef<PagedEditorRef>();
+  render(<SeededEditor session={second} swappedFrom={first} update={room} editor={editor} />);
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  expect(pageLayouts()).toBe(0);
+  expect(workers.map(({ posted, terminated }) => [posted[0]?.type, terminated])).toEqual([
+    ['seed', true],
+    ['seed', false],
+  ]);
+  expect(workers[1]!.posted.map(({ type }) => type)).toContain('bootstrap');
 });
