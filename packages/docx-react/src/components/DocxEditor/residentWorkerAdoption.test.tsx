@@ -377,15 +377,24 @@ test('a seed the worker refuses, living on, leaves the bootstrap to ship the who
   expect(pageLayouts()).toBe(0);
 });
 
-test('an editor closed before its first layout ends the worker it started (Q815, Q791)', async () => {
+test('an editor closed before its first layout ends the worker it started, quietly (Q815, Q791)', async () => {
   const workers = recordWorkers();
   const bytes = docxPackage(BODY);
   const room = (await openSession(bytes, 7540)).encodeState();
-  render(<SeededEditor session={await joinSession(bytes, room, 7541)} update={room} editor={createRef()} />);
-  cleanup();
+  const errors: unknown[] = [];
+  const logError = console.error;
+  console.error = (message: unknown) => errors.push(message);
+  try {
+    render(<SeededEditor session={await joinSession(bytes, room, 7541)} update={room} editor={createRef()} />);
+    cleanup();
+    await new Promise((done) => setTimeout(done, 0));
+  } finally {
+    console.error = logError;
+  }
   expect(workers.map(({ posted, terminated }) => [posted.map(({ type }) => type), terminated])).toEqual([
     [['seed', 'destroy'], true],
   ]);
+  expect(errors).not.toContain('[CanvasRenderer] Resident engine worker seed failed');
 });
 
 test("a session swapped in before the first layout ends the first session's worker; the second's lays out (Q815, Q791)", async () => {

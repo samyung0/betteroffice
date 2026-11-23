@@ -756,7 +756,10 @@ export function useRustDisplayList(
       workerRef.current?.client.destroy();
       const client = new ResidentEngineWorkerClient();
       workerRef.current = { engine, client };
-      const seeded = client.seed(seed).catch(failed);
+      // A client destroyed before its seed replied (unmount or swap) is no failure.
+      const seeded = client.seed(seed).catch((error: unknown) => {
+        if (workerRef.current?.client === client) failed(error);
+      });
       // The first frame request's snapshot waits for the seed's state vector.
       workerInputQueueRef.current = workerInputQueueRef.current.then(() => seeded);
     } catch (error) {
