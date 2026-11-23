@@ -7,9 +7,12 @@ if (ownsDom) GlobalRegistrator.register();
 import { en } from '@betteroffice/docx-i18n';
 import { useEffect } from 'react';
 import { useFindReplace } from '../../hooks/useFindReplace';
+import { useTableSelection } from '../../hooks/useTableSelection';
 import FindReplaceDialog from '../dialogs/FindReplaceDialog';
+import { useHyperlinkDialog } from '../dialogs/HyperlinkDialog';
 import type { PagedEditorRef } from './PagedEditor';
 import { useFindReplaceBridge } from './hooks/useFindReplaceBridge';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import {
   destroySessions,
   docxPackage,
@@ -76,4 +79,72 @@ test('Escape in find returns focus to the document and keeps the match selected'
   expect(screen.queryByPlaceholderText(en.dialogs.findReplace.findPlaceholder)).toBeNull();
   expect(document.activeElement).toBe(screen.getByTestId('yrs-input'));
   expect(session.selection()).toMatchObject(match);
+});
+
+/** Find opened by the editor's shortcuts, wired as DocxEditor and DocxEditorDialogs wire it. */
+function Shortcuts({ editor }: { editor: React.RefObject<PagedEditorRef | null> }) {
+  const findReplace = useFindReplace();
+  const bridge = useFindReplaceBridge({ pagedEditorRef: editor, findReplace });
+  const hyperlinkDialog = useHyperlinkDialog();
+  const tableSelection = useTableSelection({ document: null });
+  useKeyboardShortcuts({
+    pagedEditorRef: editor,
+    disableFindReplaceShortcuts: false,
+    showFileOpen: false,
+    findReplace,
+    hyperlinkDialog,
+    tableSelection,
+    readOnly: false,
+    showHiddenText: false,
+  });
+  return findReplace.state.isOpen ? (
+    <FindReplaceDialog
+      isOpen
+      onClose={bridge.handleClose}
+      onFind={bridge.handleFind}
+      onFindNext={bridge.handleFindNext}
+      onFindPrevious={bridge.handleFindPrevious}
+      onReplace={bridge.handleReplace}
+      onReplaceAll={bridge.handleReplaceAll}
+      initialSearchText={findReplace.state.searchText}
+      replaceMode={findReplace.state.replaceMode}
+      openRequest={findReplace.state.openRequest}
+      selectedText={findReplace.state.selectedText}
+      currentResult={bridge.findResultRef.current}
+    />
+  ) : null;
+}
+
+// Q828 A: Ctrl+F and Ctrl+H fill Find with the document's selected text, read
+// from the editor (its focus target, a hidden textarea, holds no selection).
+test('Ctrl+F and Ctrl+H fill Find with the document selection', async () => {
+  const session = await openSession(
+    docxPackage('<w:p w14:paraId="10000002"><w:r><w:t>one word, two word, three</w:t></w:r></w:p>'),
+    7502
+  );
+  const editor = await renderPagedEditor(session);
+  render(<Shortcuts editor={editor} />);
+  /** Selects [start, end) of the paragraph and presses Ctrl/Cmd+`key` (both modifiers, wherever the test runs). */
+  const press = (key: string, start: number, end: number) =>
+    act(async () => {
+      session.setSelection(
+        { story: 'body', paraId: '10000002', offset: start },
+        { story: 'body', paraId: '10000002', offset: end }
+      );
+      fireEvent.keyDown(document, { key, ctrlKey: true, metaKey: true });
+    });
+
+  await press('f', 4, 8);
+  const search = screen.getByPlaceholderText(
+    en.dialogs.findReplace.findPlaceholder
+  ) as HTMLInputElement;
+  expect(search.value).toBe('word');
+  expect(document.activeElement === search).toBe(true);
+
+  // Back in the document with another selection, Ctrl+H takes it.
+  await act(async () => screen.getByTestId('yrs-input').focus());
+  await press('h', 10, 13);
+  expect(search.value).toBe('two');
+  expect(screen.getByLabelText(en.dialogs.findReplace.replaceAriaLabel)).toBeTruthy();
+  expect(document.activeElement === search).toBe(true);
 });

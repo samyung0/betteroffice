@@ -48,6 +48,12 @@ export function useKeyboardShortcuts({
       if (e.defaultPrevented) return;
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
+      // Find's seed is the editor's selection: the document's focus target is a
+      // hidden textarea, so the window's selection holds none (Q828 A).
+      const documentSelectedText = () => {
+        const session = pagedEditorRef.current?.getYrsSession();
+        return session ? yrsSelectedText(session, showHiddenText) : '';
+      };
 
       // Delete a layout-selected table.
       if (!readOnly && !cmdOrCtrl && !e.shiftKey && !e.altKey) {
@@ -70,9 +76,7 @@ export function useKeyboardShortcuts({
         } else if (e.key.toLowerCase() === 'f') {
           if (disableFindReplaceShortcuts) return;
           e.preventDefault();
-          const selection = window.getSelection();
-          const selectedText = selection && !selection.isCollapsed ? selection.toString() : '';
-          findReplace.openFind(selectedText);
+          findReplace.openFind(documentSelectedText());
         } else if (e.key.toLowerCase() === 'o') {
           if (!showFileOpen || !onOpenDocument) return;
           e.preventDefault();
@@ -80,9 +84,7 @@ export function useKeyboardShortcuts({
         } else if (e.key.toLowerCase() === 'h') {
           if (disableFindReplaceShortcuts) return;
           e.preventDefault();
-          const selection = window.getSelection();
-          const selectedText = selection && !selection.isCollapsed ? selection.toString() : '';
-          findReplace.openReplace(selectedText);
+          findReplace.openReplace(documentSelectedText());
         } else if (e.key.toLowerCase() === 'k') {
           if (readOnly) return;
           e.preventDefault();

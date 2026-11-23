@@ -174,6 +174,8 @@ export function DocxEditorDialogs({
           onReplaceAll={onReplaceAll}
           initialSearchText={findReplace.state.searchText}
           replaceMode={findReplace.state.replaceMode}
+          openRequest={findReplace.state.openRequest}
+          selectedText={findReplace.state.selectedText}
           currentResult={findResultRef.current}
           readOnly={readOnly}
         />
