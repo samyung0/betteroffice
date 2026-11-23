@@ -74,18 +74,21 @@ export function layoutPassOrigin(pending: LayoutUpdateOrigin | null): LayoutUpda
 }
 
 /** The caret's selection against the last caret pass; `first` is a session's
- * first pass (a document opening, or shown read-only). */
-export type CaretSelectionChange = 'first' | 'same' | 'changed';
+ * first pass (a document opening, or shown read-only), `first-edited` one the
+ * reader edited before (its geometry still loading). */
+export type CaretSelectionChange = 'first' | 'first-edited' | 'same' | 'changed';
 
 /**
  * Only the reader moves the view to the caret: a selection they changed, or
- * a local edit. A document's first caret pass never does, so a reader placed
- * elsewhere (a restored scroll offset) stays there.
+ * a local edit. A document's first caret pass does not, so a reader placed
+ * elsewhere (a restored scroll offset) stays there, unless the reader edited
+ * before it (Q833 B).
  */
 export function shouldScrollCaretIntoView(
   layoutUpdateOrigin: LayoutUpdateOrigin,
   selection: CaretSelectionChange
 ): boolean {
+  if (selection === 'first-edited') return true;
   if (selection === 'first') return false;
   return layoutUpdateOrigin === 'local' || selection === 'changed';
 }

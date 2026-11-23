@@ -84,6 +84,9 @@ export interface YrsInputRef {
   insertText(text: string): void;
   deleteSelection(): void;
   selectAll(): void;
+  /** A reader's edit made outside the input (the ribbon, Find, Undo): one made
+   * before the session's first caret pass brings the caret into view (Q833 B). */
+  noteLocalEdit(): void;
 }
 
 export type YrsStoredFormattingAction =
@@ -324,6 +327,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     session: YrsSession | null;
     selection: YrsSelection | null;
   } | null>(null);
+  // The session the reader edited before its first caret pass (its geometry
+  // still loading): that pass brings the caret into view (Q833 B).
+  const editedBeforeFirstPassRef = useRef<YrsSession | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -423,15 +429,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, onCaretInterrupt, session]
   );
 
+  const noteLocalEdit = useCallback((): void => {
+    if (session && lastCaretScrollRef.current?.session !== session) {
+      editedBeforeFirstPassRef.current = session;
+    }
+  }, [session]);
+
   const finishMutation = useCallback(
     (residentLayoutReady = false, residentCaretReady = false): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
+      noteLocalEdit();
       onCaretInput?.();
       latestRef.current.onDirectInput();
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput]
+    [emitSelection, noteLocalEdit, onCaretInput, onDirectInput]
   );
 
   const finishResidentMutation = useCallback(
@@ -1479,6 +1492,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         advanceInteractionEpoch();
         selectAll();
       },
+      noteLocalEdit,
     }),
     [
       advanceInteractionEpoch,
@@ -1490,6 +1504,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       flushPendingInput,
       insertText,
       deleteSelectionStep,
+      noteLocalEdit,
       readOnly,
       selectAll,
       session,
@@ -1574,10 +1589,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     lastCaretScrollRef.current = { session: session ?? null, selection: stickySelection };
     const change: CaretSelectionChange =
       !previous || previous.session !== (session ?? null)
-        ? 'first'
+        ? session && editedBeforeFirstPassRef.current === session
+          ? 'first-edited'
+          : 'first'
         : sameYrsSelection(previous.selection, stickySelection)
           ? 'same'
           : 'changed';
+    editedBeforeFirstPassRef.current = null;
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(origin, change)

@@ -396,6 +396,9 @@ export interface PagedEditorRef {
   yrsLocToDisplayPosition(loc: YrsLoc): number | null;
   /** Publish a yrs selection/mutation through the direct-input refresh path. */
   syncYrsInputState(docChanged: boolean): boolean;
+  /** Publish the reader's own mutation made outside the input (Find's replace):
+   * as `syncYrsInputState(true)`, and it counts as the reader's edit (Q833 B). */
+  syncYrsReaderEdit(): boolean;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -990,6 +993,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             } else if (Object.keys(delta).length > 0) {
               yrsInputRef.current?.applyStoredFormatting({ type: 'set', delta });
             }
+            yrsInputRef.current?.noteLocalEdit();
             if (!syncYrsInputState(true)) return false;
             yrsInputRef.current?.focus();
             return true;
@@ -1012,6 +1016,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           );
           if (!changed) return false;
           yrsInputRef.current?.clearStoredFormatting();
+          yrsInputRef.current?.noteLocalEdit();
           if (!syncYrsInputState(true)) return false;
           yrsInputRef.current?.focus();
           return true;
@@ -1369,6 +1374,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
 
           if (docChanged) {
+            yrsInputRef.current?.noteLocalEdit();
             yrsCore.publishDirectInput();
           }
           handleYrsStateChange(
