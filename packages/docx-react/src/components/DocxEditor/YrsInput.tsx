@@ -324,6 +324,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     session: YrsSession | null;
     selection: YrsSelection | null;
   } | null>(null);
+  // The session the reader edited before its first caret pass (its geometry
+  // still loading): that pass brings the caret into view (Q833 B).
+  const editedBeforeFirstPassRef = useRef<YrsSession | null>(null);
   displayListQueriesRef.current = displayListQueries;
   displayListFrameEpochRef.current = displayListFrameEpoch;
   resolveDisplayListQueriesRef.current = resolveDisplayListQueries;
@@ -427,11 +430,14 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     (residentLayoutReady = false, residentCaretReady = false): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
+      if (session && lastCaretScrollRef.current?.session !== session) {
+        editedBeforeFirstPassRef.current = session;
+      }
       onCaretInput?.();
       latestRef.current.onDirectInput();
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput]
+    [emitSelection, onCaretInput, onDirectInput, session]
   );
 
   const finishResidentMutation = useCallback(
@@ -1574,10 +1580,13 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     lastCaretScrollRef.current = { session: session ?? null, selection: stickySelection };
     const change: CaretSelectionChange =
       !previous || previous.session !== (session ?? null)
-        ? 'first'
+        ? session && editedBeforeFirstPassRef.current === session
+          ? 'first-edited'
+          : 'first'
         : sameYrsSelection(previous.selection, stickySelection)
           ? 'same'
           : 'changed';
+    editedBeforeFirstPassRef.current = null;
     if (
       selection.anchor === selection.head &&
       shouldScrollCaretIntoView(origin, change)

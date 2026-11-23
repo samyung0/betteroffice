@@ -70,6 +70,12 @@ describe('shouldScrollCaretIntoView', () => {
     expect(shouldScrollCaretIntoView('local', 'first')).toBe(false);
     expect(shouldScrollCaretIntoView('remote', 'first')).toBe(false);
   });
+
+  // Q833 B: an edit the reader made while the geometry loaded is a reader action.
+  test('scrolls to the first caret the reader edited before', () => {
+    expect(shouldScrollCaretIntoView('local', 'first-edited')).toBe(true);
+    expect(shouldScrollCaretIntoView('remote', 'first-edited')).toBe(true);
+  });
 });
 
 describe('layoutPassOrigin', () => {
