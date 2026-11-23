@@ -120,8 +120,14 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
   if (request.type === 'seed') {
     destroySession();
     session = await createResidentEngineSession(request.seed.workerClientId);
-    session.setMedia(request.seed.media);
-    session.loadState(request.seed.state);
+    try {
+      session.setMedia(request.seed.media);
+      session.loadState(request.seed.state);
+    } catch (error) {
+      // The bootstrap then starts a replica of its own from the full state.
+      destroySession();
+      throw error;
+    }
     const stateVector = exactBuffer(session.encodeStateVector());
     reply({ id: request.id, ok: true, stateVector }, [stateVector]);
     return;
