@@ -113,6 +113,43 @@ function CanvasEditor({ session, editor }: { session: YrsSession; editor: React.
   );
 }
 
+/** CanvasEditor with the worker started as DocxEditor's session hook starts it: before the page's first render with the session. */
+function SeededEditor({
+  session,
+  update,
+  editor,
+}: {
+  session: YrsSession;
+  update: Uint8Array;
+  editor: React.Ref<PagedEditorRef>;
+}) {
+  const canvas = useCanvasRenderer();
+  const started = useRef(false);
+  if (!started.current) {
+    started.current = true;
+    canvas.startWorker(session, update);
+  }
+  return (
+    <PagedEditor
+      ref={editor}
+      {...pagedEditorProps(session)}
+      residentWorkerLayout
+      onLayoutComputed={canvas.onLayoutComputed}
+    />
+  );
+}
+
+/** Counts the passes `session` lays out on the page. */
+function countPageLayouts(session: YrsSession): () => number {
+  let count = 0;
+  const layOut = session.layoutDocumentWithRegionsRetainedJson.bind(session);
+  session.layoutDocumentWithRegionsRetainedJson = (input) => {
+    count += 1;
+    return layOut(input);
+  };
+  return () => count;
+}
+
 const BODY = Array.from(
   { length: 90 },
   (_, index) =>
@@ -153,35 +190,13 @@ test('a worker started as the session opens loads the state the page loaded: its
     }
   } as unknown as typeof Worker;
   const session = await joinSession(bytes, room, 7502);
-  let pageLayouts = 0;
-  const layOut = session.layoutDocumentWithRegionsRetainedJson.bind(session);
-  session.layoutDocumentWithRegionsRetainedJson = (input) => {
-    pageLayouts += 1;
-    return layOut(input);
-  };
+  const pageLayouts = countPageLayouts(session);
   const editor = createRef<PagedEditorRef>();
-  function SeededEditor() {
-    const canvas = useCanvasRenderer();
-    // As DocxEditor's session hook does, before the page's first render with the session.
-    const started = useRef(false);
-    if (!started.current) {
-      started.current = true;
-      canvas.startWorker(session, room);
-    }
-    return (
-      <PagedEditor
-        ref={editor}
-        {...pagedEditorProps(session)}
-        residentWorkerLayout
-        onLayoutComputed={canvas.onLayoutComputed}
-      />
-    );
-  }
-  render(<SeededEditor />);
+  render(<SeededEditor session={session} update={room} editor={editor} />);
   await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
   expect(JSON.stringify(editor.current!.getLayout())).toBe(expected);
   // The worker laid it out from the seeded replica.
-  expect(pageLayouts).toBe(0);
+  expect(pageLayouts()).toBe(0);
   const [seed, bootstrap] = posted.filter(({ type }) => type === 'seed' || type === 'bootstrap');
   expect([seed?.type, bootstrap?.type]).toEqual(['seed', 'bootstrap']);
   // The page's replica holds what the room sent and nothing more.
@@ -224,4 +239,22 @@ test('a pass over the request and document the font check read last reuses its a
   await act(async () => fontsLoaded());
   await waitFor(() => expect(passes).toBe(2));
   expect(checks).toBe(1);
+});
+
+test('a worker that fails while it loads the seed hands layout to the page, as a failed worker does (Q815, 2026-10-03)', async () => {
+  globalThis.Worker = class extends InProcessWorker {
+    override postMessage(data: unknown): void {
+      if ((data as { type: string }).type !== 'seed') return super.postMessage(data);
+      const failed = this as unknown as { onerror(event: { message: string }): void };
+      queueMicrotask(() => failed.onerror({ message: 'the worker crashed' }));
+    }
+  } as unknown as typeof Worker;
+  const bytes = docxPackage(BODY);
+  const room = (await openSession(bytes, 7510)).encodeState();
+  const session = await joinSession(bytes, room, 7511);
+  const pageLayouts = countPageLayouts(session);
+  const editor = createRef<PagedEditorRef>();
+  render(<SeededEditor session={session} update={room} editor={editor} />);
+  await waitFor(() => expect(editor.current?.getLayout()?.pages.length).toBe(2), { timeout: 10000 });
+  expect(pageLayouts()).toBeGreaterThan(0);
 });
