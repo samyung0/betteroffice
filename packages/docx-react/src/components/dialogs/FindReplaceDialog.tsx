@@ -9,7 +9,7 @@
  * - useFindReplace.ts   — React hook for dialog state management
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import type { CSSProperties, KeyboardEvent, ChangeEvent } from 'react';
 import { useTranslation } from '../../i18n';
 import { DrawnIcon } from '../ui/Icons';
@@ -70,6 +70,14 @@ export interface FindReplaceDialogProps {
   initialSearchText?: string;
   /** Whether to start in replace mode */
   replaceMode?: boolean;
+  /**
+   * Counts the requests to open Find (Ctrl+F, Ctrl+H, the menus). Each one, an
+   * open dialog's included, focuses the box with its text selected and takes
+   * `replaceMode`; without it only opening does.
+   */
+  openRequest?: number;
+  /** The document's selected text at the last request: it replaces an open dialog's query. */
+  selectedText?: string;
   /** Current match result (from external state) */
   currentResult?: FindResult | null;
   /** Find only: Replace and Replace all are disabled. */
@@ -305,6 +313,8 @@ export function FindReplaceDialog({
   onClearHighlights,
   initialSearchText = '',
   replaceMode = false,
+  openRequest,
+  selectedText = '',
   currentResult,
   readOnly = false,
   className,
@@ -321,8 +331,11 @@ export function FindReplaceDialog({
   const [result, setResult] = useState<FindResult | null>(null);
   const [searchFocused, setSearchFocused] = useState(false);
   const [replaceFocused, setReplaceFocused] = useState(false);
+  const [focusRequest, setFocusRequest] = useState<{ box: 'find' | 'replace' } | null>(null);
 
   // Refs
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const openedRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const replaceInputRef = useRef<HTMLInputElement>(null);
   const onFindRef = useRef(onFind);
@@ -342,22 +355,44 @@ export function FindReplaceDialog({
     }
   }, [currentResult]);
 
-  // Initialize when dialog opens
-  useEffect(() => {
-    if (isOpen) {
+  // Each request to open Find. Opening seeds the box (the selection, or the
+  // last seed). A request while open takes the document's selection and
+  // otherwise keeps the typed query; so does one made from Find itself, where
+  // the selection is Find's own match (Q828 A). The mode follows the request.
+  useLayoutEffect(() => {
+    if (!isOpen) {
+      openedRef.current = false;
+      onClearHighlightsRef.current?.();
+      return;
+    }
+    if (!openedRef.current) {
+      openedRef.current = true;
       setSearchText(initialSearchText);
       setReplaceText('');
-      setShowReplace(replaceMode);
       setResult(null);
-
-      setTimeout(() => {
-        searchInputRef.current?.focus();
-        searchInputRef.current?.select();
-      }, 100);
-    } else {
-      onClearHighlightsRef.current?.();
+    } else if (selectedText && !dialogRef.current?.contains(document.activeElement)) {
+      setSearchText(selectedText);
+      setResult(null);
     }
-  }, [isOpen, initialSearchText, replaceMode]);
+    setShowReplace(replaceMode);
+    setFocusRequest({ box: 'find' });
+    // A request reruns this, not a new seed or mode on their own.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, openRequest]);
+
+  // The requested box takes the focus in the commit that shows it (the seeded
+  // query, the Replace row), which React runs before the browser handles
+  // another key, so no key typed after Ctrl+F or the Replace link is lost
+  // (Q825 A, Q828 A). The Find box's text is selected.
+  useLayoutEffect(() => {
+    if (!focusRequest) return;
+    if (focusRequest.box === 'replace') {
+      replaceInputRef.current?.focus();
+      return;
+    }
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [focusRequest]);
 
   const clearSearchResult = useCallback(() => {
     setResult(null);
@@ -519,14 +554,9 @@ export function FindReplaceDialog({
     }
   }, [readOnly, searchText, replaceText, matchCase, matchWholeWord, onReplaceAll]);
 
-  const toggleReplaceMode = useCallback(() => {
-    setShowReplace((prev) => {
-      const newValue = !prev;
-      if (newValue) {
-        setTimeout(() => replaceInputRef.current?.focus(), 100);
-      }
-      return newValue;
-    });
+  const showReplaceRow = useCallback(() => {
+    setShowReplace(true);
+    setFocusRequest({ box: 'replace' });
   }, []);
 
   const handleOverlayClick = useCallback((e: React.MouseEvent) => {
@@ -559,6 +589,7 @@ export function FindReplaceDialog({
       onKeyDown={handleDialogKeyDown}
     >
       <div
+        ref={dialogRef}
         className="docx-find-replace-dialog"
         data-testid="find-replace-dialog"
         style={DIALOG_CONTENT_STYLE}
@@ -736,7 +767,7 @@ export function FindReplaceDialog({
                   color: 'var(--doc-link)',
                   padding: 0,
                 }}
-                onClick={toggleReplaceMode}
+                onClick={showReplaceRow}
               >
                 {t('dialogs.findReplace.toggleReplace')}
               </button>

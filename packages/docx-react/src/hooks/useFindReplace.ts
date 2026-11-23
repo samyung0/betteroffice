@@ -43,6 +43,10 @@ export interface FindReplaceState {
   currentIndex: number;
   /** Whether in replace mode */
   replaceMode: boolean;
+  /** Counts the requests to open the dialog (openFind, openReplace), an open dialog's included */
+  openRequest: number;
+  /** The document's selected text at the last request ('' when nothing is selected) */
+  selectedText: string;
 }
 
 /**
@@ -84,6 +88,28 @@ export interface UseFindReplaceReturn {
 // ============================================================================
 
 /**
+ * A request to open the dialog (Ctrl+F, Ctrl+H, the menus). One while the
+ * dialog is open keeps its matches: the dialog keeps its query unless the
+ * request's selection replaces it, and searches again when it does.
+ */
+function openRequestState(
+  prev: FindReplaceState,
+  replaceMode: boolean,
+  selectedText: string | undefined
+): FindReplaceState {
+  return {
+    ...prev,
+    isOpen: true,
+    replaceMode,
+    searchText: selectedText || prev.searchText,
+    matches: prev.isOpen ? prev.matches : [],
+    currentIndex: prev.isOpen ? prev.currentIndex : 0,
+    openRequest: prev.openRequest + 1,
+    selectedText: selectedText ?? '',
+  };
+}
+
+/**
  * Hook for managing find/replace dialog state
  */
 export function useFindReplace(hookOptions?: FindReplaceOptions): UseFindReplaceReturn {
@@ -95,28 +121,16 @@ export function useFindReplace(hookOptions?: FindReplaceOptions): UseFindReplace
     matches: [],
     currentIndex: 0,
     replaceMode: hookOptions?.initialReplaceMode ?? false,
+    openRequest: 0,
+    selectedText: '',
   });
 
   const openFind = useCallback((selectedText?: string) => {
-    setState((prev) => ({
-      ...prev,
-      isOpen: true,
-      replaceMode: false,
-      searchText: selectedText || prev.searchText,
-      matches: [],
-      currentIndex: 0,
-    }));
+    setState((prev) => openRequestState(prev, false, selectedText));
   }, []);
 
   const openReplace = useCallback((selectedText?: string) => {
-    setState((prev) => ({
-      ...prev,
-      isOpen: true,
-      replaceMode: true,
-      searchText: selectedText || prev.searchText,
-      matches: [],
-      currentIndex: 0,
-    }));
+    setState((prev) => openRequestState(prev, true, selectedText));
   }, []);
 
   const close = useCallback(() => {
