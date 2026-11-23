@@ -75,4 +75,24 @@ fn declared_lengths_reserve_nothing() {
     }
     let peak = peak_of(|| assert!(StateVector::decode_v1(&vector).is_err()));
     assert!(peak < 1 << 20, "{} bytes", peak);
+
+    // An item of values declaring 2^30 and holding one (it would reserve
+    // 24 GiB from the declared length).
+    let item = |declared: u32| {
+        let mut bytes = Vec::new();
+        bytes.write_var(1u32);
+        bytes.write_var(1u32);
+        bytes.write_var(7u64);
+        bytes.write_var(0u32);
+        bytes.write_u8(8);
+        bytes.write_var(1u32);
+        bytes.write_string("a");
+        bytes.write_var(declared);
+        bytes.write_u8(120);
+        bytes.write_var(0u32);
+        bytes
+    };
+    assert!(Update::decode_v1(&item(1)).is_ok());
+    let peak = peak_of(|| assert!(Update::decode_v1(&item(1 << 30)).is_err()));
+    assert!(peak < 1 << 20, "{} bytes", peak);
 }

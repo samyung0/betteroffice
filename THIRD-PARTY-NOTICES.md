@@ -179,6 +179,9 @@ Transactions and updates:
   input declares: `src/any.rs`, the client and struct lists in
   `src/update.rs`, `src/state_vector.rs`, `src/id_set.rs`,
   `src/sync/awareness.rs` and two `ItemContent` decoders in `src/block.rs`.
+  The `Any` one reserves its declared count up to the bytes left
+  (`Decoder::remaining`, `src/updates/decoder.rs`; 0 for a decoder that does
+  not say), so it keeps no spare slots.
   An update listing a client with no structs applies as nothing
   (`src/update.rs`). Tests are in `crates/pptx-edit/tests/yrs_hostile.rs` and
   `yrs_decode_alloc.rs`, and in `tests/decode_memory.rs` with its `[[test]]`
