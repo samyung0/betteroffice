@@ -84,6 +84,9 @@ export interface YrsInputRef {
   insertText(text: string): void;
   deleteSelection(): void;
   selectAll(): void;
+  /** A reader's edit made outside the input (the ribbon, Find, Undo): one made
+   * before the session's first caret pass brings the caret into view (Q833 B). */
+  noteLocalEdit(): void;
 }
 
 export type YrsStoredFormattingAction =
@@ -426,18 +429,22 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     [emitSelection, onCaretInterrupt, session]
   );
 
+  const noteLocalEdit = useCallback((): void => {
+    if (session && lastCaretScrollRef.current?.session !== session) {
+      editedBeforeFirstPassRef.current = session;
+    }
+  }, [session]);
+
   const finishMutation = useCallback(
     (residentLayoutReady = false, residentCaretReady = false): void => {
       verticalCaretGoalRef.current.reset();
       if (!composingRef.current && textareaRef.current) textareaRef.current.value = '';
-      if (session && lastCaretScrollRef.current?.session !== session) {
-        editedBeforeFirstPassRef.current = session;
-      }
+      noteLocalEdit();
       onCaretInput?.();
       latestRef.current.onDirectInput();
       emitSelection(true, residentLayoutReady, residentCaretReady);
     },
-    [emitSelection, onCaretInput, onDirectInput, session]
+    [emitSelection, noteLocalEdit, onCaretInput, onDirectInput]
   );
 
   const finishResidentMutation = useCallback(
@@ -1485,6 +1492,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         advanceInteractionEpoch();
         selectAll();
       },
+      noteLocalEdit,
     }),
     [
       advanceInteractionEpoch,
@@ -1496,6 +1504,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       flushPendingInput,
       insertText,
       deleteSelectionStep,
+      noteLocalEdit,
       readOnly,
       selectAll,
       session,

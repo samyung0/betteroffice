@@ -156,7 +156,7 @@ export function useFindReplaceBridge({
           paraId: match.yrsRange.start.paraId,
           offset: match.yrsRange.start.offset + replaceText.length,
         });
-        return editor.syncYrsInputState(true);
+        return editor.syncYrsReaderEdit();
       } catch (error) {
         console.error('Replace failed:', error);
         return false;
@@ -186,7 +186,7 @@ export function useFindReplaceBridge({
         paraId: first.yrsRange.start.paraId,
         offset: first.yrsRange.start.offset + replaceText.length,
       });
-      editor.syncYrsInputState(true);
+      editor.syncYrsReaderEdit();
       findResultRef.current = null;
       findReplace.setMatches([], 0);
       return matches.length;

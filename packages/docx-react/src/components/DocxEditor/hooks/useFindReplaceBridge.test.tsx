@@ -31,6 +31,9 @@ afterAll(async () => {
   if (ownsDom) await GlobalRegistrator.unregister();
 });
 
+// A replace is the reader's own edit (Q833 B): the bridge publishes it as one.
+let readerEdits = 0;
+
 /** What the editor offers the bridge: its session, and display positions in body order. */
 function editorFor(session: YrsSession): PagedEditorRef {
   const position = (loc: YrsLoc) =>
@@ -40,6 +43,10 @@ function editorFor(session: YrsSession): PagedEditorRef {
     getYrsSession: () => session,
     yrsLocToDisplayPosition: position,
     syncYrsInputState: () => true,
+    syncYrsReaderEdit: () => {
+      readerEdits += 1;
+      return true;
+    },
     scrollToPosition: () => {},
   } as unknown as PagedEditorRef;
 }
@@ -83,6 +90,7 @@ test('Replace and Replace all change the matches, a picture before one included'
     { bold: true }
   );
 
+  readerEdits = 0;
   const view = render(<FindAndReplace editor={editorFor(session)} />);
   const find = view.getByLabelText(en.dialogs.findReplace.findAriaLabel);
   fireEvent.change(find, { target: { value: 'cat' } });
@@ -100,6 +108,7 @@ test('Replace and Replace all change the matches, a picture before one included'
   view.getByText(count(1, 2));
   const texts = () => session.paragraphs('body').map((paragraph) => paragraph.text);
   expect(texts()).toEqual(['The dog and the Cat.', 'See  the cat.']);
+  expect(readerEdits).toBe(1);
   const dog = session
     .storySegments('body')
     .find((segment) => segment.kind === 'text' && segment.text === 'dog');
@@ -107,6 +116,7 @@ test('Replace and Replace all change the matches, a picture before one included'
 
   fireEvent.click(view.getByRole('button', { name: en.dialogs.findReplace.replaceAllButton }));
   expect(texts()).toEqual(['The dog and the dog.', 'See  the dog.']);
+  expect(readerEdits).toBe(2);
   const second = session.storySegments('body').slice(
     session.storySegments('body').findIndex((segment) => segment.kind === 'pilcrow') + 1
   );

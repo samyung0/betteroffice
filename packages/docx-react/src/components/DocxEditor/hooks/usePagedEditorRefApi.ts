@@ -99,6 +99,11 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     yrsInputRef.current?.focus();
     return true;
   };
+  // The reader's own edit made outside the input (Undo, Redo, Find's replace).
+  const syncReaderEdit = (): boolean => {
+    yrsInputRef.current?.noteLocalEdit();
+    return syncYrsInputStateRef.current(true);
+  };
 
   return {
     getDocument: () => documentFromYrsRef.current(),
@@ -114,13 +119,13 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     undo: () => {
       const session = yrsSessionRef.current;
       const changed = session ? performYrsHistoryAction(session, false) : false;
-      if (changed) syncYrsInputStateRef.current(true);
+      if (changed) syncReaderEdit();
       return changed;
     },
     redo: () => {
       const session = yrsSessionRef.current;
       const changed = session ? performYrsHistoryAction(session, true) : false;
-      if (changed) syncYrsInputStateRef.current(true);
+      if (changed) syncReaderEdit();
       return changed;
     },
     canUndo: () => yrsSessionRef.current?.canUndo() ?? false,
@@ -154,6 +159,7 @@ function buildRefApi(inputs: RefApiInputs): PagedEditorRef {
     getYrsStoredFormatting: () => yrsInputRef.current?.storedFormatting() ?? null,
     yrsLocToDisplayPosition: (loc) => yrsLocToDisplayPositionRef.current(loc),
     syncYrsInputState: (docChanged) => syncYrsInputStateRef.current(docChanged),
+    syncYrsReaderEdit: syncReaderEdit,
     applyYrsFormatting: (action) => applyYrsFormattingRef.current(action),
     applyYrsCommand: (command) => applyYrsCommandRef.current(command),
     getLayout: () => layout,
