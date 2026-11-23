@@ -863,6 +863,58 @@ mod tests {
         assert_eq!(changed, doc.all_story_segments()["body"]);
     }
 
+    /// The decoded anchors are kept for the document epoch, which every
+    /// transaction moves: a table cell's markers, a peer's bookmark and the
+    /// undo and redo of one read as reading every story at once does (Q815).
+    #[test]
+    fn cached_anchors_follow_table_cells_peers_and_undo() {
+        let ctx = EditCtx::local("", "");
+        let doc = EditingDoc::new(9);
+        doc.create_story("body", "One two three", "Normal", "left")
+            .unwrap();
+        let cell = doc
+            .insert_table(&ctx, Position::new("body", 0), 1, 1, 12)
+            .unwrap()
+            .created_story_ids
+            .remove(0);
+        doc.insert_text(
+            &ctx,
+            Position::new(&cell, 0),
+            "Cell text",
+            FormatPolicy::Inherit,
+        )
+        .unwrap();
+        bookmark(&doc, &cell, 1, 0, 4);
+        let read = |story: &str| {
+            let segments = doc.story_segments(story).unwrap();
+            assert_eq!(segments, doc.all_story_segments()[story], "{story}");
+            segments
+        };
+        let cell_marked = read(&cell);
+
+        // A peer's bookmark in the cell, arriving as its update.
+        let peer = EditingDoc::new(10);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        bookmark(&peer, &cell, 2, 5, 9);
+        let update = peer.encode_diff_v1(&doc.encode_state_vector_v1()).unwrap();
+        doc.applying_peer_update(|| doc.apply_update_v1(&update).unwrap());
+        assert_ne!(read(&cell), cell_marked);
+
+        // A bookmark in the body, undone and redone.
+        let body = read("body");
+        let undo = crate::UndoSession::new();
+        undo.track(&doc);
+        bookmark(&doc, "body", 3, 0, 3);
+        undo.add_undo_barrier();
+        let marked = read("body");
+        assert_ne!(marked, body);
+        assert!(undo.undo());
+        assert_eq!(read("body"), body);
+        assert!(undo.redo());
+        assert_eq!(read("body"), marked);
+    }
+
     /// A peer sets a bookmark's start again on text another peer deleted and
     /// restored with Undo: the restoring peer re-anchors it to its copy, so
     /// every peer reads the bookmark at the same place.
