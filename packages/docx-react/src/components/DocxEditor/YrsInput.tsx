@@ -417,7 +417,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       setSelectionEpoch((epoch) => epoch + 1);
       latestRef.current.onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
-    [displaySelection, onStateChange]
+    // onStateChange is read through latestRef: a new one must not re-run the
+    // selection-emit effect (and its setSelectionEpoch) on every frame.
+    [displaySelection]
   );
 
   const setSelection = useCallback(

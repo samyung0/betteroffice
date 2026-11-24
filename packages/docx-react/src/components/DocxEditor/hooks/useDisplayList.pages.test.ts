@@ -3,7 +3,8 @@
  * the pages the viewport shows, plus one; the others come a batch at a time,
  * those in view first, then those a caller waits for, until none is left.
  * Keys and pages built on demand go ahead of a queued batch (Q838), until
- * it has waited a second (Q841).
+ * it has waited a second (Q841). Batches landing back to back keep React's
+ * nested-update count low (its limit threw #185 at 496 pages).
  * The worker is the real engine driven through a recording port.
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -18,7 +19,48 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerResponse,
 } from '@betteroffice/docx/yrs/residentEngineWorkerProtocol';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { pageBuildBatch, useRustDisplayList } from './useDisplayList';
+
+// React's nested-update count as React keeps it (as the Q815-185 probe): a
+// commit that leaves Sync, InputContinuous or Default work (lanes 42) pending
+// adds one, any other resets it; past 50 React throws #185. A commit whose
+// passive effects flush at once counts the lanes after that flush. Installed
+// before react-dom loads.
+const nested = { count: 0, max: 0 };
+let open: { lanes: number } | null = null;
+const settleCommit = (lanes: number): void => {
+  nested.count = lanes & 42 ? nested.count + 1 : 0;
+  nested.max = Math.max(nested.max, nested.count);
+};
+(globalThis as { __REACT_DEVTOOLS_GLOBAL_HOOK__?: unknown }).__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+  supportsFiber: true,
+  isDisabled: false,
+  renderers: new Map(),
+  inject(this: { renderers: Map<number, unknown> }, internals: unknown) {
+    this.renderers.set(this.renderers.size + 1, internals);
+    return this.renderers.size;
+  },
+  onCommitFiberRoot(_id: number, root: { pendingLanes: number }) {
+    if (open) settleCommit(open.lanes);
+    const commit = { lanes: root.pendingLanes };
+    open = commit;
+    queueMicrotask(() => {
+      if (open === commit) {
+        settleCommit(commit.lanes);
+        open = null;
+      }
+    });
+  },
+  onPostCommitFiberRoot(_id: number, root: { pendingLanes: number }) {
+    if (!open) return;
+    settleCommit(root.pendingLanes);
+    open = null;
+  },
+  onCommitFiberUnmount() {},
+  setStrictMode() {},
+  checkDCE() {},
+};
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -40,6 +82,8 @@ afterAll(async () => {
 
 class RecordingWorker {
   static current: RecordingWorker | null = null;
+  /** Answers a request as it is posted (none: the test replies). */
+  static respond: ((worker: RecordingWorker, request: ResidentEngineWorkerRequest) => void) | null = null;
   onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
   onmessageerror = null;
@@ -49,6 +93,7 @@ class RecordingWorker {
   }
   postMessage(request: ResidentEngineWorkerRequest): void {
     this.posted.push(request);
+    RecordingWorker.respond?.(this, request);
   }
   of<T extends ResidentEngineWorkerRequest['type']>(type: T) {
     return this.posted.filter((request) => request.type === type) as Array<
@@ -78,13 +123,19 @@ test('a batch takes the pages in view, then those asked for, then the nearest to
   expect(pageBuildBatch(pages, { first: 20, last: 21 }, [29, 2])).toEqual([20, 21, 29, 22, 19, 23, 18, 24]);
 });
 
-/** The hook over a 900-paragraph body, its worker a recording port; the engine's selection is `selection`. */
-function mount(selection: unknown = null) {
+/**
+ * The hook over a body of `paragraphs`, its worker a recording port; the
+ * engine's selection is `selection`. With `effects`, the component also sets
+ * state in a layout effect per list (as the canvas overlays measure) and, after
+ * that, in a passive effect (as the input emitted its selection on each frame,
+ * Q815 C's #185).
+ */
+function mount(selection: unknown = null, { paragraphs = 900, effects = false } = {}) {
   globalThis.Worker = RecordingWorker as unknown as typeof Worker;
   const native = createEditSession(9311);
   native.load_json(JSON.stringify([{
     storyId: 'body',
-    paragraphs: Array.from({ length: 900 }, (_, index) => ({ text: `Paragraph ${index} of the body` })),
+    paragraphs: Array.from({ length: paragraphs }, (_, index) => ({ text: `Paragraph ${index} of the body` })),
   }]));
   const request = JSON.stringify({
     bodyStory: 'body',
@@ -107,9 +158,18 @@ function mount(selection: unknown = null) {
   } as unknown as YrsSession;
   const viewport = { current: () => ({ height: 600, zoom: 1 }) };
   const overrides = { getInputs: () => inputs };
-  const hook = renderHook(() =>
-    useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, engine, viewport)
-  );
+  const hook = renderHook(() => {
+    const result = useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, engine, viewport);
+    const [measured, setMeasured] = useState(0);
+    const [, setEmitted] = useState(0);
+    useLayoutEffect(() => {
+      if (effects) setMeasured((count) => count + 1);
+    }, [result.displayList]);
+    useEffect(() => {
+      if (effects) setEmitted((count) => count + 1);
+    }, [measured]);
+    return result;
+  });
   return { native, ...hook };
 }
 
@@ -292,6 +352,40 @@ test('a batch that has waited a second behind keys goes before the next key (Q84
     quiet.mockRestore();
   } finally {
     clock.mockRestore();
+    native.free();
+  }
+});
+
+test("page batches landing back to back keep React's nested-update count low (Q815 C)", async () => {
+  // As in a browser: React's own scheduler, no act() queue.
+  const reactAct = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+  const actEnvironment = reactAct.IS_REACT_ACT_ENVIRONMENT;
+  reactAct.IS_REACT_ACT_ENVIRONMENT = false;
+  const { native, result, unmount } = mount(null, { paragraphs: 30_000, effects: true });
+  // The worker answers each batch as soon as it is asked for.
+  RecordingWorker.respond = (worker, request) => {
+    if (request.type !== 'buildPages') return;
+    const frame = native.build_unbuilt_display_pages_frame(Uint32Array.from(request.pages), request.expectedFrameEpoch);
+    queueMicrotask(() => worker.reply(request, frame, 0));
+  };
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  try {
+    for (let i = 0; i < 100 && !RecordingWorker.current?.of('bootstrap').length; i += 1) await wait(10);
+    const worker = RecordingWorker.current!;
+    const pageCount = native.layout_page_heights().length;
+    expect(pageCount).toBeGreaterThan(2 + 60 * 8);
+    nested.max = 0;
+    worker.reply(worker.of('bootstrap')[0]!, native.build_display_list_frame_first('{}', 0, 2), pageCount - 2);
+    for (let i = 0; i < 3000 && result.current.frame?.displayList.pages.some((page) => page.unbuilt) !== false; i += 1) {
+      await wait(5);
+    }
+    expect(worker.of('buildPages').length).toBeGreaterThanOrEqual(60);
+    expect(result.current.frame!.displayList.pages.some((page) => page.unbuilt)).toBe(false);
+    expect(nested.max).toBeLessThanOrEqual(4);
+  } finally {
+    RecordingWorker.respond = null;
+    unmount();
+    reactAct.IS_REACT_ACT_ENVIRONMENT = actEnvironment;
     native.free();
   }
 });

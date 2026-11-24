@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   buildRustDisplayList,
   buildRustDisplayFrame,
@@ -911,7 +911,11 @@ export function useRustDisplayList(
     generationRef.current += 1;
     snapshotRef.current = nextSnapshot;
     publishQuerySnapshot(nextSnapshot, contentEpoch);
-    setSnapshot(nextSnapshot);
+    // A batch's render is a transition: batches landing back to back never
+    // stack urgent renders (React's nested-update limit, Q815 C). Pages built
+    // on demand are urgent.
+    if (onDemand) setSnapshot(nextSnapshot);
+    else startTransition(() => setSnapshot(nextSnapshot));
     applyPaintedCaretReply(Boolean(result.caretPainted && nextSnapshot.caret?.caretRect), paintToken);
   };
 
