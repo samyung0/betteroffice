@@ -149,11 +149,12 @@ interface WorkerFrameRequest {
 const PAGE_BUILD_BATCH = 8;
 
 /** The next unbuilt pages to build: those in view, those asked for, then
- * outward from the view (from the top without one). */
+ * (with `fill`) outward from the view (from the top without one). */
 export function pageBuildBatch(
   pages: readonly DisplayPage[],
   visible: { first: number; last: number } | null,
-  demanded: Iterable<number>
+  demanded: Iterable<number>,
+  fill = true
 ): number[] {
   const batch: number[] = [];
   const add = (index: number): void => {
@@ -167,7 +168,7 @@ export function pageBuildBatch(
   for (const index of demanded) add(index);
   for (
     let step = 1;
-    batch.length < PAGE_BUILD_BATCH && (last + step < pages.length || first - step >= 0);
+    fill && batch.length < PAGE_BUILD_BATCH && (last + step < pages.length || first - step >= 0);
     step += 1
   ) {
     add(last + step);
@@ -231,28 +232,62 @@ export function useRustDisplayList(
   const workerPresentationActiveRef = useRef(false);
   const [workerPresentationActive, setWorkerPresentationActiveState] = useState(false);
 
-  // Pages the worker's frames leave unbuilt (Q815 C) build a batch at a time
-  // on the worker's queue, between the other requests.
+  // Pages the worker's frames leave unbuilt (Q815 C) build on the worker's
+  // queue: those in view or asked for at once, the rest a batch at a time.
+  // Keys, frames and those builds go ahead of a queued batch (Q838); a batch
+  // the worker is building finishes first.
   const visiblePagesRef = useRef<{ first: number; last: number } | null>(null);
   const demandedPagesRef = useRef(new Set<number>());
   const pageBuildQueuedRef = useRef(false);
-  const runPageBuildRef = useRef<() => Promise<void>>(async () => {});
+  const demandBuildQueuedRef = useRef(false);
+  const workerWaitingRef = useRef(0);
+  const runPageBuildRef = useRef<(onDemand: boolean) => Promise<void>>(async () => {});
   const pageWaitersRef = useRef(new Set<{ pages: number[]; resolve: () => void }>());
   const workerMediaRef = useRef(false);
+  /** Queues a worker request; a page batch queued before it waits for it. */
+  const enqueueWorkerRequest = useCallback(<T>(run: () => Promise<T>): Promise<T> => {
+    workerWaitingRef.current += 1;
+    const start = (): Promise<T> => {
+      workerWaitingRef.current -= 1;
+      return run();
+    };
+    const pending = workerInputQueueRef.current.then(start, start);
+    workerInputQueueRef.current = pending.then(
+      () => undefined,
+      () => undefined
+    );
+    return pending;
+  }, []);
   const schedulePageBuilds = useCallback((): void => {
     if (pageBuildQueuedRef.current || !workerRef.current) return;
     pageBuildQueuedRef.current = true;
-    const run = (): Promise<void> => runPageBuildRef.current();
+    const run = (): Promise<void> => {
+      pageBuildQueuedRef.current = false;
+      // Requests queued behind this batch go first: it queues again after them.
+      if (workerWaitingRef.current > 0) {
+        schedulePageBuilds();
+        return Promise.resolve();
+      }
+      return runPageBuildRef.current(false);
+    };
     workerInputQueueRef.current = workerInputQueueRef.current
       .then(run, run)
       .catch((error) => console.error('[CanvasRenderer] Page build failed', error));
   }, []);
+  const scheduleDemandBuild = useCallback((): void => {
+    if (demandBuildQueuedRef.current || !workerRef.current) return;
+    demandBuildQueuedRef.current = true;
+    enqueueWorkerRequest(() => {
+      demandBuildQueuedRef.current = false;
+      return runPageBuildRef.current(true);
+    }).catch((error) => console.error('[CanvasRenderer] Page build failed', error));
+  }, [enqueueWorkerRequest]);
   const demandPages = useCallback(
     (pageIndices: number[]): void => {
       for (const index of pageIndices) demandedPagesRef.current.add(index);
-      schedulePageBuilds();
+      scheduleDemandBuild();
     },
-    [schedulePageBuilds]
+    [scheduleDemandBuild]
   );
 
   const paintedCaretMachineRef = useRef<PaintedCaretMachine | null>(null);
@@ -661,12 +696,7 @@ export function useRustDisplayList(
           ),
         };
       };
-      const pending = workerInputQueueRef.current.then(run, run);
-      workerInputQueueRef.current = pending.then(
-        () => undefined,
-        () => undefined
-      );
-      return pending.catch((error) => {
+      return enqueueWorkerRequest(run).catch((error) => {
         const nextError =
           error instanceof Error ? error : new Error(`Resident input failed: ${String(error)}`);
         // This Rust rejection happens before the edit transaction. Let the
@@ -685,6 +715,7 @@ export function useRustDisplayList(
     [
       applyPaintedCaretReply,
       demandPages,
+      enqueueWorkerRequest,
       paintedCaretMachine,
       publishQuerySnapshot,
       queryEpochGate,
@@ -828,9 +859,9 @@ export function useRustDisplayList(
     publishQuerySnapshot,
   ]);
 
-  // One batch of the unbuilt pages, applied as any worker frame.
-  runPageBuildRef.current = async (): Promise<void> => {
-    pageBuildQueuedRef.current = false;
+  // Unbuilt pages, applied as any worker frame: on demand those in view and
+  // those asked for, else a batch.
+  runPageBuildRef.current = async (onDemand: boolean): Promise<void> => {
     const worker = workerRef.current;
     const previous = snapshotRef.current.frame;
     if (!worker || !previous) return;
@@ -840,7 +871,8 @@ export function useRustDisplayList(
     const pages = pageBuildBatch(
       previous.displayList.pages,
       visiblePagesRef.current,
-      demandedPagesRef.current
+      demandedPagesRef.current,
+      !onDemand
     );
     if (pages.length === 0) return;
     const contentEpoch = contentEpochRef.current;
@@ -909,9 +941,9 @@ export function useRustDisplayList(
       if (current?.first === first && current.last === last) return;
       visiblePagesRef.current = { first, last };
       const pages = snapshotRef.current.frame?.displayList.pages;
-      if (pages?.slice(first, last + 1).some((page) => page.unbuilt)) schedulePageBuilds();
+      if (pages?.slice(first, last + 1).some((page) => page.unbuilt)) scheduleDemandBuild();
     },
-    [schedulePageBuilds]
+    [scheduleDemandBuild]
   );
 
   const ensureVisiblePages = useCallback((): Promise<void> => {
@@ -1127,11 +1159,9 @@ export function useRustDisplayList(
         };
         if (!workerFrameQueuedRef.current) {
           workerFrameQueuedRef.current = true;
-          workerInputQueueRef.current = workerInputQueueRef.current
-            .then(runWorkerFrame, runWorkerFrame)
-            .catch((error) => {
-              console.error('[CanvasRenderer] Resident frame publication failed', error);
-            });
+          enqueueWorkerRequest(runWorkerFrame).catch((error) => {
+            console.error('[CanvasRenderer] Resident frame publication failed', error);
+          });
         }
       } catch (error) {
         fallback(error);
@@ -1156,6 +1186,7 @@ export function useRustDisplayList(
     publishQuerySnapshot,
     queryEpochGate,
     runWorkerFrame,
+    enqueueWorkerRequest,
   ]);
 
   return {

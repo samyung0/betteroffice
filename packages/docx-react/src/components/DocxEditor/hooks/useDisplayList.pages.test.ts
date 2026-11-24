@@ -2,10 +2,11 @@
  * Visible pages first in DOCX Edit (Q815 C): the worker's first frame builds
  * the pages the viewport shows, plus one; the others come a batch at a time,
  * those in view first, then those a caller waits for, until none is left.
+ * Keys and pages built on demand go ahead of a queued batch (Q838).
  * The worker is the real engine driven through a recording port.
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, spyOn, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { DisplayPage } from '@betteroffice/docx/layout/render';
@@ -76,7 +77,8 @@ test('a batch takes the pages in view, then those asked for, then the nearest to
   expect(pageBuildBatch(pages, { first: 20, last: 21 }, [29, 2])).toEqual([20, 21, 29, 22, 19, 23, 18, 24]);
 });
 
-test('the first frame builds the pages in view; the rest build until none is left, those in view first', async () => {
+/** The hook over a 900-paragraph body, its worker a recording port; the engine's selection is `selection`. */
+function mount(selection: unknown = null) {
   globalThis.Worker = RecordingWorker as unknown as typeof Worker;
   const native = createEditSession(9311);
   native.load_json(JSON.stringify([{
@@ -99,15 +101,20 @@ test('the first frame builds the pages in view; the rest build until none is lef
       renderInputs: [], measureInputs: [], layoutInput: request, layoutWithRegions: true, layoutRevision: 1,
     }),
     onUpdate: () => () => {},
-    selection: () => null,
+    selection: () => selection,
     applyUpdate: () => null,
   } as unknown as YrsSession;
   const viewport = { current: () => ({ height: 600, zoom: 1 }) };
   const overrides = { getInputs: () => inputs };
+  const hook = renderHook(() =>
+    useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, engine, viewport)
+  );
+  return { native, ...hook };
+}
+
+test('the first frame builds the pages in view; the rest build until none is left, those in view first', async () => {
+  const { native, result, unmount } = mount();
   try {
-    const { result, unmount } = renderHook(() =>
-      useRustDisplayList(inputs.layout as Layout, overrides, undefined, undefined, engine, viewport)
-    );
     await act(settle);
     const worker = RecordingWorker.current!;
     const [bootstrap] = worker.of('bootstrap');
@@ -146,8 +153,8 @@ test('the first frame builds the pages in view; the rest build until none is lef
       // The next batch is asked for once the frame is applied.
       await act(settle);
       if (round === 0) {
-        // Then the page in view not built yet, the page waited for, and the nearest.
-        expect(builds()[1]!.pages.slice(0, 2)).toEqual([10, pageCount - 1]);
+        // Then on its own the page in view not built yet and the page waited for.
+        expect(builds()[1]!.pages).toEqual([10, pageCount - 1]);
       }
     }
     expect(unbuilt()).toEqual([]);
@@ -157,6 +164,47 @@ test('the first frame builds the pages in view; the rest build until none is lef
     await act(settle);
     expect(builds()).toHaveLength(sent);
     unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('a key queued behind a page batch goes first; the batch the worker is building finishes', async () => {
+  const { native, result, unmount } = mount({ anchor: 0, head: 0 });
+  try {
+    await act(settle);
+    const worker = RecordingWorker.current!;
+    const [bootstrap] = worker.of('bootstrap');
+    const pageCount = native.layout_page_heights().length;
+    await act(async () => {
+      worker.reply(bootstrap!, native.build_display_list_frame_first('{}', 0, 2), pageCount - 2);
+      await settle();
+    });
+    const types = () => worker.posted.map((request) => request.type);
+    const [batch] = worker.of('buildPages');
+    // A key while the worker builds a batch waits for it.
+    void result.current.applyInput('a');
+    await act(settle);
+    expect(types().at(-1)).toBe('buildPages');
+    await act(async () => {
+      worker.reply(batch!, native.build_unbuilt_display_pages_frame(Uint32Array.from(batch!.pages), 1), pageCount - 10);
+      await settle();
+    });
+    // The key goes, and the next batch queues behind it; a second key comes.
+    expect(types().at(-1)).toBe('applyInput');
+    void result.current.applyInput('b');
+    await act(settle);
+    await act(async () => {
+      worker.reply(worker.of('applyInput')[0]!, native.build_unbuilt_display_pages_frame(new Uint32Array(), 2), pageCount - 10);
+      await settle();
+    });
+    // The second key goes ahead of the batch queued before it.
+    expect(types().slice(-3)).toEqual(['buildPages', 'applyInput', 'applyInput']);
+    // Closing with the second key in flight logs its failure.
+    const quiet = spyOn(console, 'error').mockImplementation(() => {});
+    unmount();
+    await settle();
+    quiet.mockRestore();
   } finally {
     native.free();
   }
