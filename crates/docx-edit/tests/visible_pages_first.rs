@@ -19,6 +19,15 @@ struct Fixture {
 impl Fixture {
     /// One-line paragraphs over many small pages under a one-paragraph header.
     fn new() -> Self {
+        Self::with(
+            &(0..PARAGRAPHS)
+                .map(|index| format!("Paragraph {index} of the body"))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// `paragraphs` over small pages under a one-paragraph header.
+    fn with(paragraphs: &[String]) -> Self {
         docx_layout::clear_measure_fonts();
         let font = docx_layout::register_measure_font(FONT).unwrap();
         let doc = EditingDoc::new(1);
@@ -28,18 +37,17 @@ impl Fixture {
         doc.create_story("body", "", "Normal", "left").unwrap();
         let mut starts = Vec::new();
         let mut cursor = 0;
-        for index in 0..PARAGRAPHS {
+        for (index, text) in paragraphs.iter().enumerate() {
             starts.push(cursor);
-            let text = format!("Paragraph {index} of the body");
             doc.insert_text(
                 &ctx,
                 Position::new("body", cursor),
-                &text,
+                text,
                 FormatPolicy::Inherit,
             )
             .unwrap();
             cursor += text.len() as u32;
-            if index + 1 < PARAGRAPHS {
+            if index + 1 < paragraphs.len() {
                 doc.split_paragraph(&ctx, Position::new("body", cursor))
                     .unwrap();
                 cursor += 1;
@@ -130,9 +138,17 @@ fn build_rest(engine: &EngineSession, batch: usize) {
 /// `(full, upserts)` from a FrameDelta header and table.
 fn frame_ops(frame: &[u8]) -> (bool, usize) {
     let u32_at = |offset: usize| u32::from_le_bytes(frame[offset..offset + 4].try_into().unwrap());
-    let count = u32_at(52) as usize;
-    let upserts = (0..count).filter(|op| frame[80 + op * 48] == 1).count();
-    (u32_at(12) & 1 == 1, upserts)
+    (u32_at(12) & 1 == 1, upserted(frame).len())
+}
+
+/// The pages a FrameDelta sends in full, by index.
+fn upserted(frame: &[u8]) -> Vec<usize> {
+    let u32_at = |offset: usize| u32::from_le_bytes(frame[offset..offset + 4].try_into().unwrap());
+    (0..u32_at(52) as usize)
+        .map(|op| 80 + op * 48)
+        .filter(|&record| frame[record] == 1)
+        .map(|record| u32_at(record + 4) as usize)
+        .collect()
 }
 
 fn type_at(worker: &EngineSession, index: u32, text: &str) {
@@ -199,6 +215,28 @@ fn pages_built_later_make_the_whole_build() {
         "only the three pages built go"
     );
     assert!(!list(&worker).pages[5].unbuilt);
+    assert!(worker.stats().retained_unbuilt_input);
+    build_rest(&worker, 3);
+    assert_eq!(list(&worker), fixture.whole(&worker));
+    // Every page built: the unbuilt pages' input is released.
+    assert!(!worker.stats().retained_unbuilt_input);
+}
+
+#[test]
+fn pages_built_ahead_of_built_ones_leave_those_as_they_are() {
+    // One paragraph over many pages: every page starts in the same block.
+    let fixture = Fixture::with(&["A long paragraph that runs on. ".repeat(400)]);
+    let worker = fixture.worker(2);
+    let pages = list(&worker).pages.len();
+    assert!(pages > 8, "the fixture spans pages: {pages}");
+    // A jump to the end, then the pages before it, as batches fill backwards.
+    for batch in [[pages - 2, pages - 1], [pages - 4, pages - 3]] {
+        let epoch = worker.stats().frame_epoch;
+        let frame = worker
+            .build_unbuilt_display_pages_frame(&batch, epoch)
+            .unwrap();
+        assert_eq!(upserted(&frame), batch, "only the pages built go");
+    }
     build_rest(&worker, 3);
     assert_eq!(list(&worker), fixture.whole(&worker));
 }

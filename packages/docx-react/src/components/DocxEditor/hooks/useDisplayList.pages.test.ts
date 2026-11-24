@@ -2,7 +2,8 @@
  * Visible pages first in DOCX Edit (Q815 C): the worker's first frame builds
  * the pages the viewport shows, plus one; the others come a batch at a time,
  * those in view first, then those a caller waits for, until none is left.
- * Keys and pages built on demand go ahead of a queued batch (Q838).
+ * Keys and pages built on demand go ahead of a queued batch (Q838), until
+ * it has waited a second (Q841).
  * The worker is the real engine driven through a recording port.
  */
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -54,11 +55,11 @@ class RecordingWorker {
       Extract<ResidentEngineWorkerRequest, { type: T }>
     >;
   }
-  reply(request: ResidentEngineWorkerRequest, frame: Uint8Array, unbuiltPages: number): void {
+  reply(request: ResidentEngineWorkerRequest, frame: Uint8Array, unbuiltPages: number, media = false): void {
     this.onmessage?.({ data: {
       id: request.id, ok: true, frame: frame.slice().buffer, updates: [],
       caret: { frameEpoch: 0, caretRect: null }, selection: null, layoutRevision: 1,
-      ...(unbuiltPages > 0 ? { unbuiltPages, media: false } : {}),
+      ...(unbuiltPages > 0 ? { unbuiltPages, media } : {}),
     } } as unknown as MessageEvent<ResidentEngineWorkerResponse>);
   }
   terminate(): void {}
@@ -206,6 +207,91 @@ test('a key queued behind a page batch goes first; the batch the worker is build
     await settle();
     quiet.mockRestore();
   } finally {
+    native.free();
+  }
+});
+
+test('a document holding media keeps the page drawing its pages until every page is built (Q837)', async () => {
+  const { native, result, unmount } = mount();
+  try {
+    await act(settle);
+    const worker = RecordingWorker.current!;
+    const [bootstrap] = worker.of('bootstrap');
+    const pageCount = native.layout_page_heights().length;
+    await act(async () => {
+      worker.reply(bootstrap!, native.build_display_list_frame_first('{}', 0, 2), pageCount - 2, true);
+      await settle();
+    });
+    expect(result.current.unbuiltMayHoldImages).toBe(true);
+    let epoch = 1;
+    for (let round = 0; worker.of('buildPages').length > round && round < 20; round += 1) {
+      const build = worker.of('buildPages')[round]!;
+      const frame = native.build_unbuilt_display_pages_frame(Uint32Array.from(build.pages), epoch);
+      epoch += 1;
+      const left = result.current.frame!.displayList.pages.filter(
+        (page, index) => page.unbuilt && !build.pages.includes(index)
+      ).length;
+      await act(async () => {
+        worker.reply(build, frame, left, true);
+        await settle();
+      });
+      await act(settle);
+    }
+    expect(result.current.frame!.displayList.pages.some((page) => page.unbuilt)).toBe(false);
+    expect(result.current.unbuiltMayHoldImages).toBe(false);
+    unmount();
+  } finally {
+    native.free();
+  }
+});
+
+test('a batch that has waited a second behind keys goes before the next key (Q841)', async () => {
+  const { native, result, unmount } = mount({ anchor: 0, head: 0 });
+  const now = performance.now.bind(performance);
+  let skew = 0;
+  const clock = spyOn(performance, 'now').mockImplementation(() => now() + skew);
+  try {
+    await act(settle);
+    const worker = RecordingWorker.current!;
+    const [bootstrap] = worker.of('bootstrap');
+    const pageCount = native.layout_page_heights().length;
+    await act(async () => {
+      worker.reply(bootstrap!, native.build_display_list_frame_first('{}', 0, 2), pageCount - 2);
+      await settle();
+    });
+    const types = () => worker.posted.map((request) => request.type);
+    // Keys keep coming: each one queued while the one before it is in the worker.
+    void result.current.applyInput('a');
+    await act(settle);
+    const [batch] = worker.of('buildPages');
+    await act(async () => {
+      worker.reply(batch!, native.build_unbuilt_display_pages_frame(Uint32Array.from(batch!.pages), 1), pageCount - 10);
+      await settle();
+    });
+    void result.current.applyInput('b');
+    await act(settle);
+    let epoch = 2;
+    await act(async () => {
+      worker.reply(worker.of('applyInput')[0]!, native.build_unbuilt_display_pages_frame(new Uint32Array(), epoch++), pageCount - 10);
+      await settle();
+    });
+    // Within the second the next batch waits behind the key.
+    expect(types().slice(-2)).toEqual(['applyInput', 'applyInput']);
+    void result.current.applyInput('c');
+    await act(settle);
+    skew = 1100;
+    await act(async () => {
+      worker.reply(worker.of('applyInput')[1]!, native.build_unbuilt_display_pages_frame(new Uint32Array(), epoch++), pageCount - 10);
+      await settle();
+    });
+    // A second on, the batch goes before the key queued behind it.
+    expect(types().slice(-2)).toEqual(['applyInput', 'buildPages']);
+    const quiet = spyOn(console, 'error').mockImplementation(() => {});
+    unmount();
+    await settle();
+    quiet.mockRestore();
+  } finally {
+    clock.mockRestore();
     native.free();
   }
 });

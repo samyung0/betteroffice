@@ -76,7 +76,8 @@ async function mount({ unbuilt = false } = {}) {
   const queries = {
     isReady: () => true,
     get displayList() {
-      return { pages: [{ pageIndex: 0 }, { pageIndex: 1, unbuilt: !built }] };
+      const span = [lines[10]!.from, lines[19]!.to];
+      return { pages: [{ pageIndex: 0 }, { pageIndex: 1, unbuilt: !built, positionSpan: span }] };
     },
     pageSize: () => ({ width: 100, height: 200 }),
     visualLines: shown,
@@ -181,4 +182,14 @@ test('PageDown toward a page not built yet waits for it, then moves (Q815 C)', a
   expect(asked[0]).toContain(1);
   expect(session.selection()).toEqual({ anchor: at(12, 3), head: at(12, 3) });
   expect(scroller.scrollTop - scrollTop).toBe(210);
+});
+
+test('PageUp with the caret on a page not built yet builds that page, then moves (Q815 C)', async () => {
+  const { session, press, at, asked } = await mount({ unbuilt: true });
+  // As right after Ctrl+End: the caret is on the second page before it is built.
+  session.setSelection(at(15, 3));
+  await press('PageUp');
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toContain(1);
+  expect(session.selection()).toEqual({ anchor: at(5, 3), head: at(5, 3) });
 });

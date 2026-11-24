@@ -73,9 +73,13 @@ function finishPrint(w: Window, images: HTMLImageElement[] = []): void {
   setTimeout(runPrint, 2000);
 }
 
-/** Prints display-list pages as PNG images without interpolating data into markup. */
+/**
+ * Prints display-list pages as PNG images without interpolating data into
+ * markup. The window opens at once, within the click's user activation, and
+ * fills once `displayList` (every page built, Q815 C) arrives.
+ */
 function printDisplayListPages(
-  displayList: DisplayList,
+  displayList: Promise<DisplayList>,
   resolveImage: ImageResolver,
   onPrint?: () => void
 ): void {
@@ -89,7 +93,7 @@ function printDisplayListPages(
   style.textContent = PRINT_CANVAS_CSS;
   w.document.head.appendChild(style);
 
-  void rasterizeDisplayListPages(displayList, { resolveImage }).then(
+  void displayList.then((list) => rasterizeDisplayListPages(list, { resolveImage })).then(
     (canvases) => {
       const images: HTMLImageElement[] = [];
       for (const canvas of canvases) {
@@ -217,7 +221,7 @@ export function useFileIO({
     }
     // Every page, built: an editor builds the pages out of its first view
     // after it (Q815 C).
-    void wholeDisplayList().then((list) => printDisplayListPages(list, resolveImage, onPrint));
+    printDisplayListPages(wholeDisplayList(), resolveImage, onPrint);
   }, [displayList, wholeDisplayList, resolveImage, onPrint]);
 
   const handleDownloadDocument = useCallback((): Promise<void> => {

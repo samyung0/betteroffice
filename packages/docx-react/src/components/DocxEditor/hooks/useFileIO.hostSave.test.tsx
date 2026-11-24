@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocx } from '@betteroffice/docx/docx';
 import type { Document } from '@betteroffice/docx/types/document';
+import type { DisplayList } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
 import { useFileIO } from './useFileIO';
 import { useKeyboardShortcuts } from './useKeyboardShortcuts';
@@ -28,6 +29,8 @@ function setup(
     onSaveRequest?: () => boolean | void | Promise<boolean | void>;
     flush?: () => Promise<void>;
     focused?: boolean;
+    displayList?: DisplayList | null;
+    wholeDisplayList?: () => Promise<DisplayList>;
   } = {}
 ) {
   const events: string[] = [];
@@ -51,8 +54,8 @@ function setup(
   const hook = renderHook(() => {
     const io = useFileIO({
       pagedEditorRef,
-      displayList: null,
-      wholeDisplayList: () => new Promise(() => {}),
+      displayList: options.displayList ?? null,
+      wholeDisplayList: options.wholeDisplayList ?? (() => new Promise(() => {})),
       resolveImage: () => null,
       documentName: 'saved',
       onSave: (buffer) => {
@@ -360,4 +363,42 @@ test("with the editor's view gone, a save exports what the session holds", async
   );
   const bytes = await result.current.handleSave();
   expect(bytes?.byteLength).toBeGreaterThan(0);
+});
+
+test('Print opens its window during the click and prints the pages once every one is built (Q815 C)', async () => {
+  let whole!: (list: DisplayList) => void;
+  let asked = 0;
+  const shown: DisplayList = { pages: [{ pageIndex: 0, width: 10, height: 10, primitives: [] }] } as never;
+  const state = setup({
+    displayList: { pages: [{ ...shown.pages[0]!, unbuilt: true }] } as never,
+    wholeDisplayList: () => {
+      asked += 1;
+      return new Promise((resolve) => {
+        whole = resolve;
+      });
+    },
+  });
+  const popup = {
+    opener: null,
+    closed: false,
+    document: document.implementation.createHTMLDocument('print'),
+    focus() {},
+    print() {},
+    close() {},
+  } as unknown as Window;
+  const opened: string[] = [];
+  const open = window.open;
+  window.open = ((...args: Parameters<typeof window.open>) => {
+    opened.push(String(args[1]));
+    return popup;
+  }) as typeof window.open;
+  try {
+    state.hook.result.current.handleDirectPrint();
+    // The window opens within the click, while pages are still being built.
+    expect(opened).toEqual(['_blank']);
+    expect(asked).toBe(1);
+    await act(async () => whole(shown));
+  } finally {
+    window.open = open;
+  }
 });

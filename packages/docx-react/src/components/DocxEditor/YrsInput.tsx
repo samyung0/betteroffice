@@ -929,8 +929,19 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
           const displayPosition = locToDisplayPosition(head);
           let queries = querySnapshot?.queries;
           // A line or page move reads the pages around the caret: built first (Q815 C).
+          // A caret on a page not built yet has no rect: its page holds its position.
+          const unbuiltCaretPage = (position: number): number | undefined => {
+            const index =
+              queries?.displayList.pages.findIndex(
+                ({ unbuilt, positionSpan }) =>
+                  unbuilt && positionSpan && positionSpan[0] <= position && position <= positionSpan[1]
+              ) ?? -1;
+            return index < 0 ? undefined : index;
+          };
           const caretPage =
-            displayPosition == null ? undefined : queries?.caretRect(displayPosition)?.pageIndex;
+            displayPosition == null
+              ? undefined
+              : (queries?.caretRect(displayPosition)?.pageIndex ?? unbuiltCaretPage(displayPosition));
           if (caretPage !== undefined && queries && ensureDisplayPages) {
             const reach = byPage ? 2 : 1;
             const near: number[] = [];

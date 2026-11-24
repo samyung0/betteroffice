@@ -147,6 +147,8 @@ interface WorkerFrameRequest {
 
 /** Unbuilt pages one request builds (as DOCX View's batches). */
 const PAGE_BUILD_BATCH = 8;
+/** How long a page batch waits behind other worker requests before it goes first (Q841). */
+const PAGE_BUILD_MAX_WAIT_MS = 1000;
 
 /** The next unbuilt pages to build: those in view, those asked for, then
  * (with `fill`) outward from the view (from the top without one). */
@@ -234,11 +236,12 @@ export function useRustDisplayList(
 
   // Pages the worker's frames leave unbuilt (Q815 C) build on the worker's
   // queue: those in view or asked for at once, the rest a batch at a time.
-  // Keys, frames and those builds go ahead of a queued batch (Q838); a batch
-  // the worker is building finishes first.
+  // Keys, frames and those builds go ahead of a queued batch (Q838), up to
+  // a second of waiting (Q841); a batch the worker is building finishes first.
   const visiblePagesRef = useRef<{ first: number; last: number } | null>(null);
   const demandedPagesRef = useRef(new Set<number>());
   const pageBuildQueuedRef = useRef(false);
+  const pageBuildWaitingSinceRef = useRef<number | null>(null);
   const demandBuildQueuedRef = useRef(false);
   const workerWaitingRef = useRef(0);
   const runPageBuildRef = useRef<(onDemand: boolean) => Promise<void>>(async () => {});
@@ -261,13 +264,17 @@ export function useRustDisplayList(
   const schedulePageBuilds = useCallback((): void => {
     if (pageBuildQueuedRef.current || !workerRef.current) return;
     pageBuildQueuedRef.current = true;
+    pageBuildWaitingSinceRef.current ??= performance.now();
     const run = (): Promise<void> => {
       pageBuildQueuedRef.current = false;
-      // Requests queued behind this batch go first: it queues again after them.
-      if (workerWaitingRef.current > 0) {
+      // Requests queued behind this batch go first: it queues again after
+      // them, until it has waited a second.
+      const waited = performance.now() - (pageBuildWaitingSinceRef.current ?? 0);
+      if (workerWaitingRef.current > 0 && waited < PAGE_BUILD_MAX_WAIT_MS) {
         schedulePageBuilds();
         return Promise.resolve();
       }
+      pageBuildWaitingSinceRef.current = null;
       return runPageBuildRef.current(false);
     };
     workerInputQueueRef.current = workerInputQueueRef.current

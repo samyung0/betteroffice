@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use docx_layout::display_list::DisplayList;
@@ -37,6 +37,7 @@ use crate::bridge::{
 };
 use crate::frame_delta::{
     FrameEpochs, FramePageSnapshot, encode_frame_delta, encode_frame_delta_incremental,
+    encode_frame_delta_pages,
 };
 
 mod first_pages;
@@ -897,6 +898,8 @@ pub struct EngineStats {
     pub display_builds: u64,
     pub incremental_display_builds: u64,
     pub rebuilt_display_pages: u64,
+    /// The input the unbuilt pages build from is held (some page is unbuilt).
+    pub retained_unbuilt_input: bool,
     /// Body edits the resident region fast path absorbed.
     pub region_fast_path_hits: u64,
     /// Why the last body edit fell back to the full region pass.
@@ -1659,6 +1662,7 @@ impl EngineSession {
             display_builds: display.display_builds,
             incremental_display_builds: display.incremental_display_builds,
             rebuilt_display_pages: display.rebuilt_display_pages,
+            retained_unbuilt_input: self.unbuilt_input.borrow().is_some(),
             region_fast_path_hits: self.region_fast_path.get().0,
             region_fast_path_fallback: self.region_fast_path.get().1,
         }
@@ -3388,7 +3392,9 @@ impl EngineSession {
         pages: Option<PageBuild<'_>>,
     ) -> Result<Vec<u8>, String> {
         let extras_fingerprint = hash_bytes(extras_json.as_bytes());
-        let (incremental_build, rebuilt_display_pages, rebuilt_pages) = {
+        // `same_layout`: pages built into the retained list's own layout, so
+        // every page keeps its index.
+        let (incremental_build, rebuilt_display_pages, rebuilt_pages, same_layout) = {
             let pagination = self.pagination.borrow();
             let input = pagination
                 .input
@@ -3447,9 +3453,9 @@ impl EngineSession {
                     }
                     _ => Vec::new(),
                 };
-                (true, built.len(), built)
+                (true, built.len(), built, true)
             } else if incremental {
-                (true, rebuilt.len(), rebuilt.collect())
+                (true, rebuilt.len(), rebuilt.collect(), false)
             } else if let Some(PageBuild::First(first)) = pages
                 && first < layout.pages.len()
             {
@@ -3470,7 +3476,7 @@ impl EngineSession {
                     extras_fingerprint,
                     input: resident,
                 });
-                (false, first, Vec::new())
+                (false, first, Vec::new(), false)
             } else {
                 display.list = Some(docx_layout::build_resident_display_pages_observed(
                     input,
@@ -3479,7 +3485,7 @@ impl EngineSession {
                     0..layout.pages.len(),
                     observe_display_phase,
                 )?);
-                (false, layout.pages.len(), Vec::new())
+                (false, layout.pages.len(), Vec::new(), false)
             }
         };
         observe_display_phase();
@@ -3508,21 +3514,38 @@ impl EngineSession {
             .list
             .as_ref()
             .expect("display list built before FrameDelta encoding");
+        if !list.pages.iter().any(|page| page.unbuilt) {
+            // Every page built: the unbuilt pages' input goes.
+            self.unbuilt_input.borrow_mut().take();
+        }
         let epochs = FrameEpochs {
             doc_epoch: self.doc_epoch(),
             layout_epoch,
             frame_epoch,
             base_frame_epoch: binary_frame_epoch,
         };
+        let rebuilt_pages: HashSet<usize> = rebuilt_pages.into_iter().collect();
         let (bytes, pages) =
             if incremental_build && !full && previous_pages.len() == list.pages.len() {
-                encode_frame_delta_incremental(
-                    list,
-                    previous_pages,
-                    epochs,
-                    &mut next_page_id,
-                    &rebuilt_pages.into_iter().collect(),
-                )?
+                if same_layout {
+                    // Building an earlier page renumbers the semantic anchors of
+                    // the built pages after it: match them by index instead.
+                    encode_frame_delta_pages(
+                        list,
+                        previous_pages,
+                        epochs,
+                        &mut next_page_id,
+                        &|index| rebuilt_pages.contains(&index),
+                    )?
+                } else {
+                    encode_frame_delta_incremental(
+                        list,
+                        previous_pages,
+                        epochs,
+                        &mut next_page_id,
+                        &rebuilt_pages,
+                    )?
+                }
             } else {
                 encode_frame_delta(list, previous_pages, epochs, full, &mut next_page_id)?
             };
@@ -3743,6 +3766,7 @@ mod tests {
                 display_builds: 0,
                 incremental_display_builds: 0,
                 rebuilt_display_pages: 0,
+                retained_unbuilt_input: false,
                 region_fast_path_hits: 0,
                 region_fast_path_fallback: None,
             }
