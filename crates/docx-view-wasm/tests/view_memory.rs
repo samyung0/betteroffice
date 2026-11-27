@@ -191,7 +191,9 @@ fn the_region_pass_copies_the_arena_only_for_notes() {
     let (_, peak) = peak_during(|| plain.layout(&request).unwrap());
     let retained = LIVE.load(Relaxed) - before;
     eprintln!("region pass: peak {peak} bytes, retained {retained} bytes");
-    assert!(peak * 4 <= retained * 5, "peak {peak}, retained {retained}");
+    // A copied arena would double the peak. Since the arena's advances shrank
+    // (Q846) the pass's own scratch is a larger share of the peak.
+    assert!(peak * 2 <= retained * 3, "peak {peak}, retained {retained}");
 
     let (mut noted, request) = open(&ladder(120, true), font);
     noted.layout(&request).unwrap();
