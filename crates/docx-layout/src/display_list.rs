@@ -818,8 +818,9 @@ pub struct TextRunPrimitive {
     /// measured advance of the whole run
     pub width: Number,
     /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    /// Boxed: only synthetic fallback runs have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paint_clip: Option<ClipRect>,
+    pub paint_clip: Option<Box<ClipRect>>,
     /// CSS font shorthand.
     pub font: String,
     /// Script faces its paragraph needs, as the layout's font collection resolves them.
@@ -888,12 +889,13 @@ pub struct GlyphRunPrimitive {
     #[allow(clippy::box_collection)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paint_text: Option<Box<String>>,
-    pub glyphs: Vec<PlacedGlyph>,
+    pub glyphs: Glyphs,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<EchoRunFacts>,
     /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    /// Boxed: only synthetic fallback runs have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub paint_clip: Option<ClipRect>,
+    pub paint_clip: Option<Box<ClipRect>>,
     /// extra advance added after each U+0020 cluster on a justified line (px) —
     /// equivalent to [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
     /// already fold this stretch in, so it is an interchange hint, not
@@ -1015,6 +1017,214 @@ pub struct PlacedGlyph {
     pub logical_order: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_level: Option<u8>,
+}
+
+/// A glyph run's glyphs. [`Glyphs::compact`] stores them as [`MilliGlyph`]s
+/// when every glyph converts back exactly, as glyphs on the thousandths grid
+/// `round3` leaves do; any other run keeps full records (Q846). Reading
+/// either yields the same [`PlacedGlyph`]s.
+#[derive(Clone)]
+pub enum Glyphs {
+    Full(Vec<PlacedGlyph>),
+    Milli(Box<[MilliGlyph]>),
+}
+
+/// A [`PlacedGlyph`] in 28 bytes: coordinates in whole thousandths of a px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MilliGlyph {
+    id: u32,
+    cluster: u32,
+    x: i32,
+    y: i32,
+    advance: i32,
+    /// `u32::MAX` for none.
+    logical_order: u32,
+    /// `u8::MAX` for none.
+    bidi_level: u8,
+}
+
+impl MilliGlyph {
+    fn new(glyph: &PlacedGlyph) -> Option<Self> {
+        // Only a value that reads back to the same bits is stored.
+        fn milli(value: f64) -> Option<i32> {
+            let milli = (value * 1000.0).round() as i32;
+            ((f64::from(milli) / 1000.0).to_bits() == value.to_bits()).then_some(milli)
+        }
+        Some(Self {
+            id: glyph.id,
+            cluster: glyph.cluster,
+            x: milli(glyph.x)?,
+            y: milli(glyph.y)?,
+            advance: milli(glyph.advance)?,
+            logical_order: match glyph.logical_order {
+                None => u32::MAX,
+                Some(order) => u32::try_from(order)
+                    .ok()
+                    .filter(|order| *order != u32::MAX)?,
+            },
+            bidi_level: match glyph.bidi_level {
+                None => u8::MAX,
+                Some(u8::MAX) => return None,
+                Some(level) => level,
+            },
+        })
+    }
+
+    fn glyph(self) -> PlacedGlyph {
+        PlacedGlyph {
+            id: self.id,
+            x: f64::from(self.x) / 1000.0,
+            y: f64::from(self.y) / 1000.0,
+            cluster: self.cluster,
+            advance: f64::from(self.advance) / 1000.0,
+            logical_order: (self.logical_order != u32::MAX)
+                .then_some(u64::from(self.logical_order)),
+            bidi_level: (self.bidi_level != u8::MAX).then_some(self.bidi_level),
+        }
+    }
+}
+
+impl Glyphs {
+    pub fn len(&self) -> usize {
+        match self {
+            Glyphs::Full(glyphs) => glyphs.len(),
+            Glyphs::Milli(glyphs) => glyphs.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, index: usize) -> Option<PlacedGlyph> {
+        match self {
+            Glyphs::Full(glyphs) => glyphs.get(index).cloned(),
+            Glyphs::Milli(glyphs) => glyphs.get(index).map(|glyph| glyph.glyph()),
+        }
+    }
+
+    pub fn first(&self) -> Option<PlacedGlyph> {
+        self.get(0)
+    }
+
+    pub fn last(&self) -> Option<PlacedGlyph> {
+        self.len().checked_sub(1).and_then(|index| self.get(index))
+    }
+
+    pub fn to_vec(&self) -> Vec<PlacedGlyph> {
+        self.iter().collect()
+    }
+
+    pub fn iter(&self) -> GlyphIter<'_> {
+        match self {
+            Glyphs::Full(glyphs) => GlyphIter::Full(glyphs.iter()),
+            Glyphs::Milli(glyphs) => GlyphIter::Milli(glyphs.iter()),
+        }
+    }
+
+    /// The glyphs as full records, for a builder to change.
+    pub fn to_mut(&mut self) -> &mut Vec<PlacedGlyph> {
+        if let Glyphs::Milli(glyphs) = self {
+            *self = Glyphs::Full(glyphs.iter().map(|glyph| glyph.glyph()).collect());
+        }
+        match self {
+            Glyphs::Full(glyphs) => glyphs,
+            Glyphs::Milli(_) => unreachable!("converted above"),
+        }
+    }
+
+    /// Stores the glyphs in their smallest exact form, without spare capacity.
+    pub fn compact(&mut self) {
+        if let Glyphs::Full(glyphs) = self {
+            match glyphs
+                .iter()
+                .map(MilliGlyph::new)
+                .collect::<Option<Box<[_]>>>()
+            {
+                Some(milli) => *self = Glyphs::Milli(milli),
+                None => glyphs.shrink_to_fit(),
+            }
+        }
+    }
+}
+
+impl Default for Glyphs {
+    fn default() -> Self {
+        Glyphs::Full(Vec::new())
+    }
+}
+
+impl From<Vec<PlacedGlyph>> for Glyphs {
+    fn from(glyphs: Vec<PlacedGlyph>) -> Self {
+        Glyphs::Full(glyphs)
+    }
+}
+
+impl FromIterator<PlacedGlyph> for Glyphs {
+    fn from_iter<I: IntoIterator<Item = PlacedGlyph>>(glyphs: I) -> Self {
+        Glyphs::Full(glyphs.into_iter().collect())
+    }
+}
+
+impl PartialEq for Glyphs {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl std::fmt::Debug for Glyphs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Serialize for Glyphs {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for Glyphs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut glyphs = Glyphs::Full(Vec::deserialize(deserializer)?);
+        glyphs.compact();
+        Ok(glyphs)
+    }
+}
+
+/// [`Glyphs::iter`]: each glyph as a full record.
+pub enum GlyphIter<'a> {
+    Full(std::slice::Iter<'a, PlacedGlyph>),
+    Milli(std::slice::Iter<'a, MilliGlyph>),
+}
+
+impl Iterator for GlyphIter<'_> {
+    type Item = PlacedGlyph;
+
+    fn next(&mut self) -> Option<PlacedGlyph> {
+        match self {
+            GlyphIter::Full(glyphs) => glyphs.next().cloned(),
+            GlyphIter::Milli(glyphs) => glyphs.next().map(|glyph| glyph.glyph()),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            GlyphIter::Full(glyphs) => glyphs.size_hint(),
+            GlyphIter::Milli(glyphs) => glyphs.size_hint(),
+        }
+    }
+}
+
+impl ExactSizeIterator for GlyphIter<'_> {}
+
+impl<'a> IntoIterator for &'a Glyphs {
+    type Item = PlacedGlyph;
+    type IntoIter = GlyphIter<'a>;
+
+    fn into_iter(self) -> GlyphIter<'a> {
+        self.iter()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -6320,14 +6530,36 @@ fn build_display_list_selected(
         &input.comment_authors,
         &input.comment_threads,
     );
-    // A resident list keeps every page, so no page holds spare capacity.
     for page in &mut display_list.pages {
-        page.primitives.shrink_to_fit();
-        for region in [&mut page.header, &mut page.footer].into_iter().flatten() {
-            region.primitives.shrink_to_fit();
-        }
+        page.compact();
     }
     display_list
+}
+
+impl DisplayPage {
+    /// A resident list keeps every page, so a built or parsed page holds no
+    /// spare capacity and its glyphs take their compact form.
+    pub fn compact(&mut self) {
+        let notes = self
+            .note_areas
+            .iter_mut()
+            .flat_map(|area| [&mut area.separator_primitives, &mut area.primitives]);
+        let regions = [&mut self.header, &mut self.footer]
+            .into_iter()
+            .flatten()
+            .map(|region| &mut region.primitives);
+        for primitives in std::iter::once(&mut self.primitives)
+            .chain(notes)
+            .chain(regions)
+        {
+            primitives.shrink_to_fit();
+            for primitive in primitives.iter_mut() {
+                if let Primitive::GlyphRun(run) = primitive {
+                    run.glyphs.compact();
+                }
+            }
+        }
+    }
 }
 
 fn reviewer_palette_color(index: u64) -> &'static str {
@@ -7822,10 +8054,12 @@ fn join_cluster_glyph_runs(prims: &mut Vec<Primitive>, from: usize) {
         {
             run.cluster_runs = true;
             run.text.push_str(&next.text);
-            run.glyphs.extend(next.glyphs.into_iter().map(|mut glyph| {
-                glyph.cluster += offset;
-                glyph
-            }));
+            run.glyphs
+                .to_mut()
+                .extend(next.glyphs.iter().map(|mut glyph| {
+                    glyph.cluster += offset;
+                    glyph
+                }));
             run.attrs.doc_end = next.attrs.doc_end;
             run.attrs.tabs_after = next.attrs.tabs_after;
             run.attrs.breaks_after = next.attrs.breaks_after;
@@ -8478,11 +8712,13 @@ fn emit_text_segment(
     }
 
     let color = run_color(fmt);
-    let paint_clip = synthetic_fallback.then(|| ClipRect {
-        x: Some(px(x)),
-        y: None,
-        w: Some(px(width)),
-        h: None,
+    let paint_clip = synthetic_fallback.then(|| {
+        Box::new(ClipRect {
+            x: Some(px(x)),
+            y: None,
+            w: Some(px(width)),
+            h: None,
+        })
     });
     // Unresolved or failed shaping falls back to a text primitive.
     let emitted_glyphs = match shape {
@@ -8649,7 +8885,7 @@ fn try_emit_glyph_runs(
     logical_order: Option<u64>,
     attrs: &DocAttrs,
     color: &str,
-    paint_clip: &Option<ClipRect>,
+    paint_clip: &Option<Box<ClipRect>>,
     auto_space: ooxml_text::AutoSpace,
 ) -> bool {
     if text.is_empty() {
@@ -8908,7 +9144,7 @@ fn try_emit_glyph_runs(
             color: color.to_string(),
             paint_text: glyph_paint_text(shape_fonts.store, font, &sub_text).map(Box::new),
             text: sub_text,
-            glyphs: placed,
+            glyphs: placed.into(),
             echo: Some(EchoRunFacts {
                 x: 0.0,
                 right: 0.0,
@@ -8942,7 +9178,7 @@ fn try_emit_glyph_runs(
 
     if let Some(target) = exact_width
         && let Some(Primitive::GlyphRun(run)) = local.last_mut()
-        && let Some(last) = run.glyphs.last_mut()
+        && let Some(last) = run.glyphs.to_mut().last_mut()
     {
         last.advance = round3(last.advance + target - acc);
     }
@@ -10068,7 +10304,7 @@ fn rotate_shape_text(primitives: &mut [Primitive], center: (f64, f64), rotation:
                     .map(|glyph| glyph.x + glyph.advance)
                     .fold(f64::NEG_INFINITY, f64::max);
                 let (dx, dy) = delta((left + right) / 2.0, first.y - run.size * 0.2);
-                for glyph in &mut run.glyphs {
+                for glyph in run.glyphs.to_mut() {
                     glyph.x += dx;
                     glyph.y += dy;
                 }
@@ -12504,7 +12740,7 @@ fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64),
                     .fold(f64::NEG_INFINITY, f64::max);
                 let center = ((left + right) / 2.0, first.y - run.size * 0.2);
                 let mapped = point(center.0, center.1);
-                for glyph in &mut run.glyphs {
+                for glyph in run.glyphs.to_mut() {
                     glyph.x += mapped.0 - center.0;
                     glyph.y += mapped.1 - center.1;
                 }

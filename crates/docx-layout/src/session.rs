@@ -52,7 +52,10 @@ struct Stored {
 }
 
 impl Stored {
-    fn new(list: DisplayList) -> Self {
+    fn new(mut list: DisplayList) -> Self {
+        for page in &mut list.pages {
+            page.compact();
+        }
         let spans = RefCell::new(vec![BodySpan::Unknown; list.pages.len()]);
         Self { list, spans }
     }
@@ -366,8 +369,11 @@ fn shift_page_positions(page: &mut DisplayPage, runs: &[ShiftRun]) -> Result<(),
 fn apply_display_list_update(
     dl: &mut DisplayList,
     spans: &mut Vec<BodySpan>,
-    update: DisplayListUpdate,
+    mut update: DisplayListUpdate,
 ) -> Result<(), String> {
+    for (_, page) in &mut update.replace {
+        page.compact();
+    }
     if update.keep {
         return replace_pages_in_place(dl, spans, update);
     }
@@ -673,6 +679,38 @@ mod tests {
             "null"
         );
 
+        close_display_list(handle);
+    }
+
+    /// Opened and replaced pages keep no spare capacity, and their glyphs
+    /// their compact form (Q846).
+    #[test]
+    fn stored_pages_hold_no_spare_capacity() {
+        use crate::display_list::{Glyphs, Primitive};
+        drain();
+        let glyph = r##"{"kind": "glyphRun", "fontId": 0, "size": 16, "color": "#000000",
+            "text": "a", "glyphs": [{"id": 1, "x": 100.5, "y": 200, "cluster": 0,
+            "advance": 8.25}], "docStart": 1, "docEnd": 2}"##;
+        let page = format!(
+            r#"{{"pageIndex": 0, "width": 816, "height": 1056, "primitives": [{}]}}"#,
+            [glyph; 5].join(",")
+        );
+        let compact = |handle: u32| {
+            SESSIONS.with(|s| {
+                let sessions = s.borrow();
+                let primitives = &sessions.get(handle).unwrap().pages[0].primitives;
+                primitives.len() == 5
+                    && primitives.capacity() == 5
+                    && primitives.iter().all(|primitive| {
+                        matches!(primitive, Primitive::GlyphRun(run) if matches!(run.glyphs, Glyphs::Milli(_)))
+                    })
+            })
+        };
+        let handle = open_display_list(&format!(r#"{{"pages": [{page}]}}"#)).unwrap();
+        assert!(compact(handle));
+        let update = format!(r#"{{"total": 1, "keep": true, "replace": [[0, {page}]]}}"#);
+        update_display_list(handle, &update).unwrap();
+        assert!(compact(handle));
         close_display_list(handle);
     }
 

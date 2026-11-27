@@ -207,7 +207,7 @@ pub(crate) fn paint_text(
     context: &mut PaintContext<'_, '_>,
     run: &TextRunPrimitive,
 ) -> Result<(), String> {
-    let mask = paint_clip_mask(context, run.paint_clip.as_ref())?;
+    let mask = paint_clip_mask(context, run.paint_clip.as_deref())?;
     if let Some(mask) = &mask {
         paint_text_core(&mut context.reborrow_with_mask(mask), run)
     } else {
@@ -446,7 +446,7 @@ pub(crate) fn paint_glyph_run(
     context: &mut PaintContext<'_, '_>,
     run: &GlyphRunPrimitive,
 ) -> Result<(), String> {
-    let mask = paint_clip_mask(context, run.paint_clip.as_ref())?;
+    let mask = paint_clip_mask(context, run.paint_clip.as_deref())?;
     if let Some(mask) = &mask {
         paint_glyph_run_core(&mut context.reborrow_with_mask(mask), run)
     } else {
@@ -490,7 +490,7 @@ fn paint_glyph_run_core(
     let font = FontId::from_u32(run.font_id);
     let draw = |context: &mut PaintContext<'_, '_>, transform: Transform| {
         for glyph in &run.glyphs {
-            paint_placed_glyph(context, font, glyph, run.size as f32, &paint, transform)?;
+            paint_placed_glyph(context, font, &glyph, run.size as f32, &paint, transform)?;
         }
         Ok(0.0)
     };
