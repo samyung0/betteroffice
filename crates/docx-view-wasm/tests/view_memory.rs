@@ -190,13 +190,24 @@ fn the_region_pass_copies_the_arena_only_for_notes() {
     let before = LIVE.load(Relaxed);
     let (_, peak) = peak_during(|| plain.layout(&request).unwrap());
     let retained = LIVE.load(Relaxed) - before;
-    eprintln!("region pass: peak {peak} bytes, retained {retained} bytes");
-    // A copied arena would double the peak. Since the arena's advances shrank
-    // (Q846) the pass's own scratch is a larger share of the peak.
-    assert!(peak * 2 <= retained * 3, "peak {peak}, retained {retained}");
 
     let (mut noted, request) = open(&ladder(120, true), font);
-    noted.layout(&request).unwrap();
+    let before = LIVE.load(Relaxed);
+    let (_, noted_peak) = peak_during(|| noted.layout(&request).unwrap());
+    let noted_retained = LIVE.load(Relaxed) - before;
+    eprintln!(
+        "region pass: peak {peak}, retained {retained}; with a note: peak {noted_peak}, retained {noted_retained}"
+    );
+    // The noted pass copies the arena, so what it allocates past what it keeps
+    // is the copy plus the pass's own scratch; without notes, the scratch alone
+    // (0.9 MB against 5.5 MB; a copy without notes makes it 3.1 MB).
+    let scratch = peak - retained;
+    let noted_scratch = noted_peak - noted_retained;
+    assert!(
+        scratch * 3 <= noted_scratch,
+        "scratch {scratch}, with a note {noted_scratch}"
+    );
+
     let (plain_lines, _) = first_page(&mut plain);
     let (noted_lines, note_shown) = first_page(&mut noted);
     assert!(note_shown);
