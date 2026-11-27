@@ -65,14 +65,17 @@ test("opening a 6,000-paragraph DOCX grows the editing engine's memory a few tim
 
 // The editing engine's memory is already large from the open above.
 for (const path of MODULES.slice(1))
-  test(`${path.split("/").at(-1)}: 64 MiB in 16 KiB allocations grows memory a few times`, async () => {
+  test(`${path.split("/").at(-1)}: 64 MiB in 16 KiB allocations grows memory a few times, at most a step past it`, async () => {
     const wasm = await rawExports(path);
     const grows = wasm.betteroffice_memory_grows();
     const before = wasm.memory.buffer.byteLength;
     const size = 16 << 10;
     const blocks = Array.from({ length: 4096 }, () => wasm.__wbindgen_malloc(size, 8));
-    expect(wasm.memory.buffer.byteLength - before).toBeGreaterThanOrEqual(48 << 20);
-    // dlmalloc alone grew it once per 64 KiB: 1,024 times.
-    expect(wasm.betteroffice_memory_grows() - grows).toBeLessThanOrEqual(16);
+    const grown = wasm.memory.buffer.byteLength - before;
+    expect(grown).toBeGreaterThanOrEqual(48 << 20);
+    // Q846: a step is at most 8 MiB, as its unused part stays reserved.
+    expect(grown).toBeLessThanOrEqual((64 + 8 + 1) << 20);
+    // dlmalloc alone grew it once per 64 KiB: 1,024 times; 8 MiB steps, about 20.
+    expect(wasm.betteroffice_memory_grows() - grows).toBeLessThanOrEqual(24);
     for (const block of blocks) wasm.__wbindgen_free(block, size, 8);
   });
