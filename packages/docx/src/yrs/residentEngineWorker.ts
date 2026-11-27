@@ -20,6 +20,7 @@ import { GlyphCache } from '../layout/render/glyphCache';
 import type {
   ResidentEngineWorkerMessage,
   ResidentEngineWorkerRequest,
+  ResidentFirstPagesViewport,
 } from './residentEngineWorkerProtocol';
 import {
   residentCaretDeviceRect,
@@ -81,6 +82,9 @@ let fontChains: Record<string, number[]> = {};
 // The retained layout JSON this request's frame reply carries, when the page
 // recorded the pass without laying it out (`wantLayout`).
 let replyLayoutJson: string | undefined;
+// The replica's source package has media: pages not built yet may hold
+// pictures, which only the page can draw (Q815 C).
+let hasMedia = false;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
@@ -122,6 +126,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     session = await createResidentEngineSession(request.seed.workerClientId);
     try {
       session.setMedia(request.seed.media);
+      hasMedia = request.seed.media !== '{}';
       session.loadState(request.seed.state);
     } catch (error) {
       // The bootstrap then starts a replica of its own from the full state.
@@ -147,7 +152,13 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     if (request.wantLayout) replyLayoutJson = layoutJson;
     subscribe();
     const started = performance.now();
-    const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    // The pages in view first; the page asks for the rest (Q815 C).
+    const first = request.firstPages
+      ? firstPagesFor(session.layoutPageHeights(), request.firstPages)
+      : 0;
+    const frame = first
+      ? session.buildDisplayListFrameFirst(request.extras, request.expectedFrameEpoch, first)
+      : session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
     await replyFrame(
       request.id,
       frame,
@@ -181,6 +192,25 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
     subscribe();
     const started = performance.now();
     const frame = session.buildDisplayListFrame(request.extras, request.expectedFrameEpoch);
+    await replyFrame(
+      request.id,
+      frame,
+      performance.now() - started,
+      pendingUpdates,
+      undefined,
+      started,
+      false,
+      request.paintCaret
+    );
+    return;
+  }
+  if (request.type === 'buildPages') {
+    pendingUpdates = [];
+    const started = performance.now();
+    const frame = session.buildUnbuiltPagesFrame(
+      Uint32Array.from(request.pages),
+      request.expectedFrameEpoch
+    );
     await replyFrame(
       request.id,
       frame,
@@ -326,7 +356,10 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
 
 function hydrate(snapshot: YrsResidentWorkerSnapshot): string | undefined {
   if (!session) throw new Error('Resident engine worker is not initialized');
-  if (snapshot.media !== undefined) session.setMedia(snapshot.media);
+  if (snapshot.media !== undefined) {
+    session.setMedia(snapshot.media);
+    hasMedia = snapshot.media !== '{}';
+  }
   session.loadState(snapshot.state);
   if (snapshot.fontsRevision !== fontsRevision) {
     // A mismatched revision always carries the full font set (the client only
@@ -355,6 +388,14 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot): string | undefined {
   layoutRevision = snapshot.layoutRevision;
   pendingUpdates = [];
   return layoutJson;
+}
+
+/** How many pages from the top fill `viewport`, plus one (as DOCX View's
+ * first pages); 0 when that is every page. */
+function firstPagesFor(heights: Float64Array, { height, zoom }: ResidentFirstPagesViewport): number {
+  let shown = 0;
+  for (let top = 0; shown < heights.length && top < height; shown += 1) top += heights[shown]! * zoom;
+  return shown + 1 < heights.length ? shown + 1 : 0;
 }
 
 function setProgressiveFonts(next: ResidentProgressiveFonts | null): void {
@@ -430,6 +471,7 @@ function destroySession(): void {
   pendingUpdates = [];
   layoutRevision = 0;
   laidOut = null;
+  hasMedia = false;
   fontsRevision = -1;
   retainedFrame = null;
   setProgressiveFonts(null);
@@ -516,6 +558,8 @@ async function replyFrame(
   fontErrors = [];
   const layoutJson = replyLayoutJson;
   replyLayoutJson = undefined;
+  let unbuiltPages = 0;
+  for (const page of retainedFrame?.displayList.pages ?? []) if (page.unbuilt) unbuiltPages += 1;
   const frame = exactBuffer(bytes);
   const updateBuffers = updates.map(exactBuffer);
   const stateVector = session ? exactBuffer(session.encodeStateVector()) : undefined;
@@ -538,6 +582,7 @@ async function replyFrame(
       ...(failedFonts.length > 0 ? { fontErrors: failedFonts } : {}),
       ...(paintError === undefined ? {} : { paintError }),
       ...(layoutJson === undefined ? {} : { layoutJson }),
+      ...(unbuiltPages === 0 ? {} : { unbuiltPages, media: hasMedia }),
     },
     [frame, ...updateBuffers, ...(stateVector ? [stateVector] : [])]
   );

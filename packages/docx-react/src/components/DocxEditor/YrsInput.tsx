@@ -122,6 +122,8 @@ export interface YrsInputProps {
   paragraphStyleValues?: ParagraphStyleValues;
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  /** Resolves once these pages are built (Q815 C: pages out of view build after the first frame). */
+  ensureDisplayPages?: (pageIndices: number[]) => Promise<void>;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
   residentCaretAuthoritative?: boolean;
@@ -253,6 +255,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     paragraphStyleValues,
     displayListQueries,
     resolveDisplayListQueries,
+    ensureDisplayPages,
     displayListFrameEpoch = null,
     residentCaret = null,
     residentCaretAuthoritative = false,
@@ -414,7 +417,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       setSelectionEpoch((epoch) => epoch + 1);
       latestRef.current.onStateChange(selection, docChanged, residentLayoutReady, residentCaretReady);
     },
-    [displaySelection, onStateChange]
+    // onStateChange is read through latestRef: a new one must not re-run the
+    // selection-emit effect (and its setSelectionEpoch) on every frame.
+    [displaySelection]
   );
 
   const setSelection = useCallback(
@@ -924,7 +929,30 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         const head = current.head;
         if (verticalDirection) {
           const displayPosition = locToDisplayPosition(head);
-          const queries = querySnapshot?.queries;
+          let queries = querySnapshot?.queries;
+          // A line or page move reads the pages around the caret: built first (Q815 C).
+          // A caret on a page not built yet has no rect: its page holds its position.
+          const unbuiltCaretPage = (position: number): number | undefined => {
+            const index =
+              queries?.displayList.pages.findIndex(
+                ({ unbuilt, positionSpan }) =>
+                  unbuilt && positionSpan && positionSpan[0] <= position && position <= positionSpan[1]
+              ) ?? -1;
+            return index < 0 ? undefined : index;
+          };
+          const caretPage =
+            displayPosition == null
+              ? undefined
+              : (queries?.caretRect(displayPosition)?.pageIndex ?? unbuiltCaretPage(displayPosition));
+          if (caretPage !== undefined && queries && ensureDisplayPages) {
+            const reach = byPage ? 2 : 1;
+            const near: number[] = [];
+            for (let page = caretPage - reach; page <= caretPage + reach; page += 1) near.push(page);
+            if (near.some((page) => queries?.displayList.pages[page]?.unbuilt)) {
+              await ensureDisplayPages(near);
+              queries = displayListQueriesRef.current ?? queries;
+            }
+          }
           const host = canvasHostRef?.current;
           // PageUp/PageDown move about one viewport, and the view follows by as much.
           const scroller = byPage && host ? findVerticalScrollParentOrRoot(host) : null;
@@ -1011,6 +1039,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       canvasHostRef,
       displayPositionToLoc,
       enqueueInputOperation,
+      ensureDisplayPages,
       ensureSelection,
       inputPositionMap,
       locToDisplayPosition,

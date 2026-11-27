@@ -39,7 +39,8 @@ afterAll(async () => {
 
 // 20 one-line paragraphs on two 100 x 200 pages, ten 20px lines a page, the pages 10px apart in a
 // 205px viewport: one PageDown is ten lines plus the gap.
-async function mount() {
+// `unbuilt`: the second page is not built until the input asks for it (Q815 C).
+async function mount({ unbuilt = false } = {}) {
   const zip = new JSZip();
   zip.file(
     '[Content_Types].xml',
@@ -68,11 +69,18 @@ async function mount() {
     to: paragraph.displayStart + paragraph.length,
     paraId: paragraph.paraId,
   }));
-  const lineAt = (pos: number) => lines.find((line) => line.from <= pos && pos <= line.to) ?? null;
+  let built = !unbuilt;
+  const asked: number[][] = [];
+  const shown = () => lines.filter((line) => built || line.pageIndex === 0);
+  const lineAt = (pos: number) => shown().find((line) => line.from <= pos && pos <= line.to) ?? null;
   const queries = {
     isReady: () => true,
+    get displayList() {
+      const span = [lines[10]!.from, lines[19]!.to];
+      return { pages: [{ pageIndex: 0 }, { pageIndex: 1, unbuilt: !built, positionSpan: span }] };
+    },
     pageSize: () => ({ width: 100, height: 200 }),
-    visualLines: () => lines,
+    visualLines: shown,
     visualLineAtPosition: lineAt,
     caretRect: (pos: number) => {
       const line = lineAt(pos);
@@ -123,6 +131,10 @@ async function mount() {
       displayPositionToLoc={(position, story) => displayPositionToYrsLoc(map(story), position)}
       locToDisplayPosition={(loc) => yrsLocToDisplayPosition(map(loc.story), loc)}
       displayListQueries={queries}
+      ensureDisplayPages={async (pages) => {
+        asked.push(pages);
+        built = true;
+      }}
       canvasHostRef={{ current: host }}
       onStateChange={() => {}}
       onDirectInput={() => {}}
@@ -140,7 +152,7 @@ async function mount() {
     paraId: map().paragraphs[index]!.paraId,
     offset,
   });
-  return { session, scroller, press, at };
+  return { session, scroller, press, at, asked };
 }
 
 // #1538: PageUp/PageDown move the caret about one viewport at its x and the view follows;
@@ -159,4 +171,25 @@ test('PageDown and PageUp move the caret a viewport, Shift extends, and the view
 
   await press('PageUp');
   expect(session.selection()?.head).toEqual(at(9, 3));
+});
+
+test('PageDown toward a page not built yet waits for it, then moves (Q815 C)', async () => {
+  const { session, scroller, press, at, asked } = await mount({ unbuilt: true });
+  session.setSelection(at(2, 3));
+  const scrollTop = scroller.scrollTop;
+  await press('PageDown');
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toContain(1);
+  expect(session.selection()).toEqual({ anchor: at(12, 3), head: at(12, 3) });
+  expect(scroller.scrollTop - scrollTop).toBe(210);
+});
+
+test('PageUp with the caret on a page not built yet builds that page, then moves (Q815 C)', async () => {
+  const { session, press, at, asked } = await mount({ unbuilt: true });
+  // As right after Ctrl+End: the caret is on the second page before it is built.
+  session.setSelection(at(15, 3));
+  await press('PageUp');
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toContain(1);
+  expect(session.selection()).toEqual({ anchor: at(5, 3), head: at(5, 3) });
 });

@@ -114,6 +114,7 @@ export function DocxEditorPagedArea({
   applyResidentDelete,
   displayListQueries,
   resolveDisplayListQueries,
+  ensureDisplayPages,
   canvasDisplayList,
   displayListFrameEpoch,
   residentCaret,
@@ -208,6 +209,7 @@ export function DocxEditorPagedArea({
   /** Display-list query source while the canvas renderer paints (null on the DOM-painter path). */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  ensureDisplayPages?: (pageIndices: number[]) => Promise<void>;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -478,6 +480,7 @@ export function DocxEditorPagedArea({
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}
         resolveDisplayListQueries={resolveDisplayListQueries}
+        ensureDisplayPages={ensureDisplayPages}
         canvasDisplayList={canvasDisplayList}
         displayListFrameEpoch={displayListFrameEpoch}
         residentCaret={residentCaret}

@@ -141,6 +141,8 @@ function worker() {
     retries: 0,
     /** The failed chunks the last face opened was handed. */
     failed: undefined as unknown,
+    /** Each frame build: the whole list, its first pages, or unbuilt pages (Q815 C). */
+    builds: [] as Array<string | number | number[]>,
     session: {
       loadState(state: Uint8Array) {
         if (harness.refuseLoad) {
@@ -182,6 +184,18 @@ function worker() {
         return new Uint8Array([frameEpoch]);
       },
       buildDisplayListFrame() {
+        harness.builds.push('whole');
+        return new Uint8Array([frameEpoch]);
+      },
+      layoutPageHeights() {
+        return Float64Array.from({ length: 6 }, () => 100);
+      },
+      buildDisplayListFrameFirst(_extras: string, _expectedFrameEpoch: number, firstPages: number) {
+        harness.builds.push(firstPages);
+        return new Uint8Array([frameEpoch]);
+      },
+      buildUnbuiltPagesFrame(pages: Uint32Array) {
+        harness.builds.push([...pages]);
         return new Uint8Array([frameEpoch]);
       },
       residentCaretSnapshot() {
@@ -248,7 +262,7 @@ function worker() {
       });
     });
   }
-  function delta(upserts: number[], full = false, width = 100, pageCount = 3) {
+  function delta(upserts: number[], full = false, width = 100, pageCount = 3, unbuiltFrom = Infinity) {
     const baseFrameEpoch = frameEpoch++;
     const operations: FramePageOperation[] = upserts.map((id) => ({
       kind: 'upsert',
@@ -256,7 +270,7 @@ function worker() {
       pageIndex: id - 1,
       fingerprint: BigInt(frameEpoch),
       primitiveIds: new BigUint64Array(),
-      page: { pageIndex: id - 1, width, height: 100, primitives: [] },
+      page: { pageIndex: id - 1, width, height: 100, primitives: [], ...(id >= unbuiltFrom ? { unbuilt: true } : {}) },
     }));
     harness.delta = {
       protocolVersion: 1,
@@ -275,6 +289,7 @@ function worker() {
     surfaces,
     send,
     post,
+    delta,
     resetCalls() {
       harness.rasterized = [];
       harness.presented = [];
@@ -413,6 +428,55 @@ describe('resident worker seed', () => {
     expect((await w.bootstrap(3, 4242, { state: new Uint8Array([9]) })).ok).toBe(true);
     expect(w.harness.sessionIds).toEqual([4242, 4242]);
     expect(w.harness.loaded).toEqual([[9]]);
+  });
+});
+
+describe('resident worker first pages (Q815 C)', () => {
+  /** A frame of six pages, those after `built` unbuilt. */
+  const pages = (w: ReturnType<typeof worker>, ids: number[], built: number, full: boolean) =>
+    w.delta(ids, full, 100, 6, built + 1);
+
+  test('a bootstrap builds the pages its viewport shows, plus one; a page build builds the pages asked for', async () => {
+    const w = worker();
+    await w.send({
+      type: 'seed',
+      seed: { state: new Uint8Array([1]), media: '{"word/media/a.png":"data:"}', workerClientId: 7 },
+    });
+    pages(w, [1, 2, 3, 4, 5, 6], 4, true);
+    const first = await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      firstPages: { height: 240, zoom: 0.8 },
+      snapshot: {
+        clientId: 1, state: new Uint8Array(), fontsRevision: 0, fonts: [], renderInputs: [],
+        measureInputs: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, selection: null,
+      },
+    });
+    // 80 px pages: three fill 240 px, and one more.
+    expect(w.harness.builds).toEqual([4]);
+    expect(first).toMatchObject({ ok: true, unbuiltPages: 2, media: true });
+    pages(w, [5, 6], 6, false);
+    const rest = await w.send({ type: 'buildPages', pages: [5, 4], expectedFrameEpoch: 1, paintCaret: false });
+    expect(w.harness.builds).toEqual([4, [5, 4]]);
+    expect(rest).toMatchObject({ ok: true });
+    expect('unbuiltPages' in rest).toBe(false);
+  });
+
+  test('a bootstrap whose viewport shows every page builds them all', async () => {
+    const w = worker();
+    pages(w, [1, 2, 3, 4, 5, 6], 6, true);
+    await w.send({
+      type: 'bootstrap',
+      expectedFrameEpoch: 0,
+      extras: '',
+      firstPages: { height: 520, zoom: 1 },
+      snapshot: {
+        clientId: 1, state: new Uint8Array(), fontsRevision: 0, fonts: [], renderInputs: [],
+        measureInputs: [], layoutInput: '', layoutWithRegions: false, layoutRevision: 1, selection: null,
+      },
+    });
+    expect(w.harness.builds).toEqual(['whole']);
   });
 });
 

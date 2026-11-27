@@ -374,6 +374,28 @@ pub fn build_resident_display_pages_from_observed(
     })
 }
 
+/// Builds display pages `first` with `input` and every other page as an
+/// unbuilt placeholder (see
+/// [`display_list::build_resident_display_pages_first_with_fonts_observed`]).
+pub fn build_resident_display_pages_first_observed(
+    input: &mut display_list::ResidentDisplayInput,
+    pagination: &types::Input,
+    layout: &types::Layout,
+    first: std::ops::Range<usize>,
+    observe_phase: &mut impl FnMut(),
+) -> Result<display_list::DisplayList, String> {
+    with_measure_fonts(|store| {
+        display_list::build_resident_display_pages_first_with_fonts_observed(
+            input,
+            pagination,
+            layout,
+            &store.borrow(),
+            first,
+            observe_phase,
+        )
+    })
+}
+
 /// Rebuilds the pagination-dirtied pages of an engine-owned list in place and
 /// shifts the converged suffix's body positions by stable block-id deltas.
 #[allow(clippy::too_many_arguments)]

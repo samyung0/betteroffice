@@ -12,6 +12,7 @@ import type {
   ResidentEngineWorkerRequest,
   ResidentEngineWorkerRequestWithoutId,
   ResidentEngineWorkerResponse,
+  ResidentFirstPagesViewport,
 } from './residentEngineWorkerProtocol';
 
 export interface ResidentEngineWorkerFrame {
@@ -33,6 +34,10 @@ export interface ResidentEngineWorkerFrame {
   paintError?: string;
   /** The worker's retained layout JSON, when the request asked for it. */
   layoutJson?: string;
+  /** Pages of the frame not built yet (Q815 C). */
+  unbuiltPages: number;
+  /** The document has media, so unbuilt pages may hold pictures. */
+  media: boolean;
 }
 
 export interface ResidentEngineOffscreenPage {
@@ -72,6 +77,7 @@ export const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
   relayout: 15_000,
   attachCanvases: 15_000,
   buildFrame: 5_000,
+  buildPages: 5_000,
   applyInput: 5_000,
   applyDelete: 5_000,
 };
@@ -164,14 +170,24 @@ export class ResidentEngineWorkerClient {
     await this.request({ type: 'seed', seed }, [seed.state.buffer]);
   }
 
+  /** `firstPages`: build only the pages that viewport shows at the top,
+   * plus one; the rest come with `buildPages` (Q815 C). */
   async bootstrap(
     snapshot: YrsResidentWorkerSnapshot,
     extras: string,
-    wantLayout = false
+    wantLayout = false,
+    firstPages?: ResidentFirstPagesViewport
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0, wantLayout },
+      {
+        type: 'bootstrap',
+        snapshot,
+        extras,
+        expectedFrameEpoch: 0,
+        wantLayout,
+        ...(firstPages ? { firstPages } : {}),
+      },
       snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
@@ -209,6 +225,17 @@ export class ResidentEngineWorkerClient {
       await this.request({ type: 'buildFrame', extras, expectedFrameEpoch, paintCaret })
     );
     return result;
+  }
+
+  /** Build the unbuilt pages among `pages` (indices); the frame carries them. */
+  async buildPages(
+    pages: number[],
+    expectedFrameEpoch: number,
+    paintCaret = false
+  ): Promise<ResidentEngineWorkerFrame> {
+    return frameResult(
+      await this.request({ type: 'buildPages', pages, expectedFrameEpoch, paintCaret })
+    );
   }
 
   /**
@@ -454,6 +481,8 @@ function frameResult(
     fontErrors: response.fontErrors ?? [],
     ...(response.paintError === undefined ? {} : { paintError: response.paintError }),
     ...(response.layoutJson === undefined ? {} : { layoutJson: response.layoutJson }),
+    unbuiltPages: response.unbuiltPages ?? 0,
+    media: response.media ?? false,
   };
 }
 

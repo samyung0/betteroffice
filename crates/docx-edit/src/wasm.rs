@@ -123,6 +123,18 @@ struct ApplyInputProfile {
 fn js_err(error: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
+
+/// A frame epoch argument: a non-negative safe integer.
+fn frame_epoch_arg(value: f64) -> Result<u64, JsValue> {
+    if value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value <= 9_007_199_254_740_991.0
+    {
+        Ok(value as u64)
+    } else {
+        Err(js_err(
+            "expected_frame_epoch must be a non-negative safe integer",
+        ))
+    }
+}
 /// Builds the op [`EditCtx`]. Suggesting mode crosses the boundary as an
 /// optional `(name, date)` pair — both-or-neither; a plain local edit uses an
 /// empty author (author/date are stamped only in suggesting mode).
@@ -1607,6 +1619,44 @@ impl EditSession {
         self.engine
             .build_display_list_frame(input, expected_frame_epoch as u64)
             .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// [`EditSession::build_display_list_frame`] for an editor's first frame:
+    /// when every page is built anew, only the first `first_pages` are and the
+    /// others stay unbuilt until
+    /// [`EditSession::build_unbuilt_display_pages_frame`] builds them (Q815 C).
+    pub fn build_display_list_frame_first(
+        &self,
+        input: &str,
+        expected_frame_epoch: f64,
+        first_pages: u32,
+    ) -> Result<Vec<u8>, JsValue> {
+        self.engine
+            .build_display_list_frame_first(
+                input,
+                frame_epoch_arg(expected_frame_epoch)?,
+                first_pages as usize,
+            )
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Builds the unbuilt pages among `pages` (page indices) of the retained
+    /// list and returns the FrameDelta of those pages (Q815 C).
+    pub fn build_unbuilt_display_pages_frame(
+        &self,
+        pages: Vec<u32>,
+        expected_frame_epoch: f64,
+    ) -> Result<Vec<u8>, JsValue> {
+        let pages: Vec<usize> = pages.into_iter().map(|page| page as usize).collect();
+        self.engine
+            .build_unbuilt_display_pages_frame(&pages, frame_epoch_arg(expected_frame_epoch)?)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// The retained layout's page heights in display pixels, for choosing the
+    /// pages a first frame builds.
+    pub fn layout_page_heights(&self) -> Vec<f64> {
+        self.engine.layout_page_heights()
     }
 
     /// For a resident worker replica: lays out the updates applied since its

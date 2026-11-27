@@ -332,6 +332,8 @@ export interface PagedEditorProps {
    */
   displayListQueries?: DisplayListQueries | null;
   resolveDisplayListQueries?: ResolveDisplayListQueries;
+  /** Resolves once these pages are built (Q815 C: pages out of view build after the first frame). */
+  ensureDisplayPages?: (pageIndices: number[]) => Promise<void>;
   canvasDisplayList?: DisplayList | null;
   displayListFrameEpoch?: number | null;
   residentCaret?: YrsResidentCaretSnapshot | null;
@@ -521,6 +523,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       rustFontChainsProviderRef,
       displayListQueries = null,
       resolveDisplayListQueries,
+      ensureDisplayPages,
       canvasDisplayList = null,
       displayListFrameEpoch = null,
       residentCaret = null,
@@ -1503,6 +1506,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly,
       partEdit,
       displayListQueries,
+      ensureDisplayPages,
       canvasHostRef,
       canvasOverlayTarget,
       onBodyClick,
@@ -1921,6 +1925,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           resolveDisplayListQueries={
             activeYrsRootStory === 'body' ? resolveDisplayListQueries : undefined
           }
+          ensureDisplayPages={ensureDisplayPages}
           displayListFrameEpoch={displayListFrameEpoch}
           residentCaret={residentCaret}
           residentCaretAuthoritative={residentCaretAuthoritative}

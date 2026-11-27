@@ -139,6 +139,7 @@ export function useDocxEditorRefApi({
   handleSave,
   handleDirectPrint,
   renderPages,
+  ensureVisiblePages,
   zoom,
   setZoom,
   scrollPageInfo,
@@ -161,6 +162,7 @@ export function useDocxEditorRefApi({
   handleSave: () => Promise<ArrayBuffer | null>;
   handleDirectPrint: () => void;
   renderPages: DocxEditorRef['renderPages'];
+  ensureVisiblePages: DocxEditorRef['ensureVisiblePages'];
   zoom: number;
   setZoom: (zoom: number) => void;
   scrollPageInfo: { currentPage: number; totalPages: number; visible: boolean };
@@ -205,6 +207,7 @@ export function useDocxEditorRefApi({
       openPrintPreview: handleDirectPrint,
       print: handleDirectPrint,
       renderPages,
+      ensureVisiblePages,
       loadDocument: loadParsedDocument,
       loadDocumentBuffer: loadBuffer,
 
@@ -434,6 +437,7 @@ export function useDocxEditorRefApi({
       handleSave,
       handleDirectPrint,
       renderPages,
+      ensureVisiblePages,
       loadParsedDocument,
       loadBuffer,
       comments,

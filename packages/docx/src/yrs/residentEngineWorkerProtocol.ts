@@ -24,6 +24,9 @@ export type ResidentEngineWorkerRequest =
       expectedFrameEpoch: number;
       /** Reply with the retained layout JSON: the page recorded the pass without laying it out. */
       wantLayout?: boolean;
+      /** Build only the pages this viewport shows at the top, plus one; the
+       * rest stay unbuilt for `buildPages` (Q815 C). */
+      firstPages?: ResidentFirstPagesViewport;
     }
   | {
       id: number;
@@ -38,6 +41,14 @@ export type ResidentEngineWorkerRequest =
       id: number;
       type: 'buildFrame';
       extras: string;
+      expectedFrameEpoch: number;
+      paintCaret: boolean;
+    }
+  | {
+      /** Build these unbuilt pages (indices) and answer with their FrameDelta. */
+      id: number;
+      type: 'buildPages';
+      pages: number[];
       expectedFrameEpoch: number;
       paintCaret: boolean;
     }
@@ -126,6 +137,10 @@ export type ResidentEngineWorkerResponse =
       /** The retained `{ layout, headersFooters? }` JSON, when the request
        * asked for it. */
       layoutJson?: string;
+      /** Pages of the frame not built yet (Q815 C), and whether the document
+       * has media, so that they may hold pictures the page must draw. */
+      unbuiltPages?: number;
+      media?: boolean;
     }
   | {
       id: number;
@@ -138,6 +153,12 @@ export type ResidentEngineWorkerResponse =
       /** A wasm trap poisoned the worker; it refuses every later request. */
       terminal?: boolean;
     };
+
+/** The viewport a first frame fills, in CSS pixels at `zoom`. */
+export interface ResidentFirstPagesViewport {
+  height: number;
+  zoom: number;
+}
 
 /** The worker began request `id`; the client's timeout for it runs from here. */
 export type ResidentEngineWorkerStarted = { id: number; started: true };

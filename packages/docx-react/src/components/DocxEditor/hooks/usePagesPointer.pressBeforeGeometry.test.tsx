@@ -45,6 +45,8 @@ const NO_LOC_X = 650;
 
 let host: HTMLDivElement;
 let pageRect: { left: number; top: number; width: number; height: number };
+/** The pages the pointer asked to be built (Q815 C). */
+const asked: number[][] = [];
 const sessions: YrsSession[] = [];
 
 beforeAll(() =>
@@ -145,6 +147,9 @@ function Pointer(props: PointerProps) {
     readOnly,
     partEdit,
     displayListQueries: queries,
+    ensureDisplayPages: async (pages) => {
+      asked.push(pages);
+    },
     canvasHostRef: { current: host },
     onBodyClick: () => setPartEdit(null),
     onHeaderFooterDoubleClick: (region) => setPartEdit({ kind: region, rId: 'rId7' }),
@@ -332,6 +337,24 @@ test('a press before the geometry takes the caret when it arrives, and typing la
   expect(text()).toBe('SeXed');
   expect(resident.calls).toEqual(['X']);
   expect(textarea.dataset.pointerPlacement).toBe('ready');
+});
+
+test('a press on a page not built yet asks for it and takes the caret once it is built (Q815 C)', async () => {
+  asked.length = 0;
+  const unbuilt = {
+    ...geometry(),
+    displayList: { pages: [{ pageIndex: 0, ...PAGE, primitives: [], unbuilt: true }] },
+  } as unknown as DisplayListQueries;
+  const { arrive, flush, input, text, textarea } = await setup({ queries: unbuilt });
+  mouse('mousedown', 30, IN_BODY);
+  expect(asked).toEqual([[0]]);
+  expect(textarea.dataset.pointerPlacement).toBe('pending');
+  act(() => input.current!.insertText('X'));
+  await settle();
+  expect(text()).toBe('Seed');
+  arrive();
+  await flush();
+  expect(text()).toBe('SeXed');
 });
 
 test('a held press focuses the input at once, so a drag off the pages still types', async () => {

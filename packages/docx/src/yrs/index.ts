@@ -50,6 +50,7 @@ export {
   type ResidentEngineWorkerFrame,
   type ResidentEngineOffscreenPage,
 } from './residentEngineWorkerClient';
+export type { ResidentFirstPagesViewport } from './residentEngineWorkerProtocol';
 export {
   residentCaretSnapshotForFrame,
   residentCaretDeviceRect,
