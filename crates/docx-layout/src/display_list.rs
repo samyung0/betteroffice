@@ -1184,11 +1184,41 @@ impl Serialize for Glyphs {
     }
 }
 
+// Parsed straight into the compact form; the first glyph that doesn't convert
+// turns the run into full records.
 impl<'de> Deserialize<'de> for Glyphs {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut glyphs = Glyphs::Full(Vec::deserialize(deserializer)?);
-        glyphs.compact();
-        Ok(glyphs)
+        struct GlyphsVisitor;
+        impl<'de> serde::de::Visitor<'de> for GlyphsVisitor {
+            type Value = Glyphs;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a sequence of glyphs")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Glyphs, A::Error> {
+                let mut milli = Vec::new();
+                while let Some(glyph) = seq.next_element::<PlacedGlyph>()? {
+                    if let Some(compact) = MilliGlyph::new(&glyph) {
+                        milli.push(compact);
+                        continue;
+                    }
+                    let mut full: Vec<PlacedGlyph> =
+                        milli.iter().map(|glyph| glyph.glyph()).collect();
+                    full.push(glyph);
+                    while let Some(glyph) = seq.next_element()? {
+                        full.push(glyph);
+                    }
+                    full.shrink_to_fit();
+                    return Ok(Glyphs::Full(full));
+                }
+                Ok(Glyphs::Milli(milli.into_boxed_slice()))
+            }
+        }
+        deserializer.deserialize_seq(GlyphsVisitor)
     }
 }
 
@@ -6531,15 +6561,14 @@ fn build_display_list_selected(
         &input.comment_threads,
     );
     for page in &mut display_list.pages {
-        page.compact();
+        page.compact_glyphs();
     }
     display_list
 }
 
 impl DisplayPage {
-    /// A resident list keeps every page, so a built or parsed page holds no
-    /// spare capacity and its glyphs take their compact form.
-    pub fn compact(&mut self) {
+    /// The body's, note areas' and header's and footer's primitive lists.
+    fn primitive_lists(&mut self) -> impl Iterator<Item = &mut Vec<Primitive>> {
         let notes = self
             .note_areas
             .iter_mut()
@@ -6548,17 +6577,27 @@ impl DisplayPage {
             .into_iter()
             .flatten()
             .map(|region| &mut region.primitives);
-        for primitives in std::iter::once(&mut self.primitives)
+        std::iter::once(&mut self.primitives)
             .chain(notes)
             .chain(regions)
-        {
-            primitives.shrink_to_fit();
-            for primitive in primitives.iter_mut() {
-                if let Primitive::GlyphRun(run) = primitive {
-                    run.glyphs.compact();
-                }
+    }
+
+    /// Glyph runs take their compact form; a resident list keeps every page.
+    pub fn compact_glyphs(&mut self) {
+        for primitive in self.primitive_lists().flatten() {
+            if let Primitive::GlyphRun(run) = primitive {
+                run.glyphs.compact();
             }
         }
+    }
+
+    /// A page parsed into the page's store: compact glyphs and no spare
+    /// capacity, which a parsed list holds and a built one barely does.
+    pub fn compact(&mut self) {
+        for primitives in self.primitive_lists() {
+            primitives.shrink_to_fit();
+        }
+        self.compact_glyphs();
     }
 }
 
