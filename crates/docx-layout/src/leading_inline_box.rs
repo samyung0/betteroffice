@@ -106,27 +106,36 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
                 paragraph.runs.len(),
             );
         }
+        // Slices keep their visual orders where the box's slice drops out.
+        line.materialize_bidi_slices();
         if let Some(advances) = &mut line.run_advances {
-            advances.retain_mut(|advance| {
-                advance.run_index = advance.run_index.and_then(|index| index.checked_sub(1));
-                advance.run_index.is_some()
+            advances.retain_mut(|advance| match advance.run_index.checked_sub(1) {
+                Some(index) => {
+                    advance.run_index = index;
+                    true
+                }
+                None => false,
             });
         }
         if let Some(clusters) = &mut line.cluster_advances {
-            clusters.retain_mut(|cluster| {
-                cluster.run_index = cluster.run_index.and_then(|index| index.checked_sub(1));
-                if has_box && !is_rtl {
-                    cluster.x_offset = cluster
-                        .x_offset
-                        .map(|offset| (offset - size.width).max(0.0));
+            clusters.retain_mut(|cluster| match cluster.run_index.checked_sub(1) {
+                Some(index) => {
+                    cluster.run_index = index;
+                    if has_box && !is_rtl {
+                        cluster.x_offset = (cluster.x_offset - size.width).max(0.0);
+                    }
+                    true
                 }
-                cluster.run_index.is_some()
+                None => false,
             });
         }
         if let Some(slices) = &mut line.bidi_slices {
-            slices.retain_mut(|slice| {
-                slice.run_index = slice.run_index.and_then(|index| index.checked_sub(1));
-                slice.run_index.is_some()
+            slices.retain_mut(|slice| match slice.run_index.checked_sub(1) {
+                Some(index) => {
+                    slice.run_index = index;
+                    true
+                }
+                None => false,
             });
         }
     }

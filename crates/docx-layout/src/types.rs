@@ -1900,64 +1900,63 @@ pub struct TypesetRowSegment {
     pub width: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// The per-character records below keep the measure's own integer types (the
+// measured arena holds one per character, Q846); every field is required.
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRunAdvance {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logical_order: Option<u64>,
+    pub run_index: u32,
+    pub start_char: u32,
+    pub end_char: u32,
+    pub advance: f64,
+    pub logical_order: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetClusterAdvance {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub x_offset: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bidi_level: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logical_order: Option<u64>,
+    pub run_index: u32,
+    pub start_char: u32,
+    pub end_char: u32,
+    pub advance: f64,
+    pub x_offset: f64,
+    pub bidi_level: u8,
+    pub logical_order: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetBidiSlice {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_index: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub start_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub end_char: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bidi_level: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub visual_order: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub logical_order: Option<u64>,
+    pub run_index: u32,
+    pub start_char: u32,
+    pub end_char: u32,
+    pub advance: f64,
+    pub bidi_level: u8,
+    pub visual_order: u32,
+    pub logical_order: u32,
+}
+
+impl TypesetBidiSlice {
+    /// The slice a line made only of shaped clusters has at visual `index`.
+    fn from_cluster(index: usize, cluster: &TypesetClusterAdvance) -> Self {
+        Self {
+            run_index: cluster.run_index,
+            start_char: cluster.start_char,
+            end_char: cluster.end_char,
+            advance: cluster.advance,
+            bidi_level: cluster.bidi_level,
+            visual_order: index as u32,
+            logical_order: cluster.logical_order,
+        }
+    }
 }
 
 /// One measured line. `head_*` / `tail_*` bound the line's run and character
 /// range, `float_skip_before` is vertical room the line had to skip past a
 /// float, and `left_offset` / `right_offset` are the exclusions measurement
 /// already applied.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypesetRow {
     pub head_run: usize,
@@ -1987,6 +1986,146 @@ pub struct TypesetRow {
     pub cluster_advances: Option<Vec<TypesetClusterAdvance>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bidi_slices: Option<Vec<TypesetBidiSlice>>,
+    /// The line's bidi slices are its clusters in their own order (every
+    /// contribution is a shaped cluster), so `bidi_slices` is left `None` and
+    /// serialization writes them from `cluster_advances`.
+    #[serde(skip)]
+    pub bidi_from_clusters: bool,
+}
+
+impl TypesetRow {
+    /// Stores the slices [`Self::bidi_from_clusters`] stands for.
+    pub fn materialize_bidi_slices(&mut self) {
+        if std::mem::take(&mut self.bidi_from_clusters) {
+            self.bidi_slices = self.cluster_advances.as_ref().map(|clusters| {
+                clusters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, cluster)| TypesetBidiSlice::from_cluster(index, cluster))
+                    .collect()
+            });
+        }
+    }
+
+    /// How many bidi slices the line has, stored or written from its clusters.
+    fn slice_count(&self) -> Option<usize> {
+        match &self.bidi_slices {
+            Some(slices) => Some(slices.len()),
+            None if self.bidi_from_clusters => self.cluster_advances.as_ref().map(Vec::len),
+            None => None,
+        }
+    }
+
+    fn slice(&self, index: usize) -> TypesetBidiSlice {
+        match &self.bidi_slices {
+            Some(slices) => slices[index],
+            None => {
+                let clusters = self.cluster_advances.as_deref().unwrap_or_default();
+                TypesetBidiSlice::from_cluster(index, &clusters[index])
+            }
+        }
+    }
+}
+
+// Two rows are equal whichever way they hold their slices.
+impl PartialEq for TypesetRow {
+    fn eq(&self, other: &Self) -> bool {
+        let count = self.slice_count();
+        self.head_run == other.head_run
+            && self.head_char == other.head_char
+            && self.tail_run == other.tail_run
+            && self.tail_char == other.tail_char
+            && self.width == other.width
+            && self.ascent == other.ascent
+            && self.descent == other.descent
+            && self.line_height == other.line_height
+            && self.synthetic_fallback == other.synthetic_fallback
+            && self.left_offset == other.left_offset
+            && self.right_offset == other.right_offset
+            && self.segments == other.segments
+            && self.float_skip_before == other.float_skip_before
+            && self.marker_tab_offset == other.marker_tab_offset
+            && self.run_advances == other.run_advances
+            && self.cluster_advances == other.cluster_advances
+            && count == other.slice_count()
+            && (0..count.unwrap_or(0)).all(|index| self.slice(index) == other.slice(index))
+    }
+}
+
+/// Bidi slices written from a line's clusters, see [`TypesetRow::bidi_from_clusters`].
+struct SlicesFromClusters<'a>(&'a [TypesetClusterAdvance]);
+
+impl Serialize for SlicesFromClusters<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(
+            self.0
+                .iter()
+                .enumerate()
+                .map(|(index, cluster)| TypesetBidiSlice::from_cluster(index, cluster)),
+        )
+    }
+}
+
+// Written by hand only for the derived slices; the fields, their order and
+// what is skipped are what `#[derive(Serialize)]` with camelCase wrote.
+impl Serialize for TypesetRow {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        fn optional<S: SerializeStruct, T: Serialize>(
+            row: &mut S,
+            key: &'static str,
+            value: Option<&T>,
+        ) -> Result<(), S::Error> {
+            match value {
+                Some(value) => row.serialize_field(key, value),
+                None => row.skip_field(key),
+            }
+        }
+        let derived = self
+            .cluster_advances
+            .as_deref()
+            .filter(|_| self.bidi_from_clusters && self.bidi_slices.is_none())
+            .map(SlicesFromClusters);
+        let present = [
+            self.synthetic_fallback.is_some(),
+            self.left_offset.is_some(),
+            self.right_offset.is_some(),
+            self.segments.is_some(),
+            self.float_skip_before.is_some(),
+            self.marker_tab_offset.is_some(),
+            self.run_advances.is_some(),
+            self.cluster_advances.is_some(),
+            self.bidi_slices.is_some() || derived.is_some(),
+        ];
+        let len = 8 + present.iter().filter(|present| **present).count();
+        let mut row = serializer.serialize_struct("TypesetRow", len)?;
+        row.serialize_field("headRun", &self.head_run)?;
+        row.serialize_field("headChar", &self.head_char)?;
+        row.serialize_field("tailRun", &self.tail_run)?;
+        row.serialize_field("tailChar", &self.tail_char)?;
+        row.serialize_field("width", &self.width)?;
+        row.serialize_field("ascent", &self.ascent)?;
+        row.serialize_field("descent", &self.descent)?;
+        row.serialize_field("lineHeight", &self.line_height)?;
+        optional(
+            &mut row,
+            "syntheticFallback",
+            self.synthetic_fallback.as_ref(),
+        )?;
+        optional(&mut row, "leftOffset", self.left_offset.as_ref())?;
+        optional(&mut row, "rightOffset", self.right_offset.as_ref())?;
+        optional(&mut row, "segments", self.segments.as_ref())?;
+        optional(&mut row, "floatSkipBefore", self.float_skip_before.as_ref())?;
+        optional(&mut row, "markerTabOffset", self.marker_tab_offset.as_ref())?;
+        optional(&mut row, "runAdvances", self.run_advances.as_ref())?;
+        optional(&mut row, "clusterAdvances", self.cluster_advances.as_ref())?;
+        match (&self.bidi_slices, &derived) {
+            (Some(slices), _) => row.serialize_field("bidiSlices", slices)?,
+            (None, Some(derived)) => row.serialize_field("bidiSlices", derived)?,
+            (None, None) => row.skip_field("bidiSlices")?,
+        }
+        row.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
