@@ -63,6 +63,20 @@ test("opening a 6,000-paragraph DOCX grows the editing engine's memory a few tim
   session.destroy();
 });
 
+// Q846: a single large request (a 52 MB buffer) grows memory once for itself,
+// then by one step of at most 8 MiB. On each module while its memory is small
+// (the editing engine's is not, after the open above); the block stays
+// allocated, so the next test's blocks still need memory of their own.
+for (const path of MODULES.slice(1))
+  test(`${path.split("/").at(-1)}: one 52 MB allocation grows memory once, plus one step of at most 8 MiB`, async () => {
+    const wasm = await rawExports(path);
+    const grows = wasm.betteroffice_memory_grows();
+    const before = wasm.memory.buffer.byteLength;
+    wasm.__wbindgen_malloc(52 << 20, 8);
+    expect(wasm.betteroffice_memory_grows() - grows).toBeLessThanOrEqual(2);
+    expect(wasm.memory.buffer.byteLength - before).toBeLessThanOrEqual((52 + 8 + 1) << 20);
+  });
+
 // The editing engine's memory is already large from the open above.
 for (const path of MODULES.slice(1))
   test(`${path.split("/").at(-1)}: 64 MiB in 16 KiB allocations grows memory a few times, at most a step past it`, async () => {
@@ -79,3 +93,4 @@ for (const path of MODULES.slice(1))
     expect(wasm.betteroffice_memory_grows() - grows).toBeLessThanOrEqual(24);
     for (const block of blocks) wasm.__wbindgen_free(block, size, 8);
   });
+
