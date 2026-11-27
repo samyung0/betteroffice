@@ -106,8 +106,16 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
                 paragraph.runs.len(),
             );
         }
-        // Slices keep their visual orders where the box's slice drops out.
-        line.materialize_bidi_slices();
+        // Where the box's cluster drops out, the remaining slices keep their
+        // visual orders, so a line holding its slices as its clusters stores them.
+        if line
+            .cluster_advances
+            .iter()
+            .flatten()
+            .any(|cluster| cluster.run_index == 0)
+        {
+            line.materialize_bidi_slices();
+        }
         if let Some(advances) = &mut line.run_advances {
             advances.retain_mut(|advance| match advance.run_index.checked_sub(1) {
                 Some(index) => {
@@ -138,5 +146,83 @@ pub(crate) fn restore_extent(paragraph: &ParagraphBlock, extent: &mut ParagraphE
                 None => false,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        BlockId, ParagraphAttrs, RunFormatting, TextRun, TypesetClusterAdvance, TypesetRow,
+    };
+
+    /// A line holding its slices as its clusters writes, once the box's
+    /// cluster drops out, what the same line with stored slices writes; a line
+    /// without the box keeps its compact form.
+    #[test]
+    fn the_picture_bullet_keeps_the_visual_orders_of_a_compact_line() {
+        let paragraph = ParagraphBlock {
+            sdt_groups: None,
+            id: BlockId::Num(0.0),
+            para_id: None,
+            runs: vec![Run::Text(TextRun {
+                fmt: RunFormatting::default(),
+                text: "abcd".to_owned(),
+                pm_start: None,
+                pm_end: None,
+                inline_sdt_widget: None,
+            })],
+            attrs: Some(ParagraphAttrs {
+                leading_inline_box: Some(LeadingInlineBox {
+                    width: 12.0,
+                    height: 10.0,
+                }),
+                ..Default::default()
+            }),
+            pm_start: None,
+            pm_end: None,
+        };
+        let cluster = |run_index, start_char, x_offset| TypesetClusterAdvance {
+            run_index,
+            start_char,
+            end_char: start_char + 1,
+            advance: 6.0,
+            x_offset,
+            bidi_level: 0,
+            logical_order: start_char,
+        };
+        let line = |head_run, clusters| TypesetRow {
+            head_run,
+            tail_run: 1,
+            tail_char: 4,
+            width: 24.0,
+            ascent: 8.0,
+            descent: 2.0,
+            line_height: 10.0,
+            cluster_advances: Some(clusters),
+            bidi_from_clusters: true,
+            ..Default::default()
+        };
+        let mut compact = ParagraphExtent {
+            lines: vec![
+                line(
+                    0,
+                    vec![cluster(0, 0, 0.0), cluster(1, 0, 12.0), cluster(1, 1, 18.0)],
+                ),
+                line(1, vec![cluster(1, 2, 0.0), cluster(1, 3, 6.0)]),
+            ],
+            total_height: 20.0,
+        };
+        let mut stored = compact.clone();
+        for line in &mut stored.lines {
+            line.materialize_bidi_slices();
+        }
+        restore_extent(&paragraph, &mut compact);
+        restore_extent(&paragraph, &mut stored);
+        assert_eq!(
+            serde_json::to_value(&compact).unwrap(),
+            serde_json::to_value(&stored).unwrap()
+        );
+        assert!(compact.lines[1].bidi_from_clusters);
     }
 }

@@ -1046,8 +1046,9 @@ mod parity_tests {
         assert_eq!(std::mem::size_of::<TypesetRunAdvance>(), 24);
     }
 
-    /// Text lines, left to right or not, store no bidi slices yet write the
-    /// ones the measure made; a line with a tab keeps its own.
+    /// Text lines, left to right or not (a mixed line and a whole right-to-left
+    /// paragraph), store no bidi slices yet write the ones the measure made; a
+    /// line with a tab keeps its own.
     #[test]
     fn text_lines_write_their_bidi_slices_from_their_clusters() {
         let fixture = fixture();
@@ -1062,26 +1063,40 @@ mod parity_tests {
             ptab: None,
         });
         let rtl_text = Run::Text(TextRun {
-            fmt: rtl,
+            fmt: rtl.clone(),
             text: "שלום עולם mixed".to_owned(),
             pm_start: None,
             pm_end: None,
             inline_sdt_widget: None,
         });
-        for (name, runs, compact) in [
+        let rtl_paragraph = Run::Text(TextRun {
+            fmt: rtl.clone(),
+            text: "שלום עולם וברוכים הבאים לכל החברים שלנו".to_owned(),
+            pm_start: None,
+            pm_end: None,
+            inline_sdt_widget: None,
+        });
+        let bidi = crate::types::ParagraphAttrs {
+            bidi: Some(true),
+            ..Default::default()
+        };
+        for (name, runs, attrs, compact) in [
             (
                 "ltr",
                 vec![text_run("The quick brown fox jumps over the lazy dog")],
+                None,
                 true,
             ),
-            ("bidi", vec![text_run("start "), rtl_text], true),
+            ("bidi", vec![text_run("start "), rtl_text], None, true),
+            ("rtl paragraph", vec![rtl_paragraph], Some(bidi), true),
             (
                 "tab",
                 vec![text_run("before"), tab, text_run("after")],
+                None,
                 false,
             ),
         ] {
-            let block = paragraph(runs, None);
+            let block = paragraph(runs, attrs);
             let typed = measure_paragraph(&block, 200.0, &fixture.config, None, 0.0).unwrap();
             let legacy = legacy_measure(&block, 200.0, &fixture.config, None, 0.0).unwrap();
             assert_eq!(
