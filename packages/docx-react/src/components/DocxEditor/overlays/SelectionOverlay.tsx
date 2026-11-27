@@ -9,7 +9,7 @@
  * renders selection rectangles in container-relative coordinates.
  */
 
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef } from 'react';
 import type { SelectionRect, CaretPosition } from '@betteroffice/docx/layout';
 
 // =============================================================================
@@ -108,6 +108,14 @@ const Caret: React.FC<{
   isFocused: boolean;
 }> = ({ position, color, halo, width, blinkInterval, isFocused }) => {
   const [visible, setVisible] = useState(isFocused);
+  // The rendered visibility, for the position effect to skip a no-op show: React
+  // queues one at the Default lane without a render, the next key's urgent render
+  // skips it and leaves Default work pending, and the nested-update count climbs
+  // with each key until #185.
+  const visibleRef = useRef(visible);
+  useLayoutEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
   const blinkTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -139,7 +147,7 @@ const Caret: React.FC<{
   useEffect(() => {
     if (!isFocused) return;
 
-    setVisible(true);
+    if (!visibleRef.current) setVisible(true);
 
     // Restart blink timer from this moment
     if (blinkTimerRef.current) {
