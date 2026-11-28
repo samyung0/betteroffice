@@ -922,6 +922,60 @@ fn glyph_runs(dl: &DisplayList) -> Vec<&GlyphRunPrimitive> {
         .collect()
 }
 
+/// A built page keeps its glyphs as thousandths in 28 bytes, reading back the
+/// exact records; a glyph off that grid keeps the run in full records; parsed
+/// glyphs compact the same way (Q846).
+#[test]
+fn built_and_parsed_glyphs_keep_their_compact_exact_form() {
+    use docx_layout::display_list::{Glyphs, MilliGlyph, PlacedGlyph};
+    assert_eq!(std::mem::size_of::<MilliGlyph>(), 28);
+    let store = store_with_liberation();
+    let input = build_input(
+        "Compact glyphs read back",
+        400.0,
+        Some("both"),
+        true,
+        Some(&[0]),
+    );
+    let list =
+        docx_layout::display_list::build_display_list_value_with_fonts(&input, &store).unwrap();
+    let runs = glyph_runs(&list);
+    assert!(!runs.is_empty());
+    for run in &runs {
+        assert!(matches!(run.glyphs, Glyphs::Milli(_)));
+        let mut full = run.glyphs.clone();
+        full.to_mut();
+        assert!(matches!(full, Glyphs::Full(_)));
+        assert_eq!(full, run.glyphs);
+        let json = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::to_string(&run.glyphs).unwrap(), json);
+        let parsed: Glyphs = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Glyphs::Milli(_)));
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+    let glyph = runs[0].glyphs.first().unwrap();
+    for off_grid in [
+        PlacedGlyph {
+            x: 0.1 + 0.2,
+            ..glyph.clone()
+        },
+        PlacedGlyph {
+            y: -0.0,
+            ..glyph.clone()
+        },
+        PlacedGlyph {
+            logical_order: Some(u64::MAX),
+            ..glyph.clone()
+        },
+    ] {
+        let mut glyphs = Glyphs::from(vec![glyph.clone(), off_grid.clone()]);
+        glyphs.compact();
+        assert!(matches!(glyphs, Glyphs::Full(_)));
+        assert_eq!(glyphs.get(1).unwrap().x.to_bits(), off_grid.x.to_bits());
+        assert_eq!(glyphs.get(1).unwrap().y.to_bits(), off_grid.y.to_bits());
+    }
+}
+
 fn max_glyph_x(g: &GlyphRunPrimitive) -> f64 {
     g.glyphs.iter().map(|gl| gl.x).fold(f64::MIN, f64::max)
 }
@@ -974,7 +1028,7 @@ fn nonbreaking_hyphen_paints_a_covered_glyph_with_original_clusters() {
         hyphen.id,
         u32::from(store.glyph_id(font, '\u{2010}').unwrap().unwrap())
     );
-    assert_eq!(run.glyphs[3].cluster, 5);
+    assert_eq!(run.glyphs.to_vec()[3].cluster, 5);
     let rects = range_rects(&list, 3, 4);
     assert_eq!(rects.len(), 1);
     assert!((rects[0].width - hyphen.advance).abs() < 0.01);
@@ -1006,7 +1060,7 @@ fn emits_glyph_runs_when_fonts_resolve() {
     assert!(!g.glyphs.is_empty(), "non-empty glyphs");
 
     // LTR glyph pen origins strictly increase
-    for w in g.glyphs.windows(2) {
+    for w in g.glyphs.to_vec().windows(2) {
         assert!(w[1].x > w[0].x, "glyph x must increase: {:?}", g.glyphs);
     }
     // clusters are byte indices into the run text
@@ -1190,10 +1244,14 @@ fn splits_a_run_across_fallback_fonts() {
 
     // the pen keeps flowing across subranges (each cluster is byte 0 of its own
     // single-char text, so positions come from the accumulated advance)
-    assert!(runs[1].glyphs[0].x > runs[0].glyphs[0].x);
-    assert!(runs[2].glyphs[0].x > runs[1].glyphs[0].x);
+    assert!(runs[1].glyphs.to_vec()[0].x > runs[0].glyphs.to_vec()[0].x);
+    assert!(runs[2].glyphs.to_vec()[0].x > runs[1].glyphs.to_vec()[0].x);
     for g in &runs {
-        assert_eq!(g.glyphs[0].cluster, 0, "single-char subrange cluster is 0");
+        assert_eq!(
+            g.glyphs.to_vec()[0].cluster,
+            0,
+            "single-char subrange cluster is 0"
+        );
     }
 }
 
@@ -1256,10 +1314,10 @@ fn hit_test_and_range_rects_resolve_over_glyph_runs() {
     let dl: DisplayList =
         serde_json::from_str(&build_display_list_json_with_fonts(&input, &store).unwrap()).unwrap();
     let g = glyph_runs(&dl)[0];
-    let baseline = g.glyphs[0].y;
+    let baseline = g.glyphs.to_vec()[0].y;
 
     // click near the run's left edge lands at/near doc_start
-    let left_pos = hit_test(&dl, 0, g.glyphs[0].x + 1.0, baseline).expect("left hit");
+    let left_pos = hit_test(&dl, 0, g.glyphs.to_vec()[0].x + 1.0, baseline).expect("left hit");
     assert!(
         (1..=12).contains(&left_pos),
         "left pos {left_pos} inside the run span"
@@ -1278,10 +1336,10 @@ fn hit_test_and_range_rects_resolve_over_glyph_runs() {
     let r = &rects[0];
     assert!(r.width > 0.0, "range rect has width");
     assert!(
-        (r.x - g.glyphs[0].x).abs() < 2.0,
+        (r.x - g.glyphs.to_vec()[0].x).abs() < 2.0,
         "range rect starts at the run's left edge: {} vs {}",
         r.x,
-        g.glyphs[0].x
+        g.glyphs.to_vec()[0].x
     );
 }
 
@@ -1379,7 +1437,7 @@ fn assert_tracking_glyphs(store: &FontStore, list: &DisplayList, spacing: f64) {
         bounds.sort_unstable();
         bounds.dedup();
         bounds.push(run.text.len());
-        let mut pen = run.glyphs[0].x - f64::from(shaped[0].x_offset);
+        let mut pen = run.glyphs.to_vec()[0].x - f64::from(shaped[0].x_offset);
         for (index, (placed, raw)) in run.glyphs.iter().zip(&shaped).enumerate() {
             let mut advance = f64::from(raw.x_advance);
             if shaped
@@ -1599,10 +1657,10 @@ fn glyph_run_trailing_spacing_separates_adjacent_runs_and_tabs() {
         assert_eq!(runs.len(), 2);
         assert_tracking_glyphs(&store, &list, spacing);
         if tab {
-            assert!((runs[1].glyphs[0].x - FRAG_X - 48.0).abs() < 0.001);
+            assert!((runs[1].glyphs.to_vec()[0].x - FRAG_X - 48.0).abs() < 0.001);
         } else {
             let last = runs[0].glyphs.last().unwrap();
-            assert!((last.x + last.advance - runs[1].glyphs[0].x).abs() < 0.001);
+            assert!((last.x + last.advance - runs[1].glyphs.to_vec()[0].x).abs() < 0.001);
             assert_tracking_width(&input, &list);
         }
     }
@@ -1633,7 +1691,7 @@ fn spaced_run_carets_hits_and_selection_follow_painted_glyphs() {
                 }
             }
             assert_eq!(origins.len(), 6);
-            let baseline = runs[0].glyphs[0].y;
+            let baseline = runs[0].glyphs.to_vec()[0].y;
             for position in 1..=5 {
                 let x = origins[&position];
                 let caret = caret_rect(&list, position).unwrap();
@@ -1681,7 +1739,7 @@ fn glyph_run_extent_uses_real_trailing_advance() {
 
     // every glyph carries a positive pen advance, and `x + advance` chains to the
     // next glyph's origin (the pen flows continuously across the run)
-    for w in g.glyphs.windows(2) {
+    for w in g.glyphs.to_vec().windows(2) {
         assert!(w[0].advance > 0.0, "glyph advance is positive: {:?}", w[0]);
         assert!(
             (w[0].x + w[0].advance - w[1].x).abs() < 0.01,
@@ -1839,7 +1897,7 @@ fn painted_pen_honors_the_kerning_threshold() {
         let json =
             build_display_list_json_with_fonts(&input, &store_with_liberation()).expect("builds");
         let dl: DisplayList = serde_json::from_str(&json).unwrap();
-        let glyphs = &glyph_runs(&dl)[0].glyphs;
+        let glyphs = glyph_runs(&dl)[0].glyphs.to_vec();
         glyphs[1].x - glyphs[0].x
     }
 

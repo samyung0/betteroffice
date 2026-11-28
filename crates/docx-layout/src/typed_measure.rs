@@ -412,6 +412,7 @@ fn extent_from_out(extent: ooxml_text::ParagraphExtentOut) -> crate::types::Para
 }
 
 fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
+    let bidi_from_clusters = slices_follow_clusters(&row);
     TypesetRow {
         head_run: row.head_run as usize,
         head_char: row.head_char as usize,
@@ -444,11 +445,11 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
             advances
                 .into_iter()
                 .map(|advance| TypesetRunAdvance {
-                    run_index: Some(u64::from(advance.run_index)),
-                    start_char: Some(u64::from(advance.start_char)),
-                    end_char: Some(u64::from(advance.end_char)),
-                    advance: Some(normalize_output(advance.advance)),
-                    logical_order: Some(u64::from(advance.logical_order)),
+                    run_index: advance.run_index,
+                    start_char: advance.start_char,
+                    end_char: advance.end_char,
+                    advance: normalize_output(advance.advance),
+                    logical_order: advance.logical_order,
                 })
                 .collect()
         }),
@@ -456,31 +457,57 @@ fn row_from_out(row: ooxml_text::TypesetRowOut) -> TypesetRow {
             clusters
                 .into_iter()
                 .map(|cluster| TypesetClusterAdvance {
-                    run_index: Some(u64::from(cluster.run_index)),
-                    start_char: Some(u64::from(cluster.start_char)),
-                    end_char: Some(u64::from(cluster.end_char)),
-                    advance: Some(normalize_output(cluster.advance)),
-                    x_offset: Some(normalize_output(cluster.x_offset)),
-                    bidi_level: Some(cluster.bidi_level),
-                    logical_order: Some(u64::from(cluster.logical_order)),
+                    run_index: cluster.run_index,
+                    start_char: cluster.start_char,
+                    end_char: cluster.end_char,
+                    advance: normalize_output(cluster.advance),
+                    x_offset: normalize_output(cluster.x_offset),
+                    bidi_level: cluster.bidi_level,
+                    logical_order: cluster.logical_order,
                 })
                 .collect()
         }),
-        bidi_slices: row.bidi_slices.map(|slices| {
-            slices
-                .into_iter()
-                .map(|slice| TypesetBidiSlice {
-                    run_index: Some(u64::from(slice.run_index)),
-                    start_char: Some(u64::from(slice.start_char)),
-                    end_char: Some(u64::from(slice.end_char)),
-                    advance: Some(normalize_output(slice.advance)),
-                    bidi_level: Some(slice.bidi_level),
-                    visual_order: Some(u64::from(slice.visual_order)),
-                    logical_order: Some(u64::from(slice.logical_order)),
-                })
-                .collect()
-        }),
+        bidi_slices: row
+            .bidi_slices
+            .filter(|_| !bidi_from_clusters)
+            .map(|slices| {
+                slices
+                    .into_iter()
+                    .map(|slice| TypesetBidiSlice {
+                        run_index: slice.run_index,
+                        start_char: slice.start_char,
+                        end_char: slice.end_char,
+                        advance: normalize_output(slice.advance),
+                        bidi_level: slice.bidi_level,
+                        visual_order: slice.visual_order,
+                        logical_order: slice.logical_order,
+                    })
+                    .collect()
+            }),
+        bidi_from_clusters,
     }
+}
+
+/// Whether a line's bidi slices are exactly its clusters in order, so they
+/// need not be stored (a line holding only shaped text, in either direction).
+fn slices_follow_clusters(row: &ooxml_text::TypesetRowOut) -> bool {
+    let (Some(clusters), Some(slices)) = (&row.cluster_advances, &row.bidi_slices) else {
+        return false;
+    };
+    clusters.len() == slices.len()
+        && clusters
+            .iter()
+            .zip(slices)
+            .enumerate()
+            .all(|(index, (cluster, slice))| {
+                slice.run_index == cluster.run_index
+                    && slice.start_char == cluster.start_char
+                    && slice.end_char == cluster.end_char
+                    && slice.advance.to_bits() == cluster.advance.to_bits()
+                    && slice.bidi_level == cluster.bidi_level
+                    && slice.visual_order as usize == index
+                    && slice.logical_order == cluster.logical_order
+            })
 }
 
 #[cfg(test)]
@@ -1009,6 +1036,88 @@ mod parity_tests {
             None,
             0.0,
         );
+    }
+
+    #[test]
+    fn measured_advances_take_their_compact_sizes() {
+        use crate::types::{TypesetBidiSlice, TypesetClusterAdvance, TypesetRunAdvance};
+        assert_eq!(std::mem::size_of::<TypesetClusterAdvance>(), 40);
+        assert_eq!(std::mem::size_of::<TypesetBidiSlice>(), 32);
+        assert_eq!(std::mem::size_of::<TypesetRunAdvance>(), 24);
+    }
+
+    /// Text lines, left to right or not (a mixed line and a whole right-to-left
+    /// paragraph), store no bidi slices yet write the ones the measure made; a
+    /// line with a tab keeps its own.
+    #[test]
+    fn text_lines_write_their_bidi_slices_from_their_clusters() {
+        let fixture = fixture();
+        let mut rtl = RunFormatting::default();
+        rtl.rtl = Some(true);
+        let tab = Run::Tab(TabRun {
+            fmt: RunFormatting::default(),
+            pm_start: None,
+            pm_end: None,
+            width: None,
+            leader_glyphs: None,
+            ptab: None,
+        });
+        let rtl_text = Run::Text(TextRun {
+            fmt: rtl.clone(),
+            text: "שלום עולם mixed".to_owned(),
+            pm_start: None,
+            pm_end: None,
+            inline_sdt_widget: None,
+        });
+        let rtl_paragraph = Run::Text(TextRun {
+            fmt: rtl.clone(),
+            text: "שלום עולם וברוכים הבאים לכל החברים שלנו".to_owned(),
+            pm_start: None,
+            pm_end: None,
+            inline_sdt_widget: None,
+        });
+        let bidi = crate::types::ParagraphAttrs {
+            bidi: Some(true),
+            ..Default::default()
+        };
+        for (name, runs, attrs, compact) in [
+            (
+                "ltr",
+                vec![text_run("The quick brown fox jumps over the lazy dog")],
+                None,
+                true,
+            ),
+            ("bidi", vec![text_run("start "), rtl_text], None, true),
+            ("rtl paragraph", vec![rtl_paragraph], Some(bidi), true),
+            (
+                "tab",
+                vec![text_run("before"), tab, text_run("after")],
+                None,
+                false,
+            ),
+        ] {
+            let block = paragraph(runs, attrs);
+            let typed = measure_paragraph(&block, 200.0, &fixture.config, None, 0.0).unwrap();
+            let legacy = legacy_measure(&block, 200.0, &fixture.config, None, 0.0).unwrap();
+            assert_eq!(
+                serde_json::to_string(&typed).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "{name}"
+            );
+            assert_eq!(typed, legacy, "{name}");
+            for line in &typed.lines {
+                assert_eq!(line.bidi_from_clusters, compact, "{name}");
+                assert_eq!(line.bidi_slices.is_none(), compact, "{name}");
+                let mut stored = line.clone();
+                stored.materialize_bidi_slices();
+                assert!(stored.bidi_slices.is_some(), "{name}");
+                assert_eq!(
+                    serde_json::to_value(line).unwrap(),
+                    serde_json::to_value(&stored).unwrap(),
+                    "{name}"
+                );
+            }
+        }
     }
 
     #[test]

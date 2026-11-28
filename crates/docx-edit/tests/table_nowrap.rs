@@ -116,10 +116,8 @@ fn retained_editor_paths_wrap_constrained_auto_nowrap_council_cells() {
                             .as_ref()
                             .unwrap()
                             .iter()
-                            .filter(|cluster| {
-                                cluster.start_char.unwrap() as usize >= trailing_start
-                            })
-                            .map(|cluster| cluster.advance.unwrap())
+                            .filter(|cluster| cluster.start_char as usize >= trailing_start)
+                            .map(|cluster| cluster.advance)
                             .sum();
                         let visible_width = line.width - trailing_width;
                         assert!(

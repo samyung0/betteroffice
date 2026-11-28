@@ -1,16 +1,19 @@
 //! Global allocator for the WASM modules: dlmalloc, growing linear memory in
-//! steps of up to 64 MiB instead of the 64 KiB each request needs. Every grow
+//! steps of up to 8 MiB instead of the 64 KiB each request needs. Every grow
 //! costs the browser time that rises with memory size; thousands of them made
-//! large opens slow (a 248-page DOCX view spent 102 s of 121 s growing).
+//! large opens slow (a 248-page DOCX view spent 102 s of 121 s growing). A step
+//! is never freed, so larger steps kept tens of MB unused (64 MiB steps: 77 MB
+//! more at 248 pages in DOCX Edit, Q846); 8 MiB steps grow a module to 512 MiB
+//! in about 0.1 s.
 //! Linked with `use wasm_alloc as _;`.
 
 /// Bytes one step reserves once memory is `pages` 64 KiB pages: as much as
-/// memory, at most 64 MiB. Counted in pages, since `pages * 64 KiB` overflows
+/// memory, at most 8 MiB. Counted in pages, since `pages * 64 KiB` overflows
 /// 32 bits at the 4 GiB limit (65,536 pages).
 #[cfg(any(target_arch = "wasm32", test))]
 fn step_bytes(pages: u32) -> u32 {
     const PAGE: u32 = 64 << 10;
-    const MAX_STEP: u32 = 64 << 20;
+    const MAX_STEP: u32 = 8 << 20;
     pages.min(MAX_STEP / PAGE) * PAGE
 }
 
@@ -110,11 +113,13 @@ mod tests {
 
     // Security regression WM1: at exactly 4 GiB the step overflowed 32 bits,
     // trapping inside the allocator (debug) or reserving a zero-size layout.
+    // Q846: capped at 8 MiB, since a step's unused part stays reserved.
     #[test]
-    fn a_step_is_memory_size_capped_at_64_mib_up_to_4_gib() {
+    fn a_step_is_memory_size_capped_at_8_mib_up_to_4_gib() {
         assert_eq!(step_bytes(1), 64 << 10);
-        assert_eq!(step_bytes(1024), 64 << 20);
-        assert_eq!(step_bytes(1025), 64 << 20);
-        assert_eq!(step_bytes(65_536), 64 << 20);
+        assert_eq!(step_bytes(128), 8 << 20);
+        assert_eq!(step_bytes(129), 8 << 20);
+        assert_eq!(step_bytes(1024), 8 << 20);
+        assert_eq!(step_bytes(65_536), 8 << 20);
     }
 }

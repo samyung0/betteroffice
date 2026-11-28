@@ -6177,7 +6177,7 @@ mod tests {
                         Some((text.text.clone(), text.baseline_y.as_f64().unwrap()))
                     }
                     crate::display_list::Primitive::GlyphRun(text) => {
-                        Some((text.text.clone(), text.glyphs[0].y))
+                        Some((text.text.clone(), text.glyphs.first().unwrap().y))
                     }
                     _ => None,
                 })
@@ -6192,7 +6192,7 @@ mod tests {
                         Some((text.text.clone(), text.x.as_f64().unwrap()))
                     }
                     crate::display_list::Primitive::GlyphRun(text) => {
-                        Some((text.text.clone(), text.glyphs[0].x))
+                        Some((text.text.clone(), text.glyphs.first().unwrap().x))
                     }
                     _ => None,
                 })
@@ -6227,7 +6227,7 @@ mod tests {
                             (&text.text, text.baseline_y.as_f64().unwrap())
                         }
                         crate::display_list::Primitive::GlyphRun(text) => {
-                            (&text.text, text.glyphs[0].y)
+                            (&text.text, text.glyphs.first().unwrap().y)
                         }
                         _ => continue,
                     };

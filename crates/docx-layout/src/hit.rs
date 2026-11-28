@@ -116,7 +116,7 @@ enum StopsSource<'a> {
     Text(&'a crate::display_list::TextRunPrimitive),
     Glyphs {
         text: &'a str,
-        glyphs: &'a [crate::display_list::PlacedGlyph],
+        glyphs: &'a crate::display_list::Glyphs,
         rtl: bool,
     },
 }
@@ -287,7 +287,7 @@ fn canvas_caret_stops(
 /// clusters land on real boundaries rather than an even split.
 fn glyph_caret_stops(
     text: &str,
-    glyphs: &[crate::display_list::PlacedGlyph],
+    glyphs: &crate::display_list::Glyphs,
     rtl: bool,
     doc_start: i64,
     doc_end: i64,
@@ -1268,12 +1268,12 @@ fn painted_body_hit_at(primitive: &Primitive, x: f64, y: f64) -> bool {
     if let Some(hit) = text_hit(primitive) {
         let (paint_clip, rotation, scale) = match primitive {
             Primitive::Text(text) => (
-                text.paint_clip.as_ref(),
+                text.paint_clip.as_deref(),
                 text.rotation_deg.as_ref(),
                 text.horizontal_scale.as_ref(),
             ),
             Primitive::GlyphRun(run) => (
-                run.paint_clip.as_ref(),
+                run.paint_clip.as_deref(),
                 run.rotation_deg.as_ref(),
                 run.horizontal_scale.as_ref(),
             ),
